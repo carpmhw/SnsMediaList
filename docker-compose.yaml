@@ -1,0 +1,54 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sns-media-list:local
+    init: true
+    restart: unless-stopped
+    command:
+      - uvicorn
+      - sns_media_list.app:create_app
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --workers
+      - "1"
+      - --no-access-log
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1770,uid=10001,gid=10001
+      - /app/.cache:size=32m,mode=1770,uid=10001,gid=10001
+    ports:
+      - "${SNS_MEDIA_HOST_PORT:-8000}:8000"
+    environment:
+      SNS_MEDIA_ENVIRONMENT: production
+      SNS_MEDIA_TOKEN_TTL_SECONDS: "600"
+      SNS_MEDIA_TOKEN_CAPACITY: "200"
+      SNS_MEDIA_EXTRACTION_TIMEOUT_SECONDS: "45"
+      SNS_MEDIA_EXTRACTION_OUTPUT_LIMIT: "2000000"
+      SNS_MEDIA_MAX_DOWNLOAD_BYTES: "500000000"
+      SNS_MEDIA_CONNECT_TIMEOUT_SECONDS: "10"
+      SNS_MEDIA_READ_TIMEOUT_SECONDS: "30"
+      SNS_MEDIA_DOWNLOAD_TIMEOUT_SECONDS: "120"
+      SNS_MEDIA_MAX_REDIRECTS: "3"
+      SNS_MEDIA_MAX_EXTRACTIONS: "1"
+      SNS_MEDIA_MAX_DOWNLOADS: "4"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).read()
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    mem_limit: 768m
+    cpus: 1.0
+    stop_grace_period: 10s
