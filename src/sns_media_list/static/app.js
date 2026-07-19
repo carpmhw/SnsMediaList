@@ -13,12 +13,13 @@ let submittedUrl = '';
 
 const ERROR_MESSAGES = {
   invalid_url: '請輸入 HTTPS Instagram 貼文/Reel 或 X 狀態貼文 URL。',
-  unsupported_url: '僅支援公開 Instagram 貼文/Reel 與 X 狀態貼文 URL。',
-  post_unavailable: '此公開貼文無法使用或讀取失敗。',
+  unsupported_url: '僅支援 Instagram 貼文/Reel 與 X 狀態貼文 URL。',
+  post_unavailable: '此貼文無法使用、已刪除，或目前帳號無法讀取。',
   no_media: '此貼文沒有找到可直接串流的媒體。',
   extraction_limit_exceeded: '此貼文的媒體數量超過服務可列出的上限。',
   local_rate_limited: '服務目前忙碌中，請稍候再試。',
-  upstream_rate_limited: '平台暫時限制匿名存取，請稍後再試。',
+  upstream_rate_limited: '平台暫時限制存取，請稍後再試。',
+  platform_authentication_failed: '平台驗證工作階段無法使用，請聯絡服務管理者。',
   capacity_exceeded: '暫存結果容量已滿，請稍後重新分析。',
   extraction_failed: '目前無法分析此貼文。',
   extraction_timeout: '平台回應時間過長，請稍後再試。',

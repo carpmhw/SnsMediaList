@@ -58,6 +58,46 @@ def test_compose_documents_bounded_runtime_settings() -> None:
         assert setting in compose
 
 
+def test_platform_auth_overrides_mount_independent_read_only_cookie_files() -> None:
+    """Verify each optional platform override exposes only a fixed read-only path."""
+    overrides = {
+        "docker-compose.instagram-auth.yaml": (
+            "SNS_MEDIA_INSTAGRAM_COOKIE_HOST_FILE",
+            "SNS_MEDIA_INSTAGRAM_COOKIE_FILE",
+            "/run/secrets/instagram-cookies.txt",
+        ),
+        "docker-compose.x-auth.yaml": (
+            "SNS_MEDIA_X_COOKIE_HOST_FILE",
+            "SNS_MEDIA_X_COOKIE_FILE",
+            "/run/secrets/x-cookies.txt",
+        ),
+    }
+
+    for filename, required_values in overrides.items():
+        override = (PROJECT_ROOT / filename).read_text()
+        for value in required_values:
+            assert value in override
+        assert "read_only: true" in override
+        assert "session-cookie-value" not in override
+
+
+def test_default_compose_has_no_platform_cookie_values_or_secret_mounts() -> None:
+    """Verify anonymous deployment remains free of credential material and mounts."""
+    compose = (PROJECT_ROOT / "docker-compose.yaml").read_text()
+
+    assert "COOKIE_FILE" not in compose
+    assert "/run/secrets" not in compose
+    assert "session-cookie-value" not in compose
+
+
+def test_stack_cookie_setting_matches_the_mounted_filename() -> None:
+    """Verify the deployment stack uses the dot-separated Instagram cookie filename."""
+    stack = (PROJECT_ROOT / "stack").read_text()
+
+    assert "SNS_MEDIA_INSTAGRAM_COOKIE_FILE: /run/secrets/instagram.cookies.txt" in stack
+    assert "SNS_MEDIA_INSTAGRAM_COOKIE_FILE: /run/secrets/instagram-cookies.txt" not in stack
+
+
 def test_container_smoke_script_checks_runtime_boundaries() -> None:
     """Verify the automated smoke command covers startup and isolation checks."""
     smoke_script = (PROJECT_ROOT / "scripts" / "container_smoke.py").read_text()

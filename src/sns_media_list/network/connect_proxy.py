@@ -30,6 +30,7 @@ class ConnectProxy:
         """Create a proxy with a destination policy and bounded request headers."""
         self.policy = policy
         self.max_header_bytes = max_header_bytes
+        self._client_tasks: set[asyncio.Task[None]] = set()
 
     async def serve(self, host: str, port: int) -> asyncio.AbstractServer:
         """Start the loopback proxy server and return its server handle."""
@@ -41,6 +42,9 @@ class ConnectProxy:
         writer: asyncio.StreamWriter,
     ) -> None:
         """Validate one CONNECT request and relay its encrypted tunnel."""
+        task = asyncio.current_task()
+        if task is not None:
+            self._client_tasks.add(task)
         upstream_writer: asyncio.StreamWriter | None = None
         try:
             request = await reader.readuntil(b"\r\n\r\n")
@@ -58,11 +62,23 @@ class ConnectProxy:
             writer.write(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")
             await writer.drain()
         finally:
-            if upstream_writer is not None:
-                upstream_writer.close()
-                await upstream_writer.wait_closed()
-            writer.close()
-            await writer.wait_closed()
+            try:
+                if upstream_writer is not None:
+                    upstream_writer.close()
+                    await upstream_writer.wait_closed()
+                writer.close()
+                await writer.wait_closed()
+            finally:
+                if task is not None:
+                    self._client_tasks.discard(task)
+
+    async def close_clients(self) -> None:
+        """Cancel and await active CONNECT handlers during proxy shutdown."""
+        tasks = tuple(self._client_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _relay(

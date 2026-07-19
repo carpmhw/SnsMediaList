@@ -1,8 +1,10 @@
 """Application configuration and bounded runtime settings."""
 
+import os
 from functools import lru_cache
+from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,6 +30,28 @@ class Settings(BaseSettings):
     trusted_proxy_cidrs: tuple[str, ...] = ()
     extraction_proxy_host: str = "127.0.0.1"
     extraction_proxy_port: int = Field(default=8765, ge=1, le=65535)
+    instagram_cookie_file: str | None = None
+    x_cookie_file: str | None = None
+
+    @field_validator("instagram_cookie_file", "x_cookie_file")
+    @classmethod
+    def validate_cookie_file(cls, value: str | None) -> str | None:
+        """Validate an optional absolute, readable, non-empty cookie file."""
+        if value is None:
+            return None
+        path = Path(value)
+        try:
+            valid = (
+                path.is_absolute()
+                and path.is_file()
+                and os.access(path, os.R_OK)
+                and path.stat().st_size > 0
+            )
+        except OSError:
+            valid = False
+        if not valid:
+            raise ValueError("cookie file must be an absolute readable non-empty regular file")
+        return value
 
 
 @lru_cache(maxsize=1)

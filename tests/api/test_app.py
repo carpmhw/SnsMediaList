@@ -1,5 +1,6 @@
 """Tests for the FastAPI application shell."""
 
+import pytest
 from fastapi.testclient import TestClient
 
 from sns_media_list.app import create_app
@@ -53,3 +54,22 @@ def test_application_lifecycle_starts_and_closes_extraction_proxy(monkeypatch) -
         assert application.state.extraction_proxy_server is not None
 
     assert calls == [("127.0.0.1", 8765), ("close", 0), ("wait_closed", 0)]
+
+
+def test_valid_cookie_mount_keeps_health_local_and_invalid_mount_fails(tmp_path) -> None:
+    """Verify valid secret mounts start while invalid configured mounts fail safely."""
+    cookie_file = tmp_path / "instagram.cookies.txt"
+    cookie_file.write_text("session-cookie-value", encoding="utf-8")
+
+    settings = Settings(instagram_cookie_file=str(cookie_file))
+    with TestClient(create_app(settings=settings)) as client:
+        response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    invalid_paths = (tmp_path / "missing.cookies.txt", tmp_path / "empty.cookies.txt", tmp_path)
+    for invalid_path in invalid_paths:
+        if invalid_path.name == "empty.cookies.txt":
+            invalid_path.touch()
+        with pytest.raises(ValueError):
+            Settings(instagram_cookie_file=str(invalid_path))

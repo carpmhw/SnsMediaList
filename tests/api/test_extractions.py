@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from sns_media_list.app import create_app
 from sns_media_list.config import Settings
+from sns_media_list.errors import AppError
 from sns_media_list.security.tokens import TokenStore
 from sns_media_list.services.extraction_service import ExtractionService
 
@@ -24,6 +25,17 @@ class FakeExtractor:
         """Return configured records and count invocations."""
         self.calls += 1
         return self.records
+
+
+class AuthenticationFailureExtractor:
+    """Raise the stable platform authentication error without producing records."""
+
+    async def extract(self, _post_url: Any) -> list[dict[str, Any]]:
+        """Return the bounded authentication failure used by the API contract test."""
+        raise AppError(
+            "platform_authentication_failed",
+            "The platform session is unavailable. Contact the service operator.",
+        )
 
 
 def record(
@@ -94,6 +106,50 @@ def test_extraction_omits_private_extractor_fields_from_public_response() -> Non
         assert field not in response.json()
 
 
+def test_cookie_material_stays_out_of_tokens_responses_and_logs(caplog) -> None:
+    """Verify cookie paths and values never cross the application-owned boundary."""
+    secret_value = "session-cookie-value"
+    secret_path = "/run/secrets/instagram-cookies.txt"
+    private_record = record()
+    private_record.update(
+        {
+            "cookies": {"sessionid": secret_value},
+            "cookie_file": secret_path,
+            "description": "safe description",
+        }
+    )
+    token_store = TokenStore(capacity=20, ttl_seconds=600)
+    service = ExtractionService(
+        Settings(), extractor=FakeExtractor([private_record]), token_store=token_store
+    )
+    client = TestClient(create_app(extraction_service=service))
+    caplog.set_level(logging.INFO, logger="sns_media_list")
+
+    response = client.post("/api/extractions", json={"url": "https://x.com/creator/status/1"})
+
+    assert response.status_code == 200
+    assert secret_value not in response.text
+    assert secret_path not in response.text
+    assert secret_value not in " ".join(record.getMessage() for record in caplog.records)
+    assert secret_path not in " ".join(record.getMessage() for record in caplog.records)
+    assert all(secret_value not in str(record) for record in token_store._records.values())
+    assert all(secret_path not in str(record) for record in token_store._records.values())
+
+
+def test_health_endpoint_reveals_no_cookie_configuration(tmp_path) -> None:
+    """Verify health checks stay local and do not disclose configured secret paths."""
+    cookie_file = tmp_path / "x.cookies.txt"
+    cookie_file.write_text("session-cookie-value", encoding="utf-8")
+    client = TestClient(create_app(settings=Settings(x_cookie_file=str(cookie_file))))
+
+    response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    assert str(cookie_file) not in response.text
+    assert "session-cookie-value" not in response.text
+
+
 def test_successful_extraction_log_contains_only_safe_event_fields(caplog) -> None:
     """Verify runtime extraction logs omit source URLs, tokens, and descriptions."""
     caplog.set_level(logging.INFO, logger="sns_media_list")
@@ -154,6 +210,24 @@ def test_token_capacity_returns_503_atomically() -> None:
 
     assert response.status_code == 503
     assert response.json()["code"] == "capacity_exceeded"
+
+
+def test_platform_authentication_failure_is_safe_and_issues_no_tokens() -> None:
+    """Verify platform session errors are bounded and do not reserve media tokens."""
+    token_store = TokenStore(capacity=20, ttl_seconds=600)
+    service = ExtractionService(
+        Settings(), extractor=AuthenticationFailureExtractor(), token_store=token_store
+    )
+    client = TestClient(create_app(extraction_service=service))
+
+    response = client.post("/api/extractions", json={"url": "https://x.com/creator/status/1"})
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "platform_authentication_failed"
+    assert response.json()["message"] == (
+        "The platform session is unavailable. Contact the service operator."
+    )
+    assert token_store.size == 0
 
 
 def test_active_client_limit_returns_retry_after() -> None:

@@ -68,9 +68,13 @@ class Writer:
 class FakeMediaClient:
     """Return an in-memory JPEG response for every authorized token."""
 
+    def __init__(self) -> None:
+        """Initialize captured upstream request headers for boundary assertions."""
+        self.last_headers: dict[str, str] = {}
+
     async def fetch(self, _url: str, *, headers: Any) -> MediaResponse:
         """Return a valid image response without contacting a CDN."""
-        del headers
+        self.last_headers = dict(headers)
         body = b"\xff\xd8\xff\xe0fake-image"
         return MediaResponse(
             200,
@@ -108,6 +112,29 @@ def test_download_and_preview_use_bound_tokens() -> None:
     assert preview.status_code == 200
     assert preview.headers["content-disposition"].startswith("inline;")
     assert preview.headers["x-content-type-options"] == "nosniff"
+
+
+def test_media_proxy_sends_only_fixed_headers_without_platform_cookies() -> None:
+    """Verify downstream media requests never inherit platform authentication."""
+    settings = Settings()
+    media_client = FakeMediaClient()
+    service = ExtractionService(
+        settings,
+        extractor=FakeExtractor(),
+        token_store=TokenStore(capacity=20, ttl_seconds=600),
+    )
+    client = TestClient(create_app(extraction_service=service, media_client=media_client))
+    extraction = client.post(
+        "/api/extractions", json={"url": "https://x.com/creator/status/1"}
+    ).json()
+
+    response = client.get(extraction["media"][0]["download_url"])
+
+    assert response.status_code == 200
+    assert media_client.last_headers == {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
+        "Referer": "https://x.com/",
+    }
 
 
 def test_preview_token_cannot_be_used_for_download() -> None:

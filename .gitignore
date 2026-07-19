@@ -153,6 +153,9 @@ activemq-data/
 .envrc
 .env.*
 !.env.example
+*.cookies.txt
+cookies.txt
+gallery-dl.conf
 .venv/
 env/
 venv/

@@ -11,8 +11,8 @@ def test_home_page_contains_contact_sheet_workflow() -> None:
 
     assert response.status_code == 200
     assert '<html lang="zh-Hant">' in response.text
-    assert "將一則公開貼文整理成清晰的下載清單。" in response.text
-    assert "分析公開貼文" in response.text
+    assert "將一則貼文整理成清晰的下載清單。" in response.text
+    assert "分析單篇貼文" in response.text
     assert "請只下載你有權保存的內容" in response.text
     assert 'id="extraction-form"' in response.text
     assert 'id="post-url"' in response.text
@@ -38,7 +38,7 @@ def test_static_assets_include_responsive_and_recovery_hooks() -> None:
     assert ":focus-visible" in css.text
     assert "prefers-reduced-motion" in css.text
     assert javascript.status_code == 200
-    assert "平台暫時限制匿名存取" in javascript.text
+    assert "平台暫時限制存取" in javascript.text
     assert "下載參照已過期" in javascript.text
     assert "重新分析" in javascript.text
     assert "/api/extractions" in javascript.text
@@ -67,7 +67,7 @@ def test_javascript_has_same_origin_extraction_and_recovery_hooks() -> None:
     assert "fetch('/api/extractions'" in response.text
     assert "token_expired" in response.text
     assert "token_not_found" in response.text
-    assert "平台暫時限制匿名存取" in response.text
+    assert "平台暫時限制存取" in response.text
     assert "重新分析" in response.text
     assert "local_rate_limited" in response.text
     assert "innerHTML" not in response.text

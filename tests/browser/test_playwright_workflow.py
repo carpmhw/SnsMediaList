@@ -130,8 +130,33 @@ def test_rate_limit_error_is_inline(page: Page, base_url: str) -> None:
     page.fill("#post-url", "https://x.com/creator/status/1")
     page.click("#analyze-button")
 
-    expect(page.locator("#status")).to_contain_text("平台暫時限制匿名存取")
+    expect(page.locator("#status")).to_contain_text("平台暫時限制存取")
     expect(page.locator("#status")).not_to_contain_text("hidden raw detail")
+
+
+def test_platform_authentication_error_is_operator_actionable(page: Page, base_url: str) -> None:
+    """Verify platform session failures show safe operator guidance inline."""
+
+    def extraction_error(route: Any, _request: Any) -> None:
+        """Return a bounded platform authentication failure."""
+        fulfill_json(
+            route,
+            {
+                "code": "platform_authentication_failed",
+                "message": "secret account and cookie path",
+                "request_id": "test",
+            },
+            status=503,
+        )
+
+    page.route("**/api/extractions", extraction_error)
+    page.goto(base_url)
+    page.fill("#post-url", "https://x.com/creator/status/1")
+    page.click("#analyze-button")
+
+    expect(page.locator("#status")).to_contain_text("平台驗證工作階段無法使用")
+    expect(page.locator("#status")).to_contain_text("請聯絡服務管理者")
+    expect(page.locator("#status")).not_to_contain_text("secret account and cookie path")
 
 
 def test_expired_download_offers_reanalysis(page: Page, base_url: str) -> None:

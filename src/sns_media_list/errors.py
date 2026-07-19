@@ -14,6 +14,7 @@ ERROR_STATUS: dict[str, int] = {
     "upstream_media_invalid": 502,
     "extraction_failed": 502,
     "capacity_exceeded": 503,
+    "platform_authentication_failed": 503,
     "extraction_timeout": 504,
     "token_expired": 410,
     "unsafe_destination": 502,

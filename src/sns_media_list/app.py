@@ -94,6 +94,7 @@ def create_app(
         finally:
             server.close()
             await server.wait_closed()
+            await extraction_proxy.close_clients()
 
     application = FastAPI(
         title="SNS Media List",

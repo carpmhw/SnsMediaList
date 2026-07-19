@@ -36,6 +36,43 @@ def test_command_disables_user_config_and_adaptive_delegation() -> None:
     assert "http://127.0.0.1:8765" in command
 
 
+def test_command_passes_only_matching_instagram_cookie_path() -> None:
+    """Verify Instagram authentication uses a path-only category option."""
+    command = build_gallery_command(
+        "https://www.instagram.com/reel/ABC123/",
+        proxy_url="http://127.0.0.1:8765",
+        cookie_file="/run/secrets/instagram-cookies.txt",
+    )
+
+    assert "extractor.instagram.cookies=/run/secrets/instagram-cookies.txt" in command
+    assert "extractor.instagram.cookies-update=false" in command
+    assert not any("extractor.twitter.cookies=" in argument for argument in command)
+    assert "session-secret" not in " ".join(command)
+
+
+def test_command_passes_only_matching_x_cookie_path() -> None:
+    """Verify X authentication uses the twitter category without Instagram options."""
+    command = build_gallery_command(
+        "https://x.com/creator/status/1",
+        proxy_url="http://127.0.0.1:8765",
+        cookie_file="/run/secrets/x-cookies.txt",
+    )
+
+    assert "extractor.twitter.cookies=/run/secrets/x-cookies.txt" in command
+    assert "extractor.twitter.cookies-update=false" in command
+    assert not any("extractor.instagram.cookies=" in argument for argument in command)
+
+
+def test_command_omits_cookie_options_for_anonymous_extraction() -> None:
+    """Verify an omitted platform cookie keeps the extractor anonymous."""
+    command = build_gallery_command(
+        "https://x.com/creator/status/1",
+        proxy_url="http://127.0.0.1:8765",
+    )
+
+    assert not any(".cookies=" in argument for argument in command)
+
+
 def test_environment_removes_inherited_secrets_and_proxies() -> None:
     """Verify subprocess environment cannot use host configuration or secrets."""
     environment = build_sanitized_environment(
@@ -122,6 +159,52 @@ async def test_runner_uses_argument_array_and_parses_json_lines(monkeypatch: Any
 
 
 @pytest.mark.asyncio
+async def test_runner_reloads_configured_cookie_file_for_each_process(
+    monkeypatch: Any, tmp_path
+) -> None:
+    """Verify each authenticated subprocess receives the current cookie path."""
+    cookie_file = tmp_path / "x.cookies.txt"
+    cookie_file.write_text("first-session", encoding="utf-8")
+    output = json.dumps(
+        {
+            "platform": "x",
+            "post_url": "https://x.com/creator/status/1",
+            "post_id": "1",
+            "num": 1,
+            "type": "image",
+            "url": "https://pbs.twimg.com/media/1.jpg?name=orig",
+            "extension": "jpg",
+            "progressive": True,
+        }
+    ).encode()
+    seen_cookie_contents: list[str] = []
+    captured_args: list[tuple[Any, ...]] = []
+
+    async def fake_create(*args: Any, **_kwargs: Any) -> FakeProcess:
+        """Capture the current cookie file as a child process would read it."""
+        captured_args.append(args)
+        seen_cookie_contents.append(cookie_file.read_text(encoding="utf-8"))
+        return FakeProcess(output + b"\n")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+    runner = GalleryDlRunner(Settings(x_cookie_file=str(cookie_file)))
+    post_url = validate_post_url("https://x.com/creator/status/1")
+
+    await runner.extract(post_url)
+    cookie_file.write_text("second-session", encoding="utf-8")
+    await runner.extract(post_url)
+
+    assert seen_cookie_contents == ["first-session", "second-session"]
+    assert all(
+        f"extractor.twitter.cookies={cookie_file}" in arguments for arguments in captured_args
+    )
+    assert all(
+        "first-session" not in arguments and "second-session" not in arguments
+        for arguments in captured_args
+    )
+
+
+@pytest.mark.asyncio
 async def test_runner_maps_json_login_error_to_post_unavailable(monkeypatch: Any) -> None:
     """Verify gallery-dl JSON error records map to anonymous availability errors."""
     output = json.dumps(
@@ -148,6 +231,43 @@ async def test_runner_maps_json_login_error_to_post_unavailable(monkeypatch: Any
         await runner.extract(validate_post_url("https://www.instagram.com/p/ABC123/"))
 
     assert exc_info.value.code == "post_unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "expected_code"),
+    [
+        ("invalid cookie session", "platform_authentication_failed"),
+        ("session expired", "platform_authentication_failed"),
+        ("checkpoint required", "platform_authentication_failed"),
+        ("consent required", "platform_authentication_failed"),
+        ("private post", "post_unavailable"),
+        ("HTTP 429 Too Many Requests", "upstream_rate_limited"),
+        ("unexpected response shape", "extraction_failed"),
+    ],
+)
+async def test_runner_maps_authenticated_diagnostic_fixtures(
+    monkeypatch: Any, tmp_path, message: str, expected_code: str
+) -> None:
+    """Verify pinned authenticated diagnostics map without exposing raw details."""
+    cookie_file = tmp_path / "instagram.cookies.txt"
+    cookie_file.write_text("session-cookie", encoding="utf-8")
+    output = json.dumps([[-1, {"error": "AbortExtraction", "message": message}]]).encode()
+    process = FakeProcess(output + b"\n")
+
+    async def fake_create(*_args: Any, **_kwargs: Any) -> FakeProcess:
+        """Return the selected sanitized diagnostic fixture."""
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+    runner = GalleryDlRunner(Settings(instagram_cookie_file=str(cookie_file)))
+
+    with pytest.raises(AppError) as exc_info:
+        await runner.extract(validate_post_url("https://www.instagram.com/p/ABC123/"))
+
+    assert exc_info.value.code == expected_code
+    assert "session-cookie" not in exc_info.value.message
+    assert message not in exc_info.value.message
 
 
 @pytest.mark.asyncio

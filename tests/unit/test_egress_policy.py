@@ -1,12 +1,13 @@
 """Tests for extractor egress destination policy and CONNECT parsing."""
 
+import asyncio
 import ipaddress
 from typing import Any
 
 import pytest
 
 from sns_media_list.errors import AppError
-from sns_media_list.network.connect_proxy import parse_connect_request
+from sns_media_list.network.connect_proxy import ConnectProxy, parse_connect_request
 from sns_media_list.network.dns import DestinationPolicy
 
 
@@ -45,6 +46,15 @@ class FakeStreamWriter:
 
     async def wait_closed(self) -> None:
         """Complete fake close cleanup."""
+
+
+class BlockingStreamReader(FakeStreamReader):
+    """Keep a proxy handler suspended until shutdown cancellation."""
+
+    async def readuntil(self, _separator: bytes) -> bytes:
+        """Block forever so the test can exercise active-handler cleanup."""
+        await asyncio.Event().wait()
+        return b""
 
 
 def test_policy_selects_a_validated_public_address() -> None:
@@ -145,6 +155,28 @@ async def test_proxy_connects_to_selected_pinned_address(monkeypatch: Any) -> No
 
     assert captured == {"host": "93.184.216.34", "port": 443}
     assert client_writer.writes[0].startswith(b"HTTP/1.1 200")
+
+
+@pytest.mark.asyncio
+async def test_proxy_shutdown_cancels_active_client_handlers() -> None:
+    """Verify shutdown finishes handlers before the event loop is finalized."""
+    policy = DestinationPolicy(
+        allowed_hosts=frozenset({"www.instagram.com"}),
+        resolver=lambda _host, _port: [ipaddress.ip_address("93.184.216.34")],
+    )
+    proxy = ConnectProxy(policy)
+    task = asyncio.create_task(proxy.handle_client(BlockingStreamReader(), FakeStreamWriter()))
+    await asyncio.sleep(0)
+
+    try:
+        await proxy.close_clients()
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert task.done()
+    assert task.cancelled()
 
 
 @pytest.mark.parametrize(

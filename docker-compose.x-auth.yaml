@@ -1,0 +1,9 @@
+services:
+  app:
+    volumes:
+      - type: bind
+        source: ${SNS_MEDIA_X_COOKIE_HOST_FILE:?Set SNS_MEDIA_X_COOKIE_HOST_FILE to a Netscape cookies.txt file}
+        target: /run/secrets/x-cookies.txt
+        read_only: true
+    environment:
+      SNS_MEDIA_X_COOKIE_FILE: /run/secrets/x-cookies.txt

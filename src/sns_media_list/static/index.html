@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="description" content="提供公開 Instagram 與 X 貼文的私人、暫存媒體清單。">
+    <meta name="description" content="提供 Instagram 與 X 單篇貼文的私人、暫存媒體清單。">
     <title>SNS Media List</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
@@ -11,13 +11,13 @@
     <main class="app-shell">
       <header class="brand-header">
         <p class="eyebrow">SNS MEDIA LIST</p>
-        <h1>將一則公開貼文整理成清晰的下載清單。</h1>
-        <p class="lede">分析支援的 Instagram 或 X 貼文，逐一下載可直接串流的媒體項目。</p>
+        <h1>將一則貼文整理成清晰的下載清單。</h1>
+        <p class="lede">分析支援的 Instagram 或 X 單篇貼文，逐一下載可直接串流的媒體項目。</p>
       </header>
 
       <section class="analyze-panel" aria-labelledby="analyze-heading">
         <div class="section-kicker">01 / 來源</div>
-        <h2 id="analyze-heading">分析公開貼文</h2>
+        <h2 id="analyze-heading">分析單篇貼文</h2>
         <form id="extraction-form">
           <label for="post-url">貼文 URL</label>
           <div class="input-row">
@@ -25,8 +25,8 @@
               autocomplete="off" spellcheck="false" aria-describedby="url-help">
             <button id="analyze-button" type="submit">分析</button>
           </div>
-          <p id="url-help" class="field-help">僅支援 HTTPS Instagram 貼文或 Reels，以及 X 狀態貼文 URL。</p>
-          <p id="privacy-reminder" class="privacy-note">請只下載你有權保存的內容。結果與下載參照僅暫時保留。</p>
+          <p id="url-help" class="field-help">僅支援 HTTPS Instagram 貼文或 Reels，以及 X 狀態貼文 URL；可存取範圍取決於平台與部署驗證設定。</p>
+          <p id="privacy-reminder" class="privacy-note">請只下載你有權保存的內容。可信部署可能包含 operator 帳號可見內容；結果與下載參照僅暫時保留。</p>
         </form>
       </section>
 
