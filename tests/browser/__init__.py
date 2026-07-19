@@ -1,0 +1,1 @@
+"""Browser contract test package."""
