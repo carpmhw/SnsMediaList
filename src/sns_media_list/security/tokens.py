@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 
 from ..errors import AppError
-from ..models import MediaType, Platform, PrivateMediaRecord, TokenPurpose
+from ..models import MediaType, Platform, PreviewMode, PrivateMediaRecord, TokenPurpose
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +20,7 @@ class MediaTokenDraft:
     platform: Platform
     request_headers: Mapping[str, str]
     content_type: str | None = None
+    preview_mode: PreviewMode = "proxy"
 
 
 class TokenStore:
@@ -62,6 +63,7 @@ class TokenStore:
                 expires_at=expires_at,
                 request_headers=dict(draft.request_headers),
                 content_type=draft.content_type,
+                preview_mode=draft.preview_mode,
             )
             for draft in pending
         ]

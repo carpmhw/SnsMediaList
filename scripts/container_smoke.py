@@ -63,6 +63,13 @@ def exec_python(container_id: str, source: str) -> None:
         raise RuntimeError(result.stderr.strip() or "container assertion failed")
 
 
+def verify_ffmpeg(container_id: str) -> None:
+    """Verify the runtime exposes the FFmpeg version pinned by the Dockerfile."""
+    result = run_command(["docker", "exec", container_id, "ffmpeg", "-version"])
+    if not result.stdout.startswith("ffmpeg version 5.1.9-"):
+        raise RuntimeError("container FFmpeg version does not match the pinned runtime")
+
+
 def main() -> int:
     """Build, start, inspect, restart, and gracefully stop the service."""
     if shutil.which("docker") is None:
@@ -86,6 +93,7 @@ def main() -> int:
         user_id = run_command(["docker", "exec", container_id, "id", "-u"]).stdout.strip()
         if user_id != "10001":
             raise RuntimeError(f"container is running as UID {user_id}, expected 10001")
+        verify_ffmpeg(container_id)
         exec_python(
             container_id,
             """import errno

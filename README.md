@@ -9,6 +9,7 @@ SNS Media List 是一個低併發、自架式 Web 工具，可分析支援的 In
 - 支援公開 Instagram 單篇貼文、Reel 與 X 單篇狀態貼文。
 - 保留 carousel 或多媒體貼文的來源順序。
 - 每個媒體項目提供獨立預覽、資訊與下載操作。
+- 預覽優先使用平台 CDN poster；缺少可信 poster 時，首次載入會按需生成受限 JPEG 縮圖。
 - 使用短效 opaque token 隱藏 upstream media URL。
 - 不建立帳號、不保存歷史記錄，也不永久保存完整媒體檔案。
 - 提供繁體中文 responsive Web 介面與 Docker Compose 部署。

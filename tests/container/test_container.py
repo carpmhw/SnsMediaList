@@ -15,6 +15,29 @@ def test_dockerfile_uses_pinned_runtime_and_non_root_entrypoint() -> None:
     assert "USER app" in dockerfile
     assert '"sns_media_list.app:create_app", "--factory"' in dockerfile
     assert '"--workers", "1"' in dockerfile
+    assert "FFMPEG_VERSION" in dockerfile
+    assert "ffmpeg" in dockerfile
+    assert "COPY LICENSES" in dockerfile
+
+
+def test_dockerignore_excludes_cookie_material_from_build_context() -> None:
+    """Verify Docker builds cannot send local credential files to a builder."""
+    dockerignore = (PROJECT_ROOT / ".dockerignore").read_text()
+
+    assert "secrets/" in dockerignore
+    assert "*.cookies.txt" in dockerignore
+    assert "cookies.txt" in dockerignore
+    assert "x-cookies.txt" in dockerignore
+    assert "gallery-dl.conf" in dockerignore
+
+
+def test_ffmpeg_license_notice_is_shipped() -> None:
+    """Verify the controlled FFmpeg runtime license notice is present."""
+    notice = (PROJECT_ROOT / "LICENSES" / "ffmpeg.txt").read_text()
+
+    assert "FFmpeg" in notice
+    assert "GPL-2.0" in notice
+    assert "ffmpeg.org" in notice
 
 
 def test_gallery_license_notice_is_shipped() -> None:
@@ -54,6 +77,12 @@ def test_compose_documents_bounded_runtime_settings() -> None:
         "SNS_MEDIA_MAX_REDIRECTS",
         "SNS_MEDIA_MAX_EXTRACTIONS",
         "SNS_MEDIA_MAX_DOWNLOADS",
+        "SNS_MEDIA_THUMBNAIL_INPUT_BYTES",
+        "SNS_MEDIA_THUMBNAIL_OUTPUT_BYTES",
+        "SNS_MEDIA_THUMBNAIL_TIMEOUT_SECONDS",
+        "SNS_MEDIA_THUMBNAIL_CONCURRENCY",
+        "SNS_MEDIA_THUMBNAIL_CACHE_BYTES",
+        "SNS_MEDIA_THUMBNAIL_MAX_EDGE",
     ):
         assert setting in compose
 
@@ -64,7 +93,7 @@ def test_platform_auth_overrides_mount_independent_read_only_cookie_files() -> N
         "docker-compose.instagram-auth.yaml": (
             "SNS_MEDIA_INSTAGRAM_COOKIE_HOST_FILE",
             "SNS_MEDIA_INSTAGRAM_COOKIE_FILE",
-            "/run/secrets/instagram-cookies.txt",
+            "/run/secrets/instagram.cookies.txt",
         ),
         "docker-compose.x-auth.yaml": (
             "SNS_MEDIA_X_COOKIE_HOST_FILE",
@@ -107,6 +136,8 @@ def test_container_smoke_script_checks_runtime_boundaries() -> None:
         '"up", "-d"',
         "State.Health.Status",
         "expected 10001",
+        '"ffmpeg", "-version"',
+        "5.1.9",
         "read-only root filesystem check failed",
         "restart-marker",
         '"stop", "-t", "10"',

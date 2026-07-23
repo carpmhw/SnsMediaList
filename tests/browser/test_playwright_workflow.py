@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Generator
 from functools import partial
@@ -219,6 +220,52 @@ def test_download_requests_only_after_click(page: Page, base_url: str) -> None:
     page.click(".download-action")
     expect(page.locator("#status")).to_contain_text("已開始下載")
     assert len(download_calls) == 1
+
+
+def test_generated_preview_renders_and_failed_preview_uses_local_fallback(
+    page: Page, base_url: str
+) -> None:
+    """Verify generated preview responses render and failures remain local-only."""
+    payload = {
+        **SUCCESS_PAYLOAD,
+        "media": [
+            {
+                **SUCCESS_PAYLOAD["media"][0],
+                "preview_url": "/api/media/opaque-preview/preview",
+            }
+        ],
+    }
+    preview_calls: list[str] = []
+
+    def extraction(route: Any, _request: Any) -> None:
+        """Return one item with a token-bound preview URL."""
+        fulfill_json(route, payload)
+
+    def preview(route: Any, request: Any) -> None:
+        """Return success once, then a real non-2xx preview response."""
+        preview_calls.append(request.url)
+        if len(preview_calls) > 1:
+            route.fulfill(
+                status=502,
+                content_type="application/json",
+                body=b'{"code":"upstream_media_invalid"}',
+            )
+            return
+        body = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+        route.fulfill(status=200, content_type="image/png", body=body)
+
+    page.route("**/api/extractions", extraction)
+    page.route("**/api/media/opaque-preview/preview**", preview)
+    page.goto(base_url)
+    page.fill("#post-url", "https://x.com/creator/status/1")
+    page.click("#analyze-button")
+    expect(page.locator(".media-visual img")).to_be_visible()
+
+    page.locator(".media-visual img").evaluate("element => element.src = element.src + '?retry=1'")
+    expect(page.locator(".fallback-tile")).to_contain_text("找不到預覽")
+    assert len(preview_calls) == 2
 
 
 def test_mobile_layout_has_no_horizontal_overflow_and_supports_keyboard(

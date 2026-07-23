@@ -25,6 +25,11 @@ def parse_arguments() -> argparse.Namespace:
     """Parse the local endpoint and six owner-controlled post URLs."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
+    parser.add_argument(
+        "--verify-previews",
+        action="store_true",
+        help="request every preview twice and validate application-owned JPEG responses",
+    )
     for case in CASES:
         parser.add_argument(f"--{case.replace('_', '-')}", required=True)
     return parser.parse_args()
@@ -103,12 +108,41 @@ def verify_downloads(base_url: str, payload: dict[str, Any]) -> None:
                 raise RuntimeError("download endpoint returned an empty body")
 
 
+def verify_previews(base_url: str, payload: dict[str, Any]) -> None:
+    """Open each preview endpoint twice and validate safe, non-empty JPEG responses."""
+    media = payload["media"]
+    for item in media:
+        if not isinstance(item, dict):
+            raise RuntimeError("media item is malformed")
+        preview_url = item.get("preview_url")
+        if not isinstance(preview_url, str):
+            raise RuntimeError("media item is missing its preview URL")
+        for _attempt in range(2):
+            request = Request(urljoin(f"{base_url.rstrip('/')}/", preview_url.lstrip("/")))
+            with urlopen(request, timeout=120) as response:
+                if response.status != 200:
+                    raise RuntimeError("preview endpoint did not return success")
+                if response.headers.get("Content-Type", "").split(";", 1)[0] not in {
+                    "image/jpeg",
+                    "image/png",
+                    "image/gif",
+                    "image/webp",
+                }:
+                    raise RuntimeError("preview endpoint did not return a supported raster image")
+                if response.headers.get("Cache-Control") != "private, no-store":
+                    raise RuntimeError("preview endpoint omitted no-store cache control")
+                if not response.read():
+                    raise RuntimeError("preview endpoint returned an empty body")
+
+
 def main() -> int:
     """Run all six live smoke cases and print non-sensitive outcomes."""
     arguments = parse_arguments()
     for case in CASES:
         status, payload = post_extraction(arguments.base_url, getattr(arguments, case))
         count = validate_response(status, payload)
+        if arguments.verify_previews:
+            verify_previews(arguments.base_url, payload)
         verify_downloads(arguments.base_url, payload)
         print(f"{case}: status={status} media_items={count} outcome=ok")
     return 0

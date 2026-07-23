@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, HttpUrl
 Platform = Literal["instagram", "x"]
 MediaType = Literal["image", "video"]
 TokenPurpose = Literal["preview", "download"]
+PreviewMode = Literal["proxy", "generated"]
 
 
 class MediaItem(BaseModel):
@@ -56,3 +57,4 @@ class PrivateMediaRecord:
     expires_at: float
     request_headers: Mapping[str, str]
     content_type: str | None = None
+    preview_mode: PreviewMode = "proxy"

@@ -30,6 +30,19 @@ def draft(purpose: str = "download") -> MediaTokenDraft:
     )
 
 
+def preview_draft(mode: str = "generated") -> MediaTokenDraft:
+    """Build a preview draft with an explicit proxy or generated mode."""
+    return MediaTokenDraft(
+        purpose="preview",
+        source_url="https://video.twimg.com/video.mp4",
+        media_class="video",
+        filename="x.mp4",
+        platform="x",
+        request_headers={"User-Agent": "test"},
+        preview_mode=mode,
+    )
+
+
 def test_token_is_opaque_and_bound_to_purpose() -> None:
     """Verify issued token records are private and purpose-bound."""
     clock = FakeClock()
@@ -78,3 +91,12 @@ def test_reservation_is_atomic_when_capacity_is_insufficient() -> None:
 
     assert exc_info.value.code == "capacity_exceeded"
     assert store.size == 0
+
+
+def test_preview_mode_is_copied_to_private_record() -> None:
+    """Verify token issuance preserves the selected preview execution mode."""
+    record = TokenStore(capacity=2, ttl_seconds=600, clock=FakeClock()).reserve([preview_draft()])[
+        0
+    ]
+
+    assert record.preview_mode == "generated"

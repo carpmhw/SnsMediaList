@@ -23,6 +23,37 @@ def test_settings_reject_non_positive_limits() -> None:
         raise AssertionError("Settings accepted an invalid media limit")
 
 
+def test_thumbnail_settings_have_bounded_defaults() -> None:
+    """Verify generated-preview resource settings use the approved defaults."""
+    settings = Settings()
+
+    assert settings.thumbnail_input_bytes == 32_000_000
+    assert settings.thumbnail_output_bytes == 1_000_000
+    assert settings.thumbnail_timeout_seconds == 10.0
+    assert settings.thumbnail_concurrency == 1
+    assert settings.thumbnail_cache_bytes == 32_000_000
+    assert settings.thumbnail_max_edge == 640
+
+
+def test_thumbnail_settings_reject_values_above_safe_bounds() -> None:
+    """Verify generated-preview settings reject oversized or overly permissive values."""
+    invalid = (
+        {"thumbnail_input_bytes": 32_000_001},
+        {"thumbnail_output_bytes": 1_000_001},
+        {"thumbnail_timeout_seconds": 10.1},
+        {"thumbnail_concurrency": 2},
+        {"thumbnail_cache_bytes": 32_000_001},
+        {"thumbnail_max_edge": 641},
+    )
+
+    for values in invalid:
+        try:
+            Settings(**values)
+        except ValueError:
+            continue
+        raise AssertionError(f"Settings accepted invalid thumbnail values: {values}")
+
+
 def test_cookie_file_settings_are_optional_and_platform_specific(tmp_path) -> None:
     """Verify each platform can independently use an optional cookie file."""
     instagram = tmp_path / "instagram.cookies.txt"

@@ -22,6 +22,8 @@ from .network.dns import DestinationPolicy, resolve_system
 from .network.media_client import MediaClient, MediaDestinationPolicy
 from .security.tokens import TokenStore
 from .services.extraction_service import ExtractionService
+from .services.thumbnail import ThumbnailGenerator
+from .services.thumbnail_cache import ThumbnailCache, ThumbnailCoordinator
 
 _EXTRACTION_HOSTS = frozenset(
     {
@@ -35,6 +37,7 @@ _EXTRACTION_HOSTS = frozenset(
         "twitter.com",
         "www.twitter.com",
         "api.twitter.com",
+        "abs.twimg.com",
         "pbs.twimg.com",
         "video.twimg.com",
     }
@@ -47,6 +50,8 @@ def create_app(
     extraction_service: ExtractionService | None = None,
     media_client: MediaClient | None = None,
     extraction_proxy: ConnectProxy | None = None,
+    thumbnail_generator: ThumbnailGenerator | None = None,
+    thumbnail_coordinator: ThumbnailCoordinator | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application instance."""
     configure_logging()
@@ -75,10 +80,26 @@ def create_app(
             max_redirects=settings.max_redirects,
             connect_timeout=settings.connect_timeout_seconds,
             max_bytes=settings.max_download_bytes,
+            read_timeout=settings.read_timeout_seconds,
+            total_timeout=settings.download_timeout_seconds,
         )
     limiter = RequestLimiter(
         max_extractions=settings.max_extractions,
         max_downloads=settings.max_downloads,
+    )
+    thumbnail_generator = thumbnail_generator or ThumbnailGenerator(
+        input_bytes=settings.thumbnail_input_bytes,
+        output_bytes=settings.thumbnail_output_bytes,
+        timeout_seconds=settings.thumbnail_timeout_seconds,
+        max_edge=settings.thumbnail_max_edge,
+    )
+    thumbnail_cache = ThumbnailCache(
+        max_bytes=settings.thumbnail_cache_bytes,
+        max_negative_entries=settings.token_capacity,
+    )
+    thumbnail_coordinator = thumbnail_coordinator or ThumbnailCoordinator(
+        thumbnail_cache,
+        max_concurrency=settings.thumbnail_concurrency,
     )
 
     @asynccontextmanager
@@ -103,6 +124,8 @@ def create_app(
         lifespan=lifespan,
     )
     application.state.limiter = limiter
+    application.state.thumbnail_cache = thumbnail_cache
+    application.state.thumbnail_coordinator = thumbnail_coordinator
 
     @application.middleware("http")
     async def attach_request_id(
@@ -138,6 +161,8 @@ def create_app(
             media_client,
             limiter=limiter,
             trusted_proxy_cidrs=settings.trusted_proxy_cidrs,
+            thumbnail_generator=thumbnail_generator,
+            thumbnail_coordinator=thumbnail_coordinator,
         )
     )
 

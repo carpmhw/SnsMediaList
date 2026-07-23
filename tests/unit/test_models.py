@@ -30,3 +30,29 @@ def test_private_record_contains_upstream_details() -> None:
     )
 
     assert record.source_url.startswith("https://")
+
+
+def test_private_preview_record_keeps_generation_mode_private() -> None:
+    """Verify preview generation mode is retained only in the private record."""
+    record = PrivateMediaRecord(
+        token="opaque",
+        purpose="preview",
+        source_url="https://video.twimg.com/video.mp4",
+        media_class="video",
+        filename="x.mp4",
+        platform="x",
+        expires_at=100.0,
+        request_headers={"User-Agent": "test"},
+        preview_mode="generated",
+    )
+
+    assert record.preview_mode == "generated"
+    assert (
+        "preview_mode"
+        not in MediaItem(
+            token="opaque",
+            media_type="video",
+            filename="x.mp4",
+            download_url="/api/media/opaque/download",
+        ).model_dump()
+    )

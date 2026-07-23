@@ -10,7 +10,7 @@ from ..extractor.normalizer import (
     ensure_downloadable_media,
     normalize_gallery_output,
 )
-from ..models import ExtractionResponse, MediaItem, MediaType, Platform
+from ..models import ExtractionResponse, MediaItem, MediaType, Platform, PreviewMode
 from ..security.tokens import MediaTokenDraft, TokenStore
 from ..url_validation import validate_post_url
 
@@ -55,29 +55,29 @@ class ExtractionService:
                     request_headers=headers,
                 )
             )
-            if item.preview_source_url:
-                drafts.append(
-                    MediaTokenDraft(
-                        purpose="preview",
-                        source_url=item.preview_source_url,
-                        media_class="image",
-                        filename=item.filename,
-                        platform=cast(Platform, item.platform),
-                        request_headers=headers,
-                    )
+            preview_mode: PreviewMode = "proxy" if item.preview_source_url else "generated"
+            drafts.append(
+                MediaTokenDraft(
+                    purpose="preview",
+                    source_url=item.preview_source_url or item.source_url,
+                    media_class=(
+                        "image" if preview_mode == "proxy" else cast(MediaType, item.media_type)
+                    ),
+                    filename=item.filename,
+                    platform=cast(Platform, item.platform),
+                    request_headers=headers,
+                    preview_mode=preview_mode,
                 )
-
+            )
         records = self.token_store.reserve(drafts)
         record_index = 0
         media: list[MediaItem] = []
         for item in normalized.items:
             download_record = records[record_index]
             record_index += 1
-            preview_url = None
-            if item.preview_source_url:
-                preview_record = records[record_index]
-                record_index += 1
-                preview_url = f"/api/media/{preview_record.token}/preview"
+            preview_record = records[record_index]
+            record_index += 1
+            preview_url = f"/api/media/{preview_record.token}/preview"
             media.append(
                 MediaItem(
                     token=download_record.token,

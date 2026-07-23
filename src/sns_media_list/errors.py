@@ -29,6 +29,7 @@ class AppError(Exception):
     message: str
     status_code: int | None = None
     retry_after: int | None = None
+    deterministic: bool = False
 
     def __post_init__(self) -> None:
         """Fill the status from the central error contract when omitted."""

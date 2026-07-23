@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     max_redirects: int = Field(default=3, ge=0, le=10)
     max_extractions: int = Field(default=1, gt=0, le=16)
     max_downloads: int = Field(default=4, gt=0, le=32)
+    thumbnail_input_bytes: int = Field(default=32_000_000, gt=0, le=32_000_000)
+    thumbnail_output_bytes: int = Field(default=1_000_000, gt=0, le=1_000_000)
+    thumbnail_timeout_seconds: float = Field(default=10.0, gt=0, le=10.0)
+    thumbnail_concurrency: int = Field(default=1, gt=0, le=1)
+    thumbnail_cache_bytes: int = Field(default=32_000_000, gt=0, le=32_000_000)
+    thumbnail_max_edge: int = Field(default=640, gt=0, le=640)
     trusted_proxy_cidrs: tuple[str, ...] = ()
     extraction_proxy_host: str = "127.0.0.1"
     extraction_proxy_port: int = Field(default=8765, ge=1, le=65535)

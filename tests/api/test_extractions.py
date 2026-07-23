@@ -83,6 +83,27 @@ def test_extraction_returns_normalized_media_without_source_url() -> None:
     assert "source_url" not in json.dumps(payload)
 
 
+def test_extraction_issues_generated_preview_when_metadata_has_no_poster() -> None:
+    """Verify downloadable media always receives an opaque preview URL."""
+    media_record = record()
+    media_record.update(
+        {
+            "type": "video",
+            "url": "https://video.twimg.com/1.mp4",
+            "preview_url": None,
+            "extension": "mp4",
+        }
+    )
+    client, _extractor = make_client([media_record])
+
+    response = client.post("/api/extractions", json={"url": "https://x.com/creator/status/1"})
+
+    assert response.status_code == 200
+    media = response.json()["media"][0]
+    assert media["preview_url"].startswith("/api/media/")
+    assert media["preview_url"].endswith("/preview")
+
+
 def test_extraction_omits_private_extractor_fields_from_public_response() -> None:
     """Verify credentials, cookies, headers, raw output, and stack traces cannot leak."""
     private_record = record()
