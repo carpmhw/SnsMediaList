@@ -6,6 +6,7 @@ ERROR_STATUS: dict[str, int] = {
     "invalid_url": 400,
     "unsupported_url": 400,
     "post_unavailable": 404,
+    "story_unavailable": 404,
     "token_not_found": 404,
     "no_media": 422,
     "extraction_limit_exceeded": 422,

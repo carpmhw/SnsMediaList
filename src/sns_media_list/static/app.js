@@ -12,20 +12,21 @@ const mediaGrid = document.querySelector('#media-grid');
 let submittedUrl = '';
 
 const ERROR_MESSAGES = {
-  invalid_url: '請輸入 HTTPS Instagram 貼文/Reel 或 X 狀態貼文 URL。',
-  unsupported_url: '僅支援 Instagram 貼文/Reel 與 X 狀態貼文 URL。',
+  invalid_url: '請輸入 HTTPS Instagram 貼文、Reel、單則 Story 或 X 狀態貼文 URL。',
+  unsupported_url: '僅支援 Instagram 貼文、Reel、單則 Story 與 X 狀態貼文 URL；帳號目前全部 Stories 與 Highlights 不支援。',
   post_unavailable: '此貼文無法使用、已刪除，或目前帳號無法讀取。',
-  no_media: '此貼文沒有找到可直接串流的媒體。',
-  extraction_limit_exceeded: '此貼文的媒體數量超過服務可列出的上限。',
+  story_unavailable: '此 Story 目前無法使用。',
+  no_media: '此內容沒有可直接串流的媒體。',
+  extraction_limit_exceeded: '此內容的媒體數量超過服務可列出的上限。',
   local_rate_limited: '服務目前忙碌中，請稍候再試。',
   upstream_rate_limited: '平台暫時限制存取，請稍後再試。',
   platform_authentication_failed: '平台驗證工作階段無法使用，請聯絡服務管理者。',
   capacity_exceeded: '暫存結果容量已滿，請稍後重新分析。',
-  extraction_failed: '目前無法分析此貼文。',
+  extraction_failed: '目前無法分析此內容。',
   extraction_timeout: '平台回應時間過長，請稍後再試。',
   upstream_media_invalid: '其中一個媒體資源不是有效的可下載檔案。',
-  token_expired: '下載參照已過期，請重新分析貼文以建立新的參照。',
-  token_not_found: '下載參照已不可用，請重新分析貼文。',
+  token_expired: '下載參照已過期，請重新分析內容以建立新的參照。',
+  token_not_found: '下載參照已不可用，請重新分析內容。',
 };
 
 /** Update the inline status region without exposing raw API details. */
@@ -150,9 +151,9 @@ function renderMediaCard(media, index) {
 
 /** Render normalized extraction metadata and replace the previous card grid. */
 function renderResults(payload) {
-  platformLabel.textContent = payload.platform === 'instagram' ? 'INSTAGRAM 貼文' : 'X 貼文';
-  postDescription.textContent = payload.description || payload.author || '公開貼文';
-  sourceLink.textContent = '開啟原始貼文';
+  platformLabel.textContent = payload.platform === 'instagram' ? 'Instagram 內容' : 'X 狀態貼文';
+  postDescription.textContent = payload.description || payload.author || '來源內容';
+  sourceLink.textContent = '開啟原始內容';
   sourceLink.href = payload.post_url;
   resultsSummary.textContent = `${payload.media.length} 個媒體項目已準備就緒`;
   mediaGrid.replaceChildren(...payload.media.map(renderMediaCard));
@@ -179,13 +180,13 @@ async function readApiError(response) {
   return error;
 }
 
-/** Submit the current post URL and replace the result state. */
+/** Submit the current content URL and replace the result state. */
 async function analyze(event) {
   event?.preventDefault();
   submittedUrl = input.value.trim();
   button.disabled = true;
   clearResults();
-  setStatus('正在分析貼文...', 'loading');
+  setStatus('正在分析內容...', 'loading');
   try {
     const response = await fetch('/api/extractions', {
       method: 'POST',
@@ -199,7 +200,7 @@ async function analyze(event) {
     setStatus('準備就緒，請選擇個別下載。', 'success');
   } catch (error) {
     const canReanalyze = error.code === 'token_expired' || error.code === 'token_not_found';
-    setStatus(error.message || '目前無法分析此貼文。', 'error', canReanalyze);
+    setStatus(error.message || '目前無法分析此內容。', 'error', canReanalyze);
   } finally {
     button.disabled = false;
   }

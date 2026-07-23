@@ -1,13 +1,15 @@
 # SNS Media List
 
-SNS Media List 是一個低併發、自架式 Web 工具，可分析支援的 Instagram 貼文/Reel 與 X 狀態貼文，依原始順序列出可直接下載的圖片、漸進式影片與動畫 GIF。部署可維持匿名模式，也可由 operator 以平台 Cookie 啟用可信的帳號可見內容 extraction。
+SNS Media List 是一個低併發、自架式 Web 工具，可分析支援的 Instagram 貼文/Reel、精確單則 Story 與 X 狀態貼文，列出可直接下載的圖片、漸進式影片與動畫 GIF。部署可維持匿名模式，也可由 operator 以平台 Cookie 啟用可信的帳號可見內容 extraction。
 
 > 請只下載你有權保存的內容。使用者需自行確認內容的著作權、平台條款與當地法規。
 
 ## 主要功能
 
 - 支援公開 Instagram 單篇貼文、Reel 與 X 單篇狀態貼文。
+- 支援精確單則 Instagram Story URL；匿名擷取僅為 best effort，不保證成功。
 - 保留 carousel 或多媒體貼文的來源順序。
+- 每則 Story 只回傳一個主要圖片或可直接下載的漸進式影片。
 - 每個媒體項目提供獨立預覽、資訊與下載操作。
 - 預覽優先使用平台 CDN poster；缺少可信 poster 時，首次載入會按需生成受限 JPEG 縮圖。
 - 使用短效 opaque token 隱藏 upstream media URL。
@@ -19,20 +21,25 @@ SNS Media List 是一個低併發、自架式 Web 工具，可分析支援的 In
 | 項目 | 支援狀態 |
 | --- | --- |
 | Instagram 公開 `/p/` 貼文與 `/reel/` Reel | 支援，但受匿名平台存取限制 |
+| Instagram 精確單則 `/stories/<username>/<numeric-media-id>/` Story | 支援；匿名擷取僅為 best effort，不保證成功 |
 | X/Twitter 公開 `/status/` 貼文 | 支援，但受匿名平台存取限制 |
 | 圖片、漸進式影片、X 動畫 GIF | 支援 |
+| Story 主要圖片或漸進式影片 | 支援，每則只回傳一個主要媒體 |
 | 混合 carousel | 支援，依來源順序列出 |
-| 私人、追蹤者限定、年齡限制或登入後內容 | 未配置平台 Cookie 時不支援；配置後限 operator 帳號可見範圍 |
-| Stories、Highlights、帳號頁、feed、搜尋與 thread 批次下載 | 不支援 |
+| 私人、追蹤者限定、Close Friends、受眾限定、年齡限制或登入後內容 | 未配置平台 Cookie 時不支援；配置後限 operator 帳號可見範圍 |
+| 帳號全部 Stories、Stories tray、Highlights 與 Story 批次下載 | 不支援 |
+| 帳號頁、feed、搜尋與 thread 批次下載 | 不支援 |
 | HLS/DASH 合併、轉碼、ZIP 與畫質選擇 | 不支援 |
 
 公開可見不代表匿名模式一定能存取。Instagram、X 或 `gallery-dl` 可能要求登入、限制訪客 token 或套用 rate limit；未配置平台 Cookie 時，本服務不會要求或儲存平台登入資料。
 
-未配置平台 Cookie 時本服務不支援私人貼文。配置 operator-managed Cookie 後，服務會依該帳號可見範圍處理支援的單篇貼文；任何可連線使用者都可能間接使用該帳號的讀取權限，因此只適合本人或可信內網。
+未配置平台 Cookie 時本服務不支援私人貼文，精確單則 Story 也只會嘗試匿名擷取。配置 operator-managed Cookie 後，服務會依該帳號可見範圍處理支援的單篇貼文或精確單則 Story；任何可連線使用者都可能間接使用該帳號的讀取權限，因此只適合本人或可信內網。
+
+Story 輸出限於精確 URL 的主要媒體：每則 Story 只回傳一個主要圖片或可直接下載的漸進式影片。圖片 Story 即使帶有音樂貼紙或音訊 metadata，也不會另行輸出 audio；不提供 Story 批次封存、ZIP 或轉碼，也不會合成圖片與音樂。
 
 ## 安全設計
 
-- 僅接受明確支援的 HTTPS 貼文 URL 與平台/CDN host。
+- 僅接受明確支援的 HTTPS 貼文與精確單則 Story URL，以及平台/CDN host。
 - 每次連線前驗證所有 DNS A/AAAA 回應，拒絕 private、loopback、link-local、reserved 與其他非 public IP。
 - outbound transport 連接已驗證的 IP，同時保留原 hostname 作為 TLS SNI、憑證驗證與 HTTP Host。
 - extractor 透過受限的 loopback CONNECT proxy 執行，並隔離 HOME、proxy variables、plugins 與 user config；若啟用驗證，只傳入選定平台的 Cookie file path。
@@ -73,7 +80,9 @@ docker compose down
 
 ## 平台 Cookie 驗證（可信部署）
 
-Cookie 是 bearer credential，不要使用個人主要帳號，也不要把 Cookie value 放進 shell command、environment、issue 或 log。請使用專用、低權限的 Instagram/X 帳號，匯出 Netscape `cookies.txt`，並限制 host file 權限，使 container UID 10001 可讀取但其他使用者不可讀取。
+Cookie 是 bearer credential，不要使用個人主要帳號，也不要把 Cookie value 放進 shell command、environment、issue 或 log。請使用專用、低權限的 Instagram 帳號或 X 帳號，匯出 Netscape `cookies.txt`，並限制 host file 權限，使 container UID 10001 可讀取但其他使用者不可讀取。
+
+Instagram Cookie 啟用後，所有可使用本服務的人都可能間接使用 operator 帳號的 Story 可見權限，包括私人、Close Friends 或其他受眾限定 Story。服務不提供個別使用者的權限隔離；請搭配專用、低權限帳號，且只部署於本人環境或可信內網。
 
 平台可獨立啟用。Instagram 使用：
 
@@ -133,8 +142,9 @@ OPERATIONS.md         完整 operator guide
 
 | Code | HTTP | 說明 |
 | --- | ---: | --- |
-| `unsupported_url` | 400 | URL host、scheme 或貼文 path 不受支援 |
+| `unsupported_url` | 400 | URL host、scheme 或媒體 path 不受支援 |
 | `post_unavailable` | 404 | 貼文不存在、需要登入，或匿名 extractor 無法讀取 |
+| `story_unavailable` | 404 | 無法取得精確 Story；統一涵蓋已過期、已刪除、不存在、匿名模式需登入或目前 session 不可見等情況，不細分或推斷原因 |
 | `no_media` | 422 | 沒有可直接串流的媒體 |
 | `local_rate_limited` | 429 | 本機 extraction/download slot 已滿 |
 | `upstream_rate_limited` | 429 | 平台限制匿名存取 |
@@ -150,6 +160,6 @@ API 不會回傳 upstream media URL、Cookie、credentials、request headers、r
 
 ## 第三方元件與授權
 
-本專案使用 pinned `gallery-dl` 執行公開貼文 extraction。`gallery-dl` 採 GPL-2.0-only，相關 notice 位於 [`LICENSES/gallery-dl.txt`](LICENSES/gallery-dl.txt)。
+本專案使用 pinned `gallery-dl` 執行支援內容 extraction。`gallery-dl` 採 GPL-2.0-only，相關 notice 位於 [`LICENSES/gallery-dl.txt`](LICENSES/gallery-dl.txt)。
 
 SNS Media List 專案程式碼採 [MIT License](LICENSE)。

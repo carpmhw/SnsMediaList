@@ -70,6 +70,20 @@ def test_instagram_resolved_video_url_is_not_mislabeled_as_image() -> None:
     assert result.items[0].media_type == "video"
 
 
+def test_instagram_story_image_ignores_audio_metadata() -> None:
+    """Verify Story soundtrack metadata does not create a separate audio item."""
+    result = normalize_gallery_output(fixture_lines("instagram-story-image.jsonl"))
+
+    assert [item.media_type for item in result.items] == ["image"]
+
+
+def test_instagram_story_video_keeps_one_primary_video() -> None:
+    """Verify a video Story remains one primary video item after normalization."""
+    result = normalize_gallery_output(fixture_lines("instagram-story-video.jsonl"))
+
+    assert [item.media_type for item in result.items] == ["video"]
+
+
 def test_x_original_image_gets_supported_small_cdn_preview() -> None:
     """Verify the tested X image query transformation preserves the original download URL."""
     result = normalize_gallery_output(fixture_lines("x-image-no-preview.jsonl"))

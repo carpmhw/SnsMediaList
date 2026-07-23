@@ -4,11 +4,36 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Iterable
-from typing import Any
+import os
+import stat
+import sys
+from collections.abc import Iterable, Sequence
+from pathlib import Path
+from typing import Any, NoReturn
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
+
+from sns_media_list.errors import AppError
+from sns_media_list.url_validation import validate_post_url
+
+
+class SafeArgumentParser(argparse.ArgumentParser):
+    """Parse arguments without echoing rejected caller-controlled values."""
+
+    def error(self, message: str) -> NoReturn:
+        """Exit with a fixed error instead of exposing argparse details."""
+        self.print_usage(sys.stderr)
+        self.exit(2, "error: invalid arguments\n")
+
+    def require_story_file(self) -> NoReturn:
+        """Exit with fixed guidance for Story URLs supplied on the command line."""
+        self.print_usage(sys.stderr)
+        self.exit(
+            2,
+            "error: direct Story URL input is not accepted; use --instagram-story-file\n",
+        )
+
 
 CASES = (
     "instagram_image",
@@ -19,11 +44,33 @@ CASES = (
     "x_gif",
 )
 _FORBIDDEN_KEYS = frozenset({"source_url", "request_headers", "cookies", "raw", "extractor"})
+_MAX_STORY_URL_BYTES = 2048
+
+
+def _iter_raw_case_values(arguments: Sequence[str]) -> Iterable[str]:
+    """Yield every raw value assigned to any required smoke case flag."""
+    case_options = {f"--{case.replace('_', '-')}" for case in CASES}
+    for index, argument in enumerate(arguments):
+        if argument in case_options:
+            if index + 1 < len(arguments):
+                yield arguments[index + 1]
+            continue
+        option, separator, value = argument.partition("=")
+        if separator and option in case_options:
+            yield value
+
+
+def _is_story_url(value: str) -> bool:
+    """Return whether an argument value validates as an exact Story URL."""
+    try:
+        return validate_post_url(value).kind == "story"
+    except AppError:
+        return False
 
 
 def parse_arguments() -> argparse.Namespace:
-    """Parse the local endpoint and six owner-controlled post URLs."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    """Parse the local endpoint, six required posts, and optional Story file."""
+    parser = SafeArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument(
         "--verify-previews",
@@ -32,7 +79,74 @@ def parse_arguments() -> argparse.Namespace:
     )
     for case in CASES:
         parser.add_argument(f"--{case.replace('_', '-')}", required=True)
-    return parser.parse_args()
+    parser.add_argument(
+        "--instagram-story-file",
+        metavar="ABSOLUTE_PATH",
+        help="read one optional owner-controlled exact Story URL from a private file",
+    )
+    arguments = sys.argv[1:]
+    if any(
+        argument == "--instagram-story" or argument.startswith("--instagram-story=")
+        for argument in arguments
+    ):
+        parser.require_story_file()
+    if any(_is_story_url(value) for value in _iter_raw_case_values(arguments)):
+        parser.require_story_file()
+    parsed = parser.parse_args(arguments)
+    if any(_is_story_url(getattr(parsed, case)) for case in CASES):
+        parser.require_story_file()
+    return parsed
+
+
+def load_instagram_story_url(file_path: str) -> str:
+    """Load and validate one exact Instagram Story URL from a private file."""
+    path = Path(file_path)
+    if not path.is_absolute():
+        raise ValueError("the Instagram Story URL file path must be absolute")
+
+    try:
+        path_status = path.lstat()
+    except OSError:
+        raise ValueError("the Instagram Story URL file could not be opened") from None
+    if not stat.S_ISREG(path_status.st_mode) or stat.S_ISLNK(path_status.st_mode):
+        raise ValueError("the Instagram Story URL file must be a regular non-symlink file")
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as story_file:
+            opened_status = os.fstat(story_file.fileno())
+            if not stat.S_ISREG(opened_status.st_mode):
+                raise ValueError("the Instagram Story URL file must be a regular non-symlink file")
+            if opened_status.st_mode & 0o077:
+                raise ValueError("the Instagram Story URL file must deny access to group or other")
+            content = story_file.read(_MAX_STORY_URL_BYTES + 3)
+    except ValueError:
+        raise
+    except OSError:
+        raise ValueError("the Instagram Story URL file could not be opened") from None
+
+    if len(content) > _MAX_STORY_URL_BYTES + 2:
+        raise ValueError("the Instagram Story URL file content is invalid")
+    try:
+        lines = content.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        raise ValueError("the Instagram Story URL file content is invalid") from None
+    if len(lines) != 1 or not lines[0] or lines[0] != lines[0].strip():
+        raise ValueError("the Instagram Story URL file must contain one non-empty line")
+    story_url = lines[0]
+    if len(story_url.encode("utf-8")) > _MAX_STORY_URL_BYTES:
+        raise ValueError("the Instagram Story URL file content is invalid")
+
+    try:
+        target = validate_post_url(story_url)
+    except AppError:
+        raise ValueError(
+            "the Instagram Story URL file does not contain an exact Story URL"
+        ) from None
+    if target.platform != "instagram" or target.kind != "story":
+        raise ValueError("the Instagram Story URL file does not contain an exact Story URL")
+    return target.canonical_url
 
 
 def post_extraction(base_url: str, post_url: str) -> tuple[int, dict[str, Any]]:
@@ -136,10 +250,14 @@ def verify_previews(base_url: str, payload: dict[str, Any]) -> None:
 
 
 def main() -> int:
-    """Run all six live smoke cases and print non-sensitive outcomes."""
+    """Run required and optional live smoke cases with non-sensitive output."""
     arguments = parse_arguments()
-    for case in CASES:
-        status, payload = post_extraction(arguments.base_url, getattr(arguments, case))
+    cases = [(case, getattr(arguments, case)) for case in CASES]
+    if arguments.instagram_story_file is not None:
+        story_url = load_instagram_story_url(arguments.instagram_story_file)
+        cases.append(("instagram_story", story_url))
+    for case, post_url in cases:
+        status, payload = post_extraction(arguments.base_url, post_url)
         count = validate_response(status, payload)
         if arguments.verify_previews:
             verify_previews(arguments.base_url, payload)

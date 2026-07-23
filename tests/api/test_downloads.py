@@ -40,6 +40,30 @@ class FakeExtractor:
         ]
 
 
+class StoryImageExtractor:
+    """Return one exact Instagram Story image without authentication metadata."""
+
+    async def extract(self, _post_url: Any) -> list[dict[str, Any]]:
+        """Return deterministic Story media with a trusted Instagram preview."""
+        return [
+            {
+                "platform": "instagram",
+                "post_url": ("https://www.instagram.com/stories/example.user/1111111111111111111/"),
+                "post_id": "1111111111111111111",
+                "num": 1,
+                "type": "image",
+                "url": "https://scontent.cdninstagram.com/story-image.jpg?source=private",
+                "preview_url": (
+                    "https://scontent.cdninstagram.com/story-image-preview.jpg?source=private"
+                ),
+                "extension": "jpg",
+                "width": 1080,
+                "height": 1920,
+                "progressive": True,
+            }
+        ]
+
+
 class GeneratedExtractor:
     """Return one video without a platform poster for generated-preview tests."""
 
@@ -195,12 +219,14 @@ class FakeMediaClient:
     def __init__(self, *, status_code: int = 200, content_type: str = "image/jpeg") -> None:
         """Initialize captured upstream request headers for boundary assertions."""
         self.last_headers: dict[str, str] = {}
+        self.requests: list[tuple[str, dict[str, str]]] = []
         self.status_code = status_code
         self.content_type = content_type
 
-    async def fetch(self, _url: str, *, headers: Any) -> MediaResponse:
+    async def fetch(self, url: str, *, headers: Any) -> MediaResponse:
         """Return a valid image response without contacting a CDN."""
         self.last_headers = dict(headers)
+        self.requests.append((url, self.last_headers))
         body = b"\xff\xd8\xff\xe0fake-image"
         return MediaResponse(
             self.status_code,
@@ -238,6 +264,53 @@ def test_download_and_preview_use_bound_tokens() -> None:
     assert preview.status_code == 200
     assert preview.headers["content-disposition"].startswith("inline;")
     assert preview.headers["x-content-type-options"] == "nosniff"
+
+
+def test_authenticated_story_delivery_uses_only_fixed_instagram_headers(tmp_path) -> None:
+    """Verify Story preview and download never forward configured authentication."""
+    cookie_file = tmp_path / "instagram.cookies.txt"
+    cookie_file.write_text(
+        "# Netscape HTTP Cookie File\n"
+        ".instagram.com\tTRUE\t/\tTRUE\t2147483647\tsessionid\tstory-cookie-secret\n",
+        encoding="utf-8",
+    )
+    settings = Settings(instagram_cookie_file=str(cookie_file))
+    media_client = FakeMediaClient()
+    service = ExtractionService(
+        settings,
+        extractor=StoryImageExtractor(),
+        token_store=TokenStore(capacity=20, ttl_seconds=600),
+    )
+    client = TestClient(
+        create_app(settings=settings, extraction_service=service, media_client=media_client)
+    )
+    story_url = "https://www.instagram.com/stories/example.user/1111111111111111111/"
+
+    extraction = client.post("/api/extractions", json={"url": story_url})
+    assert extraction.status_code == 200
+    media = extraction.json()["media"][0]
+    preview = client.get(media["preview_url"])
+    download = client.get(media["download_url"])
+
+    assert preview.status_code == 200
+    assert download.status_code == 200
+    expected_headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
+        "Referer": "https://www.instagram.com/",
+    }
+    assert media_client.requests == [
+        (
+            "https://scontent.cdninstagram.com/story-image-preview.jpg?source=private",
+            expected_headers,
+        ),
+        (
+            "https://scontent.cdninstagram.com/story-image.jpg?source=private",
+            expected_headers,
+        ),
+    ]
+    for _url, headers in media_client.requests:
+        assert "Cookie" not in headers
+        assert "Authorization" not in headers
 
 
 @pytest.mark.asyncio

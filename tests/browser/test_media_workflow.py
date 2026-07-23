@@ -11,8 +11,14 @@ def test_home_page_contains_contact_sheet_workflow() -> None:
 
     assert response.status_code == 200
     assert '<html lang="zh-Hant">' in response.text
-    assert "將一則貼文整理成清晰的下載清單。" in response.text
-    assert "分析單篇貼文" in response.text
+    assert "將一則內容整理成清晰的下載清單。" in response.text
+    assert "分析單則內容" in response.text
+    assert "Instagram 貼文、Reel、單則 Story 與 X 狀態貼文" in response.text
+    assert "帳號目前全部 Stories 與 Highlights 不支援" in response.text
+    assert "可信部署若使用服務管理者的 Instagram 工作階段" in response.text
+    assert "任何服務使用者都可能間接存取該帳號可見的私人或受眾限定 Story" in response.text
+    assert "X status" not in response.text
+    assert "operator session" not in response.text
     assert "請只下載你有權保存的內容" in response.text
     assert 'id="extraction-form"' in response.text
     assert 'id="post-url"' in response.text
@@ -68,6 +74,14 @@ def test_javascript_has_same_origin_extraction_and_recovery_hooks() -> None:
     assert "token_expired" in response.text
     assert "token_not_found" in response.text
     assert "平台暫時限制存取" in response.text
+    assert "story_unavailable" in response.text
+    assert "此 Story 目前無法使用。" in response.text
+    assert "X 狀態貼文" in response.text
+    assert "帳號目前全部 Stories 與 Highlights 不支援" in response.text
+    assert "X status" not in response.text
+    assert "X STATUS" not in response.text
+    assert "正在分析內容..." in response.text
+    assert "目前無法分析此內容。" in response.text
     assert "重新分析" in response.text
     assert "local_rate_limited" in response.text
     assert "innerHTML" not in response.text

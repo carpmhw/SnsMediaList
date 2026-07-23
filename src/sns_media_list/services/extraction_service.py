@@ -1,6 +1,6 @@
 """Application orchestration for extraction and token issuance."""
 
-from typing import Any, Protocol, cast
+from typing import Protocol, cast
 
 from pydantic import HttpUrl
 
@@ -12,14 +12,14 @@ from ..extractor.normalizer import (
 )
 from ..models import ExtractionResponse, MediaItem, MediaType, Platform, PreviewMode
 from ..security.tokens import MediaTokenDraft, TokenStore
-from ..url_validation import validate_post_url
+from ..url_validation import ValidatedExtractionTarget, validate_post_url
 
 
 class Extractor(Protocol):
     """Define the async adapter interface used by the application service."""
 
-    async def extract(self, post_url: Any) -> list[dict[str, object]]:
-        """Extract raw metadata for one validated post URL."""
+    async def extract(self, target: ValidatedExtractionTarget) -> list[dict[str, object]]:
+        """Extract raw metadata for one validated media target."""
         raise NotImplementedError
 
 
@@ -35,7 +35,7 @@ class ExtractionService:
         self.token_store = token_store
 
     async def extract(self, url: str) -> ExtractionResponse:
-        """Extract one public post and atomically issue its media tokens."""
+        """Extract one validated media target and atomically issue its media tokens."""
         validated = validate_post_url(url)
         raw_records = await self.extractor.extract(validated)
         normalized = ensure_downloadable_media(
