@@ -1,16 +1,16 @@
 """FastAPI application factory and process-level middleware."""
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from uuid import uuid4
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.responses import Response
 
-from .api.limits import RequestLimiter
+from .api.limits import AttemptLimiter, RequestLimiter
+from .api.middleware import SecurityBoundaryMiddleware
 from .api.routes import build_router
 from .config import Settings, get_settings
 from .errors import AppError
@@ -86,6 +86,13 @@ def create_app(
     limiter = RequestLimiter(
         max_extractions=settings.max_extractions,
         max_downloads=settings.max_downloads,
+        max_downloads_per_client=settings.max_downloads_per_client,
+    )
+    attempt_limiter = AttemptLimiter(
+        extraction_limit=settings.rate_limit_extraction_attempts,
+        media_limit=settings.rate_limit_media_attempts,
+        window_seconds=settings.rate_limit_window_seconds,
+        max_identities=settings.rate_limit_identity_capacity,
     )
     thumbnail_generator = thumbnail_generator or ThumbnailGenerator(
         input_bytes=settings.thumbnail_input_bytes,
@@ -124,18 +131,9 @@ def create_app(
         lifespan=lifespan,
     )
     application.state.limiter = limiter
+    application.state.attempt_limiter = attempt_limiter
     application.state.thumbnail_cache = thumbnail_cache
     application.state.thumbnail_coordinator = thumbnail_coordinator
-
-    @application.middleware("http")
-    async def attach_request_id(
-        request: Request, call_next: Callable[[Request], Awaitable[Response]]
-    ) -> Response:
-        """Attach a request ID to request state and the response headers."""
-        request.state.request_id = uuid4().hex
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = request.state.request_id
-        return response
 
     @application.exception_handler(AppError)
     async def handle_app_error(request: Request, error: AppError) -> JSONResponse:
@@ -146,9 +144,22 @@ def create_app(
             request_id=getattr(request.state, "request_id", "unknown"),
         )
         response = JSONResponse(status_code=error.status_code or 500, content=payload.model_dump())
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
         if error.retry_after is not None:
             response.headers["Retry-After"] = str(error.retry_after)
+        response.headers["X-SNS-Error-Code"] = error.code
         return response
+
+    @application.exception_handler(RequestValidationError)
+    async def handle_request_validation_error(
+        request: Request, _error: RequestValidationError
+    ) -> JSONResponse:
+        """Convert framework validation failures into a stable safe error envelope."""
+        return await handle_app_error(
+            request,
+            AppError("invalid_request", "The request is invalid."),
+        )
 
     @application.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -161,9 +172,17 @@ def create_app(
             media_client,
             limiter=limiter,
             trusted_proxy_cidrs=settings.trusted_proxy_cidrs,
+            media_response_timeout_seconds=settings.media_response_timeout_seconds,
             thumbnail_generator=thumbnail_generator,
             thumbnail_coordinator=thumbnail_coordinator,
         )
+    )
+
+    application.add_middleware(
+        SecurityBoundaryMiddleware,
+        body_limit_bytes=settings.extraction_body_limit_bytes,
+        attempt_limiter=attempt_limiter,
+        trusted_proxy_cidrs=settings.trusted_proxy_cidrs,
     )
 
     static_dir = Path(__file__).parent / "static"

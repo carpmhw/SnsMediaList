@@ -227,6 +227,10 @@ docs
 # PyPI configuration file
 .pypirc
 
+# Generated security scan reports; keep the exception policy tracked
+security/trivy-*.json
+security/*.sarif
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

@@ -2,12 +2,14 @@
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Iterable
-from time import perf_counter
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from time import monotonic, perf_counter
+from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.types import Receive, Scope, Send
 
 from ..api.limits import Lease, RequestLimiter, client_identity
 from ..errors import AppError
@@ -27,6 +29,43 @@ from ..services.thumbnail_cache import ThumbnailCoordinator
 logger = logging.getLogger("sns_media_list")
 
 
+class DeadlineStreamingResponse(StreamingResponse):
+    """Stream one response while bounding upstream and downstream lifetime."""
+
+    def __init__(
+        self,
+        *args: Any,
+        deadline: float | None,
+        cleanup: Callable[[], Awaitable[None]] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Store the absolute deadline alongside the standard streaming response."""
+        super().__init__(*args, **kwargs)
+        self.deadline = deadline
+        self._cleanup = cleanup
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Cancel a downstream response when its complete lifetime expires."""
+        try:
+            if self.deadline is None:
+                await super().__call__(scope, receive, send)
+            else:
+                try:
+                    async with asyncio.timeout_at(self.deadline):
+                        await super().__call__(scope, receive, send)
+                except TimeoutError:
+                    return
+        finally:
+            await self._run_cleanup()
+
+    async def _run_cleanup(self) -> None:
+        """Run response cleanup once even when streaming never starts."""
+        cleanup = self._cleanup
+        self._cleanup = None
+        if cleanup is not None:
+            await cleanup()
+
+
 class ExtractionRequest(BaseModel):
     """Represent the only input accepted by the extraction endpoint."""
 
@@ -39,6 +78,7 @@ def build_router(
     *,
     limiter: RequestLimiter,
     trusted_proxy_cidrs: Iterable[str],
+    media_response_timeout_seconds: float,
     thumbnail_generator: ThumbnailGenerator,
     thumbnail_coordinator: ThumbnailCoordinator,
 ) -> APIRouter:
@@ -48,13 +88,7 @@ def build_router(
     @router.post("/extractions")
     async def create_extraction(request: Request, payload: ExtractionRequest) -> ExtractionResponse:
         """Extract a public post and return its normalized media list."""
-        lease = limiter.acquire_extraction(
-            client_identity(
-                request.client.host if request.client else "unknown",
-                request.headers.get("x-forwarded-for"),
-                trusted_proxy_cidrs,
-            )
-        )
+        lease = limiter.acquire_extraction(_request_client_identity(request, trusted_proxy_cidrs))
         async with lease:
             started = perf_counter()
             result = await service.extract(payload.url)
@@ -76,26 +110,28 @@ def build_router(
     async def download_media(request: Request, token: str) -> StreamingResponse:
         """Stream one authorized media resource as an attachment."""
         record = service.token_store.get(token, "download")
-        lease = limiter.acquire_download(
-            client_identity(
-                request.client.host if request.client else "unknown",
-                request.headers.get("x-forwarded-for"),
-                trusted_proxy_cidrs,
-            )
+        lease = limiter.acquire_download(_request_client_identity(request, trusted_proxy_cidrs))
+        return await _stream_media(
+            record,
+            media_client,
+            preview=False,
+            lease=lease,
+            response_timeout=media_response_timeout_seconds,
         )
-        return await _stream_media(record, media_client, preview=False, lease=lease)
+
+    @router.head("/media/{token}/download")
+    async def preflight_download(token: str) -> Response:
+        """Validate a download token without contacting or reading upstream media."""
+        service.token_store.get(token, "download")
+        return Response(status_code=204)
 
     @router.get("/media/{token}/preview")
     async def preview_media(request: Request, token: str) -> Response:
         """Proxy or generate one authorized preview with passive browser headers."""
         record = service.token_store.get(token, "preview")
-        lease = limiter.acquire_download(
-            client_identity(
-                request.client.host if request.client else "unknown",
-                request.headers.get("x-forwarded-for"),
-                trusted_proxy_cidrs,
-            )
-        )
+        if record.preview_mode == "generated" and not service.settings.generated_previews_enabled:
+            raise AppError("token_not_found", "The media token is not available.")
+        lease = limiter.acquire_download(_request_client_identity(request, trusted_proxy_cidrs))
         if record.preview_mode == "generated":
             return await _generate_preview(
                 record,
@@ -103,10 +139,29 @@ def build_router(
                 thumbnail_generator,
                 thumbnail_coordinator,
                 lease=lease,
+                response_timeout=media_response_timeout_seconds,
             )
-        return await _stream_media(record, media_client, preview=True, lease=lease)
+        return await _stream_media(
+            record,
+            media_client,
+            preview=True,
+            lease=lease,
+            response_timeout=media_response_timeout_seconds,
+        )
 
     return router
+
+
+def _request_client_identity(request: Request, trusted_proxy_cidrs: Iterable[str]) -> str:
+    """Reuse the pre-parsed client identity established by the ASGI boundary."""
+    identity = getattr(request.state, "client_identity", None)
+    if isinstance(identity, str):
+        return identity
+    return client_identity(
+        request.client.host if request.client else "unknown",
+        request.headers.get("x-forwarded-for"),
+        trusted_proxy_cidrs,
+    )
 
 
 async def _stream_media(
@@ -115,13 +170,17 @@ async def _stream_media(
     *,
     preview: bool,
     lease: Lease,
+    response_timeout: float | None = None,
 ) -> StreamingResponse:
     """Fetch, prevalidate, and stream one private media record."""
     source_url = record.source_url
     request_headers = record.request_headers
     filename = record.filename
+    deadline = monotonic() + response_timeout if response_timeout is not None else None
     try:
-        response = await media_client.fetch(source_url, headers=request_headers)
+        response = await _await_with_deadline(
+            media_client.fetch(source_url, headers=request_headers), deadline
+        )
     except BaseException:
         await lease.release()
         raise
@@ -131,7 +190,7 @@ async def _stream_media(
         expected_media_class=record.media_class,
     )
     try:
-        first_chunk = await anext(iterator)
+        first_chunk = await _await_with_deadline(anext(iterator), deadline)
     except StopAsyncIteration as error:
         try:
             await response.close()
@@ -145,22 +204,59 @@ async def _stream_media(
             await lease.release()
         raise
 
+    cleaned = False
+
+    async def cleanup() -> None:
+        """Close the upstream response and release its lease exactly once."""
+        nonlocal cleaned
+        if cleaned:
+            return
+        cleaned = True
+        try:
+            await response.close()
+        finally:
+            await lease.release()
+
     async def body() -> AsyncIterator[bytes]:
         """Yield the prevalidated first chunk and remaining upstream bytes."""
         try:
             yield first_chunk
-            async for chunk in iterator:
+            while True:
+                try:
+                    chunk = await _await_with_deadline(anext(iterator), deadline)
+                except StopAsyncIteration:
+                    break
                 yield chunk
         finally:
-            try:
-                await response.close()
-            finally:
-                await lease.release()
+            await cleanup()
 
-    headers = build_forward_response_headers(response, filename=filename, preview=preview)
-    return StreamingResponse(
-        body(), headers=headers, media_type=response.headers.get("content-type")
+    try:
+        headers = build_forward_response_headers(response, filename=filename, preview=preview)
+    except BaseException:
+        await cleanup()
+        raise
+    return DeadlineStreamingResponse(
+        body(),
+        headers=headers,
+        media_type=response.headers.get("content-type"),
+        deadline=deadline,
+        cleanup=cleanup,
     )
+
+
+async def _await_with_deadline[T](awaitable: Awaitable[T], deadline: float | None) -> T:
+    """Await one operation until an optional complete-response deadline."""
+    if deadline is None:
+        return await awaitable
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise AppError("upstream_media_invalid", "The media response exceeded its deadline.")
+    try:
+        return await asyncio.wait_for(awaitable, timeout=remaining)
+    except TimeoutError as error:
+        raise AppError(
+            "upstream_media_invalid", "The media response exceeded its deadline."
+        ) from error
 
 
 async def _generate_preview(
@@ -170,8 +266,10 @@ async def _generate_preview(
     thumbnail_coordinator: ThumbnailCoordinator,
     *,
     lease: Lease,
+    response_timeout: float | None = None,
 ) -> Response:
-    """Generate or retrieve one buffered JPEG and release the request lease."""
+    """Generate one buffered JPEG and hold its lease through response completion."""
+    deadline = monotonic() + response_timeout if response_timeout is not None else None
 
     async def generate() -> bytes:
         """Fetch the source and generate a JPEG within the complete preview deadline."""
@@ -212,17 +310,29 @@ async def _generate_preview(
             raise AppError("upstream_media_invalid", "Thumbnail generation timed out.") from error
 
     try:
-        data = await thumbnail_coordinator.get_or_generate(
-            record.token,
-            expires_at=record.expires_at,
-            factory=generate,
+        data = await _await_with_deadline(
+            thumbnail_coordinator.get_or_generate(
+                record.token, expires_at=record.expires_at, factory=generate
+            ),
+            deadline,
         )
-    finally:
+    except BaseException:
         await lease.release()
-    headers = build_preview_headers(record.filename)
-    headers["Content-Type"] = "image/jpeg"
-    headers["Content-Length"] = str(len(data))
-    return Response(content=data, headers=headers, media_type="image/jpeg")
+        raise
+    try:
+        headers = build_preview_headers(record.filename)
+        headers["Content-Type"] = "image/jpeg"
+        headers["Content-Length"] = str(len(data))
+        return DeadlineStreamingResponse(
+            [data],
+            headers=headers,
+            media_type="image/jpeg",
+            deadline=deadline,
+            cleanup=lease.release,
+        )
+    except BaseException:
+        await lease.release()
+        raise
 
 
 async def _close_response_with_timeout(

@@ -11,6 +11,14 @@ def test_settings_have_bounded_defaults() -> None:
     assert settings.token_ttl_seconds == 600
     assert settings.extraction_timeout_seconds > 0
     assert settings.max_download_bytes > 0
+    assert settings.max_downloads_per_client == 2
+    assert settings.extraction_body_limit_bytes == 4_096
+    assert settings.rate_limit_window_seconds == 60.0
+    assert settings.rate_limit_extraction_attempts == 10
+    assert settings.rate_limit_media_attempts == 120
+    assert settings.rate_limit_identity_capacity == 2_048
+    assert settings.media_response_timeout_seconds == 120.0
+    assert settings.generated_previews_enabled is False
 
 
 def test_settings_reject_non_positive_limits() -> None:
@@ -21,6 +29,67 @@ def test_settings_reject_non_positive_limits() -> None:
         assert "media_limit" in str(error)
     else:
         raise AssertionError("Settings accepted an invalid media limit")
+
+
+def test_security_settings_accept_environment_overrides(monkeypatch) -> None:
+    """Verify security settings are loaded through the SNS_MEDIA environment prefix."""
+    monkeypatch.setenv("SNS_MEDIA_EXTRACTION_BODY_LIMIT_BYTES", "8192")
+    monkeypatch.setenv("SNS_MEDIA_RATE_LIMIT_WINDOW_SECONDS", "30")
+    monkeypatch.setenv("SNS_MEDIA_RATE_LIMIT_EXTRACTION_ATTEMPTS", "3")
+    monkeypatch.setenv("SNS_MEDIA_RATE_LIMIT_MEDIA_ATTEMPTS", "12")
+    monkeypatch.setenv("SNS_MEDIA_RATE_LIMIT_IDENTITY_CAPACITY", "64")
+    monkeypatch.setenv("SNS_MEDIA_MAX_DOWNLOADS_PER_CLIENT", "3")
+    monkeypatch.setenv("SNS_MEDIA_MEDIA_RESPONSE_TIMEOUT_SECONDS", "90")
+    monkeypatch.setenv("SNS_MEDIA_GENERATED_PREVIEWS_ENABLED", "true")
+
+    settings = Settings()
+
+    assert settings.extraction_body_limit_bytes == 8_192
+    assert settings.rate_limit_window_seconds == 30.0
+    assert settings.rate_limit_extraction_attempts == 3
+    assert settings.rate_limit_media_attempts == 12
+    assert settings.rate_limit_identity_capacity == 64
+    assert settings.max_downloads_per_client == 3
+    assert settings.media_response_timeout_seconds == 90.0
+    assert settings.generated_previews_enabled is True
+
+
+def test_security_settings_reject_values_outside_safe_bounds() -> None:
+    """Verify request and response security limits cannot be unbounded or disabled."""
+    invalid = (
+        {"extraction_body_limit_bytes": 0},
+        {"extraction_body_limit_bytes": 65_537},
+        {"rate_limit_window_seconds": 0},
+        {"rate_limit_window_seconds": 3_601},
+        {"rate_limit_extraction_attempts": 0},
+        {"rate_limit_extraction_attempts": 11},
+        {"rate_limit_media_attempts": 0},
+        {"rate_limit_media_attempts": 121},
+        {"rate_limit_identity_capacity": 0},
+        {"rate_limit_identity_capacity": 2_049},
+        {"max_downloads_per_client": 0},
+        {"media_response_timeout_seconds": 0},
+        {"media_response_timeout_seconds": 3_601},
+    )
+
+    for values in invalid:
+        try:
+            Settings(**values)
+        except ValueError:
+            continue
+        raise AssertionError(f"Settings accepted invalid security values: {values}")
+
+
+def test_trusted_proxy_cidrs_are_valid_and_not_default_open() -> None:
+    """Verify proxy identity configuration rejects malformed or global networks."""
+    assert Settings(trusted_proxy_cidrs=("10.0.0.0/8",)).trusted_proxy_cidrs == ("10.0.0.0/8",)
+
+    for value in (("not-a-cidr",), ("0.0.0.0/0",), ("::/0",)):
+        try:
+            Settings(trusted_proxy_cidrs=value)
+        except ValueError:
+            continue
+        raise AssertionError(f"Settings accepted an unsafe proxy CIDR: {value}")
 
 
 def test_thumbnail_settings_have_bounded_defaults() -> None:

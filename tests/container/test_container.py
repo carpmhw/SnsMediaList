@@ -9,7 +9,14 @@ def test_dockerfile_uses_pinned_runtime_and_non_root_entrypoint() -> None:
     """Verify the image pins Python, installs the locked app, and runs as app."""
     dockerfile = (PROJECT_ROOT / "Dockerfile").read_text()
 
-    assert "python:3.12.3-slim-bookworm" in dockerfile
+    assert "python:3.12-slim-bookworm@sha256:" in dockerfile
+    assert "ghcr.io/astral-sh/uv:" in dockerfile
+    assert "COPY --from=uv" in dockerfile
+    assert "UV_PROJECT_ENVIRONMENT=/opt/venv" in dockerfile
+    assert "uv sync --frozen --no-dev" in dockerfile
+    assert "COPY --from=builder /opt/venv /opt/venv" in dockerfile
+    assert "/build/.venv" not in dockerfile
+    assert "pip install" not in dockerfile
     assert "gallery-dl==1.32.7" not in dockerfile
     assert "yt-dlp" not in dockerfile
     assert "USER app" in dockerfile
@@ -60,7 +67,11 @@ def test_compose_enforces_single_non_root_read_only_service() -> None:
     assert "/tmp:size=64m" in compose
     assert "healthcheck:" in compose
     assert '- --workers\n      - "1"' in compose
-    assert "${SNS_MEDIA_HOST_PORT:-8000}:8000" in compose
+    assert "127.0.0.1:${SNS_MEDIA_HOST_PORT:-8000}:8000" in compose
+    assert "cap_drop:" in compose
+    assert "- ALL" in compose
+    assert "no-new-privileges:true" in compose
+    assert "pids_limit:" in compose
     assert "volumes:" not in compose
     assert "/media" not in compose
 
@@ -73,10 +84,18 @@ def test_compose_documents_bounded_runtime_settings() -> None:
         "SNS_MEDIA_TOKEN_TTL_SECONDS",
         "SNS_MEDIA_TOKEN_CAPACITY",
         "SNS_MEDIA_EXTRACTION_TIMEOUT_SECONDS",
+        "SNS_MEDIA_EXTRACTION_BODY_LIMIT_BYTES",
         "SNS_MEDIA_MAX_DOWNLOAD_BYTES",
+        "SNS_MEDIA_MEDIA_RESPONSE_TIMEOUT_SECONDS",
         "SNS_MEDIA_MAX_REDIRECTS",
         "SNS_MEDIA_MAX_EXTRACTIONS",
         "SNS_MEDIA_MAX_DOWNLOADS",
+        "SNS_MEDIA_MAX_DOWNLOADS_PER_CLIENT",
+        "SNS_MEDIA_RATE_LIMIT_WINDOW_SECONDS",
+        "SNS_MEDIA_RATE_LIMIT_EXTRACTION_ATTEMPTS",
+        "SNS_MEDIA_RATE_LIMIT_MEDIA_ATTEMPTS",
+        "SNS_MEDIA_RATE_LIMIT_IDENTITY_CAPACITY",
+        "SNS_MEDIA_GENERATED_PREVIEWS_ENABLED",
         "SNS_MEDIA_THUMBNAIL_INPUT_BYTES",
         "SNS_MEDIA_THUMBNAIL_OUTPUT_BYTES",
         "SNS_MEDIA_THUMBNAIL_TIMEOUT_SECONDS",
@@ -119,6 +138,31 @@ def test_default_compose_has_no_platform_cookie_values_or_secret_mounts() -> Non
     assert "session-cookie-value" not in compose
 
 
+def test_nginx_example_authenticates_and_suppresses_sensitive_logs() -> None:
+    """Verify the reverse-proxy example gates access and never logs token routes."""
+    nginx = (PROJECT_ROOT / "deploy" / "nginx" / "sns-media-list.conf").read_text()
+
+    assert "auth_basic" in nginx
+    assert "auth_basic_user_file" in nginx
+    assert "location ^~ /api/media/" in nginx
+    assert "access_log off;" in nginx
+    assert "proxy_set_header X-Forwarded-For $remote_addr;" in nginx
+    assert 'proxy_set_header Forwarded "";' in nginx
+    assert 'proxy_set_header Cookie "";' in nginx
+    assert 'proxy_set_header Authorization "";' in nginx
+    assert "proxy_buffering off;" in nginx
+    assert "client_max_body_size 4k;" in nginx
+
+
+def test_nginx_syntax_check_has_local_and_pinned_container_paths() -> None:
+    """Verify Nginx syntax validation is repeatable without an installed binary."""
+    checker = (PROJECT_ROOT / "scripts" / "check_nginx_config.py").read_text()
+
+    assert '"nginx", "-t"' in checker
+    assert "docker" in checker
+    assert "nginx@sha256:" in checker
+
+
 def test_stack_cookie_setting_matches_the_mounted_filename() -> None:
     """Verify the deployment stack uses the dot-separated Instagram cookie filename."""
     stack = (PROJECT_ROOT / "stack").read_text()
@@ -138,7 +182,12 @@ def test_container_smoke_script_checks_runtime_boundaries() -> None:
         "expected 10001",
         '"ffmpeg", "-version"',
         "5.1.9",
+        '"uvicorn", "--version"',
         "read-only root filesystem check failed",
+        "NetworkSettings.Ports",
+        "CapDrop",
+        "no-new-privileges",
+        "PidsLimit",
         "restart-marker",
         '"stop", "-t", "10"',
     ):

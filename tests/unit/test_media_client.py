@@ -109,7 +109,8 @@ def test_preview_headers_are_passive() -> None:
 
     assert headers["Content-Disposition"].startswith("inline;")
     assert headers["X-Content-Type-Options"] == "nosniff"
-    assert headers["Cache-Control"] == "private, no-store"
+    assert headers["Cache-Control"] == "no-store"
+    assert headers["Referrer-Policy"] == "no-referrer"
     assert "default-src 'none'" in headers["Content-Security-Policy"]
 
 

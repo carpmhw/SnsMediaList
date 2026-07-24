@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 ERROR_STATUS: dict[str, int] = {
+    "invalid_request": 422,
     "invalid_url": 400,
     "unsupported_url": 400,
     "post_unavailable": 404,
@@ -10,6 +11,8 @@ ERROR_STATUS: dict[str, int] = {
     "token_not_found": 404,
     "no_media": 422,
     "extraction_limit_exceeded": 422,
+    "request_too_large": 413,
+    "unsupported_media_type": 415,
     "local_rate_limited": 429,
     "upstream_rate_limited": 429,
     "upstream_media_invalid": 502,

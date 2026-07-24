@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import socket
@@ -70,6 +71,36 @@ def verify_ffmpeg(container_id: str) -> None:
         raise RuntimeError("container FFmpeg version does not match the pinned runtime")
 
 
+def verify_uvicorn(container_id: str) -> None:
+    """Verify relocated virtualenv console scripts keep a valid interpreter path."""
+    run_command(["docker", "exec", container_id, "uvicorn", "--version"])
+
+
+def verify_network_binding(container_id: str) -> None:
+    """Verify the application port is published only on the host loopback."""
+    result = run_command(
+        ["docker", "inspect", "-f", "{{json .NetworkSettings.Ports}}", container_id]
+    )
+    ports = json.loads(result.stdout)
+    bindings = ports.get("8000/tcp") or []
+    if not bindings or any(
+        binding.get("HostIp") not in {"127.0.0.1", "::1"} for binding in bindings
+    ):
+        raise RuntimeError("container application port is not loopback-only")
+
+
+def verify_runtime_hardening(container_id: str) -> None:
+    """Verify capabilities, privilege escalation, and process-count bounds."""
+    result = run_command(["docker", "inspect", "-f", "{{json .HostConfig}}", container_id])
+    host_config = json.loads(result.stdout)
+    if "ALL" not in (host_config.get("CapDrop") or []):
+        raise RuntimeError("container capabilities were not dropped")
+    if "no-new-privileges:true" not in (host_config.get("SecurityOpt") or []):
+        raise RuntimeError("container no-new-privileges is not enabled")
+    if int(host_config.get("PidsLimit") or 0) <= 0:
+        raise RuntimeError("container PID limit is not bounded")
+
+
 def main() -> int:
     """Build, start, inspect, restart, and gracefully stop the service."""
     if shutil.which("docker") is None:
@@ -93,7 +124,10 @@ def main() -> int:
         user_id = run_command(["docker", "exec", container_id, "id", "-u"]).stdout.strip()
         if user_id != "10001":
             raise RuntimeError(f"container is running as UID {user_id}, expected 10001")
+        verify_network_binding(container_id)
+        verify_runtime_hardening(container_id)
         verify_ffmpeg(container_id)
+        verify_uvicorn(container_id)
         exec_python(
             container_id,
             """import errno

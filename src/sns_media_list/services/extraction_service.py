@@ -14,6 +14,8 @@ from ..models import ExtractionResponse, MediaItem, MediaType, Platform, Preview
 from ..security.tokens import MediaTokenDraft, TokenStore
 from ..url_validation import ValidatedExtractionTarget, validate_post_url
 
+LOCAL_PREVIEW_URL = "/placeholder.svg"
+
 
 class Extractor(Protocol):
     """Define the async adapter interface used by the application service."""
@@ -43,6 +45,7 @@ class ExtractionService:
         )
 
         drafts: list[MediaTokenDraft] = []
+        preview_modes: list[PreviewMode | None] = []
         for item in normalized.items:
             headers = build_media_request_headers(item.platform)
             drafts.append(
@@ -55,29 +58,40 @@ class ExtractionService:
                     request_headers=headers,
                 )
             )
-            preview_mode: PreviewMode = "proxy" if item.preview_source_url else "generated"
-            drafts.append(
-                MediaTokenDraft(
-                    purpose="preview",
-                    source_url=item.preview_source_url or item.source_url,
-                    media_class=(
-                        "image" if preview_mode == "proxy" else cast(MediaType, item.media_type)
-                    ),
-                    filename=item.filename,
-                    platform=cast(Platform, item.platform),
-                    request_headers=headers,
-                    preview_mode=preview_mode,
+            preview_mode: PreviewMode | None
+            if item.preview_source_url:
+                preview_mode = "proxy"
+            elif self.settings.generated_previews_enabled:
+                preview_mode = "generated"
+            else:
+                preview_mode = None
+            preview_modes.append(preview_mode)
+            if preview_mode is not None:
+                drafts.append(
+                    MediaTokenDraft(
+                        purpose="preview",
+                        source_url=item.preview_source_url or item.source_url,
+                        media_class=(
+                            "image" if preview_mode == "proxy" else cast(MediaType, item.media_type)
+                        ),
+                        filename=item.filename,
+                        platform=cast(Platform, item.platform),
+                        request_headers=headers,
+                        preview_mode=preview_mode,
+                    )
                 )
-            )
         records = self.token_store.reserve(drafts)
         record_index = 0
         media: list[MediaItem] = []
-        for item in normalized.items:
+        for item, preview_mode in zip(normalized.items, preview_modes, strict=True):
             download_record = records[record_index]
             record_index += 1
-            preview_record = records[record_index]
-            record_index += 1
-            preview_url = f"/api/media/{preview_record.token}/preview"
+            if preview_mode is None:
+                preview_url = LOCAL_PREVIEW_URL
+            else:
+                preview_record = records[record_index]
+                record_index += 1
+                preview_url = f"/api/media/{preview_record.token}/preview"
             media.append(
                 MediaItem(
                     token=download_record.token,

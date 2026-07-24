@@ -18,6 +18,8 @@ const ERROR_MESSAGES = {
   story_unavailable: '此 Story 目前無法使用。',
   no_media: '此內容沒有可直接串流的媒體。',
   extraction_limit_exceeded: '此內容的媒體數量超過服務可列出的上限。',
+  request_too_large: '提交的請求太大，請只貼上一個內容 URL。',
+  unsupported_media_type: '請使用未壓縮的 JSON 請求提交內容 URL。',
   local_rate_limited: '服務目前忙碌中，請稍候再試。',
   upstream_rate_limited: '平台暫時限制存取，請稍後再試。',
   platform_authentication_failed: '平台驗證工作階段無法使用，請聯絡服務管理者。',
@@ -175,8 +177,9 @@ async function readApiError(response) {
   } catch (_error) {
     payload = {};
   }
-  const error = new Error(ERROR_MESSAGES[payload.code] || '無法完成請求。');
-  error.code = payload.code || 'request_failed';
+  const code = response.headers.get('x-sns-error-code') || payload.code || 'request_failed';
+  const error = new Error(ERROR_MESSAGES[code] || '無法完成請求。');
+  error.code = code;
   return error;
 }
 
@@ -211,19 +214,21 @@ async function downloadMedia(event) {
   const downloadButton = event.currentTarget;
   downloadButton.disabled = true;
   try {
-    const response = await fetch(downloadButton.dataset.downloadUrl, { credentials: 'same-origin' });
-    if (!response.ok) {
-      throw await readApiError(response);
+    const preflight = await fetch(downloadButton.dataset.downloadUrl, {
+      method: 'HEAD',
+      credentials: 'same-origin',
+      cache: 'no-store',
+    });
+    if (!preflight.ok) {
+      throw await readApiError(preflight);
     }
-    const blob = await response.blob();
-    const objectUrl = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
-    anchor.href = objectUrl;
+    anchor.href = downloadButton.dataset.downloadUrl;
     anchor.download = downloadButton.dataset.filename || 'media-file';
+    anchor.rel = 'noreferrer';
     document.body.append(anchor);
     anchor.click();
     anchor.remove();
-    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
     setStatus('已開始下載。', 'success');
   } catch (error) {
     const canReanalyze = error.code === 'token_expired' || error.code === 'token_not_found';

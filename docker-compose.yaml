@@ -7,6 +7,8 @@ services:
     init: true
     restart: unless-stopped
     command:
+      - python
+      - -m
       - uvicorn
       - sns_media_list.app:create_app
       - --factory
@@ -19,24 +21,37 @@ services:
       - --no-access-log
     user: "10001:10001"
     read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
     tmpfs:
       - /tmp:size=64m,mode=1770,uid=10001,gid=10001
       - /app/.cache:size=32m,mode=1770,uid=10001,gid=10001
     ports:
-      - "${SNS_MEDIA_HOST_PORT:-8000}:8000"
+      - "127.0.0.1:${SNS_MEDIA_HOST_PORT:-8000}:8000"
     environment:
       SNS_MEDIA_ENVIRONMENT: production
       SNS_MEDIA_TOKEN_TTL_SECONDS: "600"
       SNS_MEDIA_TOKEN_CAPACITY: "200"
       SNS_MEDIA_EXTRACTION_TIMEOUT_SECONDS: "45"
       SNS_MEDIA_EXTRACTION_OUTPUT_LIMIT: "2000000"
+      SNS_MEDIA_EXTRACTION_BODY_LIMIT_BYTES: "4096"
       SNS_MEDIA_MAX_DOWNLOAD_BYTES: "500000000"
       SNS_MEDIA_CONNECT_TIMEOUT_SECONDS: "10"
       SNS_MEDIA_READ_TIMEOUT_SECONDS: "30"
       SNS_MEDIA_DOWNLOAD_TIMEOUT_SECONDS: "120"
+      SNS_MEDIA_MEDIA_RESPONSE_TIMEOUT_SECONDS: "120"
       SNS_MEDIA_MAX_REDIRECTS: "3"
       SNS_MEDIA_MAX_EXTRACTIONS: "1"
       SNS_MEDIA_MAX_DOWNLOADS: "4"
+      SNS_MEDIA_MAX_DOWNLOADS_PER_CLIENT: "2"
+      SNS_MEDIA_RATE_LIMIT_WINDOW_SECONDS: "60"
+      SNS_MEDIA_RATE_LIMIT_EXTRACTION_ATTEMPTS: "10"
+      SNS_MEDIA_RATE_LIMIT_MEDIA_ATTEMPTS: "120"
+      SNS_MEDIA_RATE_LIMIT_IDENTITY_CAPACITY: "2048"
+      SNS_MEDIA_GENERATED_PREVIEWS_ENABLED: "false"
       SNS_MEDIA_THUMBNAIL_INPUT_BYTES: "32000000"
       SNS_MEDIA_THUMBNAIL_OUTPUT_BYTES: "1000000"
       SNS_MEDIA_THUMBNAIL_TIMEOUT_SECONDS: "10"

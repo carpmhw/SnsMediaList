@@ -70,12 +70,12 @@ def record(
 
 
 def make_client(
-    records: list[dict[str, Any]], *, capacity: int = 20
+    records: list[dict[str, Any]], *, capacity: int = 20, settings: Settings | None = None
 ) -> tuple[TestClient, FakeExtractor]:
     """Build an API client with fake extraction and in-memory tokens."""
     extractor = FakeExtractor(records)
     store = TokenStore(capacity=capacity, ttl_seconds=600)
-    service = ExtractionService(Settings(), extractor=extractor, token_store=store)
+    service = ExtractionService(settings or Settings(), extractor=extractor, token_store=store)
     return TestClient(create_app(extraction_service=service)), extractor
 
 
@@ -104,7 +104,9 @@ def test_extraction_issues_generated_preview_when_metadata_has_no_poster() -> No
             "extension": "mp4",
         }
     )
-    client, _extractor = make_client([media_record])
+    client, _extractor = make_client(
+        [media_record], settings=Settings(generated_previews_enabled=True)
+    )
 
     response = client.post("/api/extractions", json={"url": "https://x.com/creator/status/1"})
 
@@ -112,6 +114,30 @@ def test_extraction_issues_generated_preview_when_metadata_has_no_poster() -> No
     media = response.json()["media"][0]
     assert media["preview_url"].startswith("/api/media/")
     assert media["preview_url"].endswith("/preview")
+
+
+def test_extraction_uses_local_placeholder_when_generated_previews_are_disabled() -> None:
+    """Verify missing posters do not reserve or expose generated preview tokens by default."""
+    media_record = record()
+    media_record.update(
+        {
+            "type": "video",
+            "url": "https://video.twimg.com/1.mp4",
+            "preview_url": None,
+            "extension": "mp4",
+        }
+    )
+    store = TokenStore(capacity=20, ttl_seconds=600)
+    service = ExtractionService(
+        Settings(), extractor=FakeExtractor([media_record]), token_store=store
+    )
+    client = TestClient(create_app(extraction_service=service))
+
+    response = client.post("/api/extractions", json={"url": "https://x.com/creator/status/1"})
+
+    assert response.status_code == 200
+    assert response.json()["media"][0]["preview_url"] == "/placeholder.svg"
+    assert store.size == 1
 
 
 @pytest.mark.parametrize(

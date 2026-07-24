@@ -456,6 +456,8 @@ def build_download_headers(filename: str) -> dict[str, str]:
     return {
         "Content-Disposition": f"attachment; filename*=UTF-8''{safe_name}",
         "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
     }
 
 
@@ -547,7 +549,8 @@ def build_preview_headers(filename: str) -> dict[str, str]:
     return {
         "Content-Disposition": f"inline; filename*=UTF-8''{safe_name}",
         "X-Content-Type-Options": "nosniff",
-        "Cache-Control": "private, no-store",
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
         "Content-Security-Policy": (
             "default-src 'none'; img-src 'self'; style-src 'none'; script-src 'none'"
         ),

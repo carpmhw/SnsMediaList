@@ -50,6 +50,17 @@ def test_static_assets_include_responsive_and_recovery_hooks() -> None:
     assert "/api/extractions" in javascript.text
     assert "token_expired" in javascript.text
     assert "token_not_found" in javascript.text
+    assert "method: 'HEAD'" in javascript.text
+    assert ".blob()" not in javascript.text
+
+
+def test_local_preview_placeholder_is_served_same_origin() -> None:
+    """Verify the fail-closed preview placeholder is a local static asset."""
+    response = TestClient(create_app()).get("/placeholder.svg")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/svg+xml")
+    assert "Preview unavailable" in response.text
 
 
 def test_stylesheet_has_grid_mobile_focus_and_motion_rules() -> None:
