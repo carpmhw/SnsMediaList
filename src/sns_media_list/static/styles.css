@@ -275,6 +275,14 @@ button:hover:not(:disabled) {
   gap: 18px;
 }
 
+@media (min-width: 641px) {
+  .media-grid > .media-card:only-child {
+    width: 100%;
+    max-width: 480px;
+    justify-self: center;
+  }
+}
+
 .media-card {
   min-width: 0;
   overflow: hidden;
