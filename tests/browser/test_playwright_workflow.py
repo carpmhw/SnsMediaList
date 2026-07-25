@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Generator
 from functools import partial
@@ -31,6 +32,26 @@ SUCCESS_PAYLOAD: dict[str, Any] = {
             "duration": None,
             "preview_url": None,
             "download_url": "/api/media/opaque-download/download",
+        }
+    ],
+}
+STORY_URL = "https://www.instagram.com/stories/example.user/1111111111111111111/"
+STORY_SUCCESS_PAYLOAD: dict[str, Any] = {
+    "platform": "instagram",
+    "post_url": STORY_URL,
+    "author": "example.user",
+    "description": "An exact Story",
+    "unavailable_media_count": 0,
+    "media": [
+        {
+            "token": "opaque-story-download",
+            "media_type": "image",
+            "filename": "instagram-1111111111111111111-1.jpg",
+            "width": 1080,
+            "height": 1920,
+            "duration": None,
+            "preview_url": None,
+            "download_url": "/api/media/opaque-story-download/download",
         }
     ],
 }
@@ -112,6 +133,67 @@ def test_submits_and_replaces_results(page: Page, base_url: str) -> None:
         {"url": "https://x.com/creator/status/1"},
         {"url": "https://x.com/creator/status/2"},
     ]
+
+
+def test_story_submission_uses_existing_workflow(page: Page, base_url: str) -> None:
+    """Verify an exact Story uses the shared extraction form, endpoint, and result grid."""
+    submission_urls: list[str] = []
+
+    def record_submission(request: Any) -> None:
+        """Record every browser submission so Story-specific endpoints cannot be hidden."""
+        if request.method == "POST":
+            submission_urls.append(request.url)
+
+    def extraction(route: Any, request: Any) -> None:
+        """Validate the shared extraction request and return one Story image."""
+        assert request.method == "POST"
+        assert json.loads(request.post_data or "{}") == {"url": STORY_URL}
+        fulfill_json(route, STORY_SUCCESS_PAYLOAD)
+
+    page.on("request", record_submission)
+    page.route("**/api/extractions", extraction)
+    page.goto(base_url)
+
+    expect(page.locator("form")).to_have_count(1)
+    expect(page.locator("#extraction-form #post-url")).to_have_count(1)
+    expect(page.locator("#extraction-form #analyze-button")).to_have_count(1)
+    expect(page.get_by_role("radio")).to_have_count(0)
+    expect(page.get_by_role("combobox")).to_have_count(0)
+    page.fill("#post-url", STORY_URL)
+    page.click("#analyze-button")
+
+    expect(page.locator("#results")).to_be_visible()
+    expect(page.locator(".media-card")).to_have_count(1)
+    expect(page.locator(".media-card")).to_be_visible()
+    expect(page.locator(".media-title")).to_have_text("圖片")
+    expect(page.locator("#source-link")).to_be_visible()
+    expect(page.locator("#source-link")).to_have_attribute("href", STORY_URL)
+    assert submission_urls == [f"{base_url}/api/extractions"]
+
+
+def test_story_unavailable_uses_safe_generic_message(page: Page, base_url: str) -> None:
+    """Verify unavailable Stories show safe copy without raw or inferred reasons."""
+    raw_message = "Story expired, was deleted, or is unavailable because of permissions."
+
+    def extraction_error(route: Any, request: Any) -> None:
+        """Return the stable unavailable response for the shared Story submission."""
+        assert request.method == "POST"
+        assert json.loads(request.post_data or "{}") == {"url": STORY_URL}
+        fulfill_json(
+            route,
+            {"code": "story_unavailable", "message": raw_message, "request_id": "test"},
+            status=404,
+        )
+
+    page.route("**/api/extractions", extraction_error)
+    page.goto(base_url)
+    page.fill("#post-url", STORY_URL)
+    page.click("#analyze-button")
+
+    expect(page.locator("#status")).to_have_text("此 Story 目前無法使用。")
+    expect(page.locator("#status")).not_to_contain_text(raw_message)
+    for inferred_reason in ("過期", "刪除", "權限", "expired", "deleted", "permissions"):
+        expect(page.locator("#status")).not_to_contain_text(inferred_reason)
 
 
 def test_rate_limit_error_is_inline(page: Page, base_url: str) -> None:
@@ -219,6 +301,52 @@ def test_download_requests_only_after_click(page: Page, base_url: str) -> None:
     page.click(".download-action")
     expect(page.locator("#status")).to_contain_text("已開始下載")
     assert len(download_calls) == 1
+
+
+def test_generated_preview_renders_and_failed_preview_uses_local_fallback(
+    page: Page, base_url: str
+) -> None:
+    """Verify generated preview responses render and failures remain local-only."""
+    payload = {
+        **SUCCESS_PAYLOAD,
+        "media": [
+            {
+                **SUCCESS_PAYLOAD["media"][0],
+                "preview_url": "/api/media/opaque-preview/preview",
+            }
+        ],
+    }
+    preview_calls: list[str] = []
+
+    def extraction(route: Any, _request: Any) -> None:
+        """Return one item with a token-bound preview URL."""
+        fulfill_json(route, payload)
+
+    def preview(route: Any, request: Any) -> None:
+        """Return success once, then a real non-2xx preview response."""
+        preview_calls.append(request.url)
+        if len(preview_calls) > 1:
+            route.fulfill(
+                status=502,
+                content_type="application/json",
+                body=b'{"code":"upstream_media_invalid"}',
+            )
+            return
+        body = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+        route.fulfill(status=200, content_type="image/png", body=body)
+
+    page.route("**/api/extractions", extraction)
+    page.route("**/api/media/opaque-preview/preview**", preview)
+    page.goto(base_url)
+    page.fill("#post-url", "https://x.com/creator/status/1")
+    page.click("#analyze-button")
+    expect(page.locator(".media-visual img")).to_be_visible()
+
+    page.locator(".media-visual img").evaluate("element => element.src = element.src + '?retry=1'")
+    expect(page.locator(".fallback-tile")).to_contain_text("找不到預覽")
+    assert len(preview_calls) == 2
 
 
 def test_mobile_layout_has_no_horizontal_overflow_and_supports_keyboard(

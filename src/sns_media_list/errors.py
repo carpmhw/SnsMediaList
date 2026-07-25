@@ -3,12 +3,16 @@
 from dataclasses import dataclass
 
 ERROR_STATUS: dict[str, int] = {
+    "invalid_request": 422,
     "invalid_url": 400,
     "unsupported_url": 400,
     "post_unavailable": 404,
+    "story_unavailable": 404,
     "token_not_found": 404,
     "no_media": 422,
     "extraction_limit_exceeded": 422,
+    "request_too_large": 413,
+    "unsupported_media_type": 415,
     "local_rate_limited": 429,
     "upstream_rate_limited": 429,
     "upstream_media_invalid": 502,
@@ -29,6 +33,7 @@ class AppError(Exception):
     message: str
     status_code: int | None = None
     retry_after: int | None = None
+    deterministic: bool = False
 
     def __post_init__(self) -> None:
         """Fill the status from the central error contract when omitted."""

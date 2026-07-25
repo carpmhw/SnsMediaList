@@ -1,14 +1,22 @@
 """Tests for token-bound preview and attachment routes."""
 
+import asyncio
 from typing import Any
 
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 
+from sns_media_list.api.limits import RequestLimiter
+from sns_media_list.api.routes import _close_response_with_timeout, _generate_preview, _stream_media
 from sns_media_list.app import create_app
 from sns_media_list.config import Settings
+from sns_media_list.errors import AppError
+from sns_media_list.models import PrivateMediaRecord
 from sns_media_list.network.media_client import MediaResponse
-from sns_media_list.security.tokens import TokenStore
+from sns_media_list.security.tokens import MediaTokenDraft, TokenStore
 from sns_media_list.services.extraction_service import ExtractionService
+from sns_media_list.services.thumbnail_cache import ThumbnailCache, ThumbnailCoordinator
 
 
 class FakeExtractor:
@@ -31,6 +39,116 @@ class FakeExtractor:
                 "progressive": True,
             }
         ]
+
+
+class StoryImageExtractor:
+    """Return one exact Instagram Story image without authentication metadata."""
+
+    async def extract(self, _post_url: Any) -> list[dict[str, Any]]:
+        """Return deterministic Story media with a trusted Instagram preview."""
+        return [
+            {
+                "platform": "instagram",
+                "post_url": ("https://www.instagram.com/stories/example.user/1111111111111111111/"),
+                "post_id": "1111111111111111111",
+                "num": 1,
+                "type": "image",
+                "url": "https://scontent.cdninstagram.com/story-image.jpg?source=private",
+                "preview_url": (
+                    "https://scontent.cdninstagram.com/story-image-preview.jpg?source=private"
+                ),
+                "extension": "jpg",
+                "width": 1080,
+                "height": 1920,
+                "progressive": True,
+            }
+        ]
+
+
+class GeneratedExtractor:
+    """Return one video without a platform poster for generated-preview tests."""
+
+    async def extract(self, _post_url: Any) -> list[dict[str, Any]]:
+        """Return deterministic media metadata without preview metadata."""
+        return [
+            {
+                "platform": "x",
+                "post_url": "https://x.com/creator/status/1",
+                "post_id": "1",
+                "num": 1,
+                "type": "video",
+                "url": "https://video.twimg.com/1.mp4",
+                "extension": "mp4",
+                "width": 100,
+                "height": 100,
+                "progressive": True,
+            }
+        ]
+
+
+class FakeThumbnailGenerator:
+    """Return one bounded JPEG while counting generation calls."""
+
+    def __init__(self) -> None:
+        """Initialize the generation counter."""
+        self.calls = 0
+
+    async def generate(self, response: MediaResponse) -> bytes:
+        """Return a deterministic JPEG and close the supplied response."""
+        self.calls += 1
+        await response.close()
+        return b"\xff\xd8\xff\xe0generated\xff\xd9"
+
+
+class FailingThumbnailGenerator:
+    """Return one deterministic generation failure for negative-cache tests."""
+
+    def __init__(self) -> None:
+        """Initialize the failure counter."""
+        self.calls = 0
+
+    async def generate(self, response: MediaResponse) -> bytes:
+        """Raise a safe deterministic error after closing the source."""
+        self.calls += 1
+        await response.close()
+        error = AppError("upstream_media_invalid", "safe thumbnail failure")
+        error.deterministic = True
+        raise error
+
+
+class BlockingThumbnailGenerator(FakeThumbnailGenerator):
+    """Hold one generated preview open so a different token reaches saturation."""
+
+    timeout_seconds = 1.0
+
+    def __init__(self) -> None:
+        """Initialize synchronization events for the concurrent endpoint test."""
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def generate(self, response: MediaResponse) -> bytes:
+        """Wait for the test to issue a second generated-preview request."""
+        self.calls += 1
+        self.started.set()
+        await self.release.wait()
+        await response.close()
+        return b"\xff\xd8\xff\xe0generated\xff\xd9"
+
+
+class TimedThumbnailGenerator(FakeThumbnailGenerator):
+    """Expose a short generation deadline for fetch-timeout tests."""
+
+    timeout_seconds = 0.01
+
+
+class SlowMediaClient:
+    """Delay source response headers beyond the generated preview deadline."""
+
+    async def fetch(self, _url: str, *, headers: Any) -> MediaResponse:
+        """Sleep until the route-level generation timeout cancels the fetch."""
+        await asyncio.sleep(1)
+        raise AssertionError("fetch should have been cancelled")
 
 
 class Reader:
@@ -65,20 +183,55 @@ class Writer:
         """Complete fake close cleanup."""
 
 
+class FailingCloseResponse(MediaResponse):
+    """Raise during upstream cleanup after a valid response body was read."""
+
+    async def close(self) -> None:
+        """Simulate a transport cleanup failure."""
+        raise RuntimeError("cleanup failed")
+
+
+class SlowCloseResponse(MediaResponse):
+    """Delay response cleanup beyond a generated-preview deadline."""
+
+    async def close(self) -> None:
+        """Wait until the bounded cleanup cancels this close operation."""
+        await asyncio.sleep(1)
+
+
+class FailingCloseMediaClient:
+    """Return one response whose cleanup fails after streaming."""
+
+    async def fetch(self, _url: str, *, headers: Any) -> MediaResponse:
+        """Return a valid image response with a failing close operation."""
+        body = b"\xff\xd8\xff\xe0fake-image"
+        return FailingCloseResponse(
+            200,
+            {"content-type": "image/jpeg", "content-length": str(len(body))},
+            Reader(body),
+            Writer(),
+            max_bytes=100,
+        )
+
+
 class FakeMediaClient:
     """Return an in-memory JPEG response for every authorized token."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, status_code: int = 200, content_type: str = "image/jpeg") -> None:
         """Initialize captured upstream request headers for boundary assertions."""
         self.last_headers: dict[str, str] = {}
+        self.requests: list[tuple[str, dict[str, str]]] = []
+        self.status_code = status_code
+        self.content_type = content_type
 
-    async def fetch(self, _url: str, *, headers: Any) -> MediaResponse:
+    async def fetch(self, url: str, *, headers: Any) -> MediaResponse:
         """Return a valid image response without contacting a CDN."""
         self.last_headers = dict(headers)
+        self.requests.append((url, self.last_headers))
         body = b"\xff\xd8\xff\xe0fake-image"
         return MediaResponse(
-            200,
-            {"content-type": "image/jpeg", "content-length": str(len(body))},
+            self.status_code,
+            {"content-type": self.content_type, "content-length": str(len(body))},
             Reader(body),
             Writer(),
             max_bytes=100,
@@ -112,6 +265,534 @@ def test_download_and_preview_use_bound_tokens() -> None:
     assert preview.status_code == 200
     assert preview.headers["content-disposition"].startswith("inline;")
     assert preview.headers["x-content-type-options"] == "nosniff"
+    assert download.headers["cache-control"] == "no-store"
+    assert download.headers["referrer-policy"] == "no-referrer"
+    assert preview.headers["cache-control"] == "no-store"
+    assert preview.headers["referrer-policy"] == "no-referrer"
+
+
+def test_disabled_generated_preview_releases_its_download_lease() -> None:
+    """Verify defense-in-depth rejection does not consume a download slot."""
+    settings = Settings(max_downloads=1, max_downloads_per_client=1)
+    service = ExtractionService(
+        settings,
+        extractor=GeneratedExtractor(),
+        token_store=TokenStore(capacity=20, ttl_seconds=600),
+    )
+    preview_token = service.token_store.reserve(
+        [
+            MediaTokenDraft(
+                purpose="preview",
+                source_url="https://video.twimg.com/1.mp4",
+                media_class="video",
+                filename="video.mp4",
+                platform="x",
+                request_headers={},
+                preview_mode="generated",
+            )
+        ]
+    )[0].token
+    download_token = service.token_store.reserve(
+        [
+            MediaTokenDraft(
+                purpose="download",
+                source_url="https://video.twimg.com/1.mp4",
+                media_class="video",
+                filename="video.mp4",
+                platform="x",
+                request_headers={},
+            )
+        ]
+    )[0].token
+    client = TestClient(
+        create_app(
+            settings=settings,
+            extraction_service=service,
+            media_client=FakeMediaClient(content_type="video/mp4"),
+        )
+    )
+
+    rejected = client.get(f"/api/media/{preview_token}/preview")
+    download = client.get(f"/api/media/{download_token}/download")
+
+    assert rejected.status_code == 404
+    assert download.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_generated_preview_holds_lease_until_response_completion() -> None:
+    """Verify generated preview capacity includes the downstream response lifetime."""
+    limiter = RequestLimiter(max_extractions=1, max_downloads=1, max_downloads_per_client=1)
+    lease = limiter.acquire_download("test-client")
+    record = PrivateMediaRecord(
+        token="preview-token",
+        purpose="preview",
+        source_url="https://video.twimg.com/1.mp4",
+        media_class="video",
+        filename="video.mp4",
+        platform="x",
+        expires_at=9999999999.0,
+        request_headers={},
+        preview_mode="generated",
+    )
+    coordinator = ThumbnailCoordinator(
+        ThumbnailCache(max_bytes=1_000_000, max_negative_entries=10),
+        max_concurrency=1,
+    )
+
+    response = await _generate_preview(
+        record,
+        FakeMediaClient(content_type="video/mp4"),
+        FakeThumbnailGenerator(),
+        coordinator,
+        lease=lease,
+        response_timeout=1.0,
+    )
+
+    assert lease.released is False
+
+    async def receive() -> dict[str, Any]:
+        """Allow the response stream to finish before reporting disconnect."""
+        await asyncio.sleep(0.01)
+        return {"type": "http.disconnect"}
+
+    async def send(_message: dict[str, Any]) -> None:
+        """Accept generated response messages in the lifecycle probe."""
+
+    await response(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/api/media/preview-token/preview",
+            "raw_path": b"/api/media/preview-token/preview",
+            "query_string": b"",
+            "headers": [],
+            "client": ("203.0.113.10", 1234),
+            "server": ("127.0.0.1", 8000),
+        },
+        receive,
+        send,
+    )
+
+    assert lease.released is True
+
+
+def test_download_head_preflight_validates_token_without_fetching_upstream() -> None:
+    """Verify HEAD preflight validates a download token without opening the CDN."""
+    client = make_client()
+    extraction = client.post(
+        "/api/extractions", json={"url": "https://x.com/creator/status/1"}
+    ).json()
+    media = extraction["media"][0]
+
+    response = client.head(media["download_url"])
+
+    assert response.status_code == 204
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_download_head_preflight_does_not_consume_media_attempt_budget() -> None:
+    """Verify a native download preflight leaves the actual media attempt available."""
+    settings = Settings(rate_limit_media_attempts=1)
+    service = ExtractionService(
+        settings,
+        extractor=FakeExtractor(),
+        token_store=TokenStore(capacity=20, ttl_seconds=600),
+    )
+    client = TestClient(
+        create_app(
+            settings=settings,
+            extraction_service=service,
+            media_client=FakeMediaClient(),
+        )
+    )
+    extraction = client.post(
+        "/api/extractions", json={"url": "https://x.com/creator/status/1"}
+    ).json()
+    download_url = extraction["media"][0]["download_url"]
+
+    assert client.head(download_url).status_code == 204
+    assert client.get(download_url).status_code == 200
+
+
+def test_authenticated_story_delivery_uses_only_fixed_instagram_headers(tmp_path) -> None:
+    """Verify Story preview and download never forward configured authentication."""
+    cookie_file = tmp_path / "instagram.cookies.txt"
+    cookie_file.write_text(
+        "# Netscape HTTP Cookie File\n"
+        ".instagram.com\tTRUE\t/\tTRUE\t2147483647\tsessionid\tstory-cookie-secret\n",
+        encoding="utf-8",
+    )
+    settings = Settings(instagram_cookie_file=str(cookie_file))
+    media_client = FakeMediaClient()
+    service = ExtractionService(
+        settings,
+        extractor=StoryImageExtractor(),
+        token_store=TokenStore(capacity=20, ttl_seconds=600),
+    )
+    client = TestClient(
+        create_app(settings=settings, extraction_service=service, media_client=media_client)
+    )
+    story_url = "https://www.instagram.com/stories/example.user/1111111111111111111/"
+
+    extraction = client.post("/api/extractions", json={"url": story_url})
+    assert extraction.status_code == 200
+    media = extraction.json()["media"][0]
+    preview = client.get(media["preview_url"])
+    download = client.get(media["download_url"])
+
+    assert preview.status_code == 200
+    assert download.status_code == 200
+    expected_headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
+        "Referer": "https://www.instagram.com/",
+    }
+    assert media_client.requests == [
+        (
+            "https://scontent.cdninstagram.com/story-image-preview.jpg?source=private",
+            expected_headers,
+        ),
+        (
+            "https://scontent.cdninstagram.com/story-image.jpg?source=private",
+            expected_headers,
+        ),
+    ]
+    for _url, headers in media_client.requests:
+        assert "Cookie" not in headers
+        assert "Authorization" not in headers
+
+
+@pytest.mark.asyncio
+async def test_stream_cleanup_releases_download_lease_when_close_fails() -> None:
+    """Verify response cleanup cannot strand a download limiter reservation."""
+    limiter = RequestLimiter(max_extractions=1, max_downloads=1)
+    lease = limiter.acquire_download("test-client")
+    record = PrivateMediaRecord(
+        token="download-token",
+        purpose="download",
+        source_url="https://pbs.twimg.com/media/1.jpg?name=orig",
+        media_class="image",
+        filename="image.jpg",
+        platform="x",
+        expires_at=9999999999.0,
+        request_headers={},
+    )
+
+    response = await _stream_media(
+        record,
+        FailingCloseMediaClient(),
+        preview=False,
+        lease=lease,
+    )
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        _ = [chunk async for chunk in response.body_iterator]
+
+    assert lease.released is True
+
+
+@pytest.mark.asyncio
+async def test_stream_response_disconnect_before_body_start_releases_download_lease() -> None:
+    """Verify a client disconnect during response headers cannot strand a lease."""
+    limiter = RequestLimiter(max_extractions=1, max_downloads=1)
+    lease = limiter.acquire_download("test-client")
+    record = PrivateMediaRecord(
+        token="download-token",
+        purpose="download",
+        source_url="https://pbs.twimg.com/media/1.jpg?name=orig",
+        media_class="image",
+        filename="image.jpg",
+        platform="x",
+        expires_at=9999999999.0,
+        request_headers={},
+    )
+    response = await _stream_media(
+        record,
+        FakeMediaClient(),
+        preview=False,
+        lease=lease,
+    )
+
+    async def receive() -> dict[str, Any]:
+        """Return a disconnect event if the response asks for request state."""
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        """Raise when response headers reach a disconnected client."""
+        if message["type"] == "http.response.start":
+            raise OSError("client disconnected")
+
+    with pytest.raises(OSError, match="client disconnected"):
+        await response(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0", "spec_version": "2.3"},
+                "http_version": "1.1",
+                "method": "GET",
+                "scheme": "http",
+                "path": "/api/media/download-token/download",
+                "raw_path": b"/api/media/download-token/download",
+                "query_string": b"",
+                "headers": [],
+                "client": ("203.0.113.10", 1234),
+                "server": ("127.0.0.1", 8000),
+            },
+            receive,
+            send,
+        )
+
+    assert lease.released is True
+
+
+@pytest.mark.asyncio
+async def test_stream_fetch_deadline_releases_download_lease() -> None:
+    """Verify a complete media deadline includes upstream fetch and releases its lease."""
+    limiter = RequestLimiter(max_extractions=1, max_downloads=1)
+    lease = limiter.acquire_download("test-client")
+    record = PrivateMediaRecord(
+        token="download-token",
+        purpose="download",
+        source_url="https://pbs.twimg.com/media/1.jpg?name=orig",
+        media_class="image",
+        filename="image.jpg",
+        platform="x",
+        expires_at=9999999999.0,
+        request_headers={},
+    )
+
+    with pytest.raises(AppError, match="deadline"):
+        await _stream_media(
+            record,
+            SlowMediaClient(),
+            preview=False,
+            lease=lease,
+            response_timeout=0.01,
+        )
+
+    assert lease.released is True
+
+
+@pytest.mark.asyncio
+async def test_stream_validation_cleanup_releases_download_lease_when_close_fails() -> None:
+    """Verify prevalidation cleanup cannot strand a lease when the body class is invalid."""
+    limiter = RequestLimiter(max_extractions=1, max_downloads=1)
+    lease = limiter.acquire_download("test-client")
+    record = PrivateMediaRecord(
+        token="download-token",
+        purpose="download",
+        source_url="https://pbs.twimg.com/media/1.jpg?name=orig",
+        media_class="video",
+        filename="video.mp4",
+        platform="x",
+        expires_at=9999999999.0,
+        request_headers={},
+    )
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        await _stream_media(
+            record,
+            FailingCloseMediaClient(),
+            preview=False,
+            lease=lease,
+        )
+
+    assert lease.released is True
+
+
+@pytest.mark.asyncio
+async def test_generated_response_cleanup_is_deadline_bounded() -> None:
+    """Verify generated-preview cleanup cannot occupy a slot beyond its deadline."""
+    body = b"\xff\xd8\xff\xe0fake-image"
+    response = SlowCloseResponse(
+        200,
+        {"content-type": "image/jpeg", "content-length": str(len(body))},
+        Reader(body),
+        Writer(),
+        max_bytes=100,
+    )
+
+    await asyncio.wait_for(_close_response_with_timeout(response, timeout=0.01), timeout=0.1)
+
+
+def test_generated_preview_is_created_lazily_and_cached() -> None:
+    """Verify generated previews use the endpoint, safe headers, and one generation."""
+    settings = Settings(generated_previews_enabled=True)
+    service = ExtractionService(
+        settings,
+        extractor=GeneratedExtractor(),
+        token_store=TokenStore(capacity=20, ttl_seconds=600),
+    )
+    media_client = FakeMediaClient(content_type="video/mp4")
+    generator = FakeThumbnailGenerator()
+    client = TestClient(
+        create_app(
+            extraction_service=service,
+            media_client=media_client,
+            thumbnail_generator=generator,
+        )
+    )
+
+    extraction = client.post(
+        "/api/extractions", json={"url": "https://x.com/creator/status/1"}
+    ).json()
+    preview_url = extraction["media"][0]["preview_url"]
+
+    first = client.get(preview_url)
+    second = client.get(preview_url)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.headers["content-type"].startswith("image/jpeg")
+    assert first.headers["content-disposition"].startswith("inline;")
+    assert first.headers["x-content-type-options"] == "nosniff"
+    assert generator.calls == 1
+
+
+def test_generated_preview_deterministic_failure_is_cached() -> None:
+    """Verify repeated deterministic generation failures do not repeat FFmpeg work."""
+    settings = Settings(generated_previews_enabled=True)
+    service = ExtractionService(
+        settings,
+        extractor=GeneratedExtractor(),
+        token_store=TokenStore(capacity=20, ttl_seconds=600),
+    )
+    generator = FailingThumbnailGenerator()
+    client = TestClient(
+        create_app(
+            extraction_service=service,
+            media_client=FakeMediaClient(content_type="video/mp4"),
+            thumbnail_generator=generator,
+        )
+    )
+    extraction = client.post(
+        "/api/extractions", json={"url": "https://x.com/creator/status/1"}
+    ).json()
+
+    first = client.get(extraction["media"][0]["preview_url"])
+    second = client.get(extraction["media"][0]["preview_url"])
+
+    assert first.status_code == 502
+    assert second.status_code == 502
+    assert generator.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_generated_preview_saturation_returns_immediate_rate_limit() -> None:
+    """Verify a different generated token is rejected while the only slot is active."""
+    settings = Settings(generated_previews_enabled=True)
+    service = ExtractionService(
+        settings,
+        extractor=GeneratedExtractor(),
+        token_store=TokenStore(capacity=20, ttl_seconds=600),
+    )
+    generator = BlockingThumbnailGenerator()
+    app = create_app(
+        extraction_service=service,
+        media_client=FakeMediaClient(content_type="video/mp4"),
+        thumbnail_generator=generator,
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        first_extraction = (
+            await client.post("/api/extractions", json={"url": "https://x.com/creator/status/1"})
+        ).json()
+        second_extraction = (
+            await client.post("/api/extractions", json={"url": "https://x.com/creator/status/2"})
+        ).json()
+        first_request = asyncio.create_task(client.get(first_extraction["media"][0]["preview_url"]))
+        await generator.started.wait()
+
+        saturated = await client.get(second_extraction["media"][0]["preview_url"])
+        generator.release.set()
+        first_response = await first_request
+
+    assert saturated.status_code == 429
+    assert saturated.headers["Retry-After"] == "1"
+    assert saturated.json()["code"] == "local_rate_limited"
+    assert first_response.status_code == 200
+    assert generator.calls == 1
+
+
+def test_generated_preview_rejects_upstream_status_before_generation() -> None:
+    """Verify an error response cannot become a thumbnail even if its body looks valid."""
+    settings = Settings(generated_previews_enabled=True)
+    service = ExtractionService(
+        settings,
+        extractor=GeneratedExtractor(),
+        token_store=TokenStore(capacity=20, ttl_seconds=600),
+    )
+    media_client = FakeMediaClient(status_code=404)
+    generator = FakeThumbnailGenerator()
+    client = TestClient(
+        create_app(
+            extraction_service=service,
+            media_client=media_client,
+            thumbnail_generator=generator,
+        )
+    )
+    extraction = client.post(
+        "/api/extractions", json={"url": "https://x.com/creator/status/1"}
+    ).json()
+
+    response = client.get(extraction["media"][0]["preview_url"])
+
+    assert response.status_code == 502
+    assert generator.calls == 0
+
+
+def test_generated_preview_rejects_mismatched_expected_media_class() -> None:
+    """Verify a video token cannot use an image upstream response as its source."""
+    settings = Settings(generated_previews_enabled=True)
+    service = ExtractionService(
+        settings,
+        extractor=GeneratedExtractor(),
+        token_store=TokenStore(capacity=20, ttl_seconds=600),
+    )
+    media_client = FakeMediaClient(content_type="image/jpeg")
+    generator = FakeThumbnailGenerator()
+    client = TestClient(
+        create_app(
+            extraction_service=service,
+            media_client=media_client,
+            thumbnail_generator=generator,
+        )
+    )
+    extraction = client.post(
+        "/api/extractions", json={"url": "https://x.com/creator/status/1"}
+    ).json()
+
+    response = client.get(extraction["media"][0]["preview_url"])
+
+    assert response.status_code == 502
+    assert generator.calls == 0
+
+
+def test_generated_preview_deadline_covers_upstream_fetch() -> None:
+    """Verify the generation deadline includes upstream connection and headers."""
+    settings = Settings(generated_previews_enabled=True)
+    service = ExtractionService(
+        settings,
+        extractor=GeneratedExtractor(),
+        token_store=TokenStore(capacity=20, ttl_seconds=600),
+    )
+    client = TestClient(
+        create_app(
+            extraction_service=service,
+            media_client=SlowMediaClient(),
+            thumbnail_generator=TimedThumbnailGenerator(),
+        )
+    )
+    extraction = client.post(
+        "/api/extractions", json={"url": "https://x.com/creator/status/1"}
+    ).json()
+
+    response = client.get(extraction["media"][0]["preview_url"])
+
+    assert response.status_code == 502
 
 
 def test_media_proxy_sends_only_fixed_headers_without_platform_cookies() -> None:
@@ -160,3 +841,31 @@ def test_unknown_token_returns_not_found() -> None:
 
     assert response.status_code == 404
     assert response.json()["code"] == "token_not_found"
+
+
+def test_generated_token_is_rejected_when_decoder_is_disabled() -> None:
+    """Verify generated records cannot bypass a disabled decoder configuration."""
+    settings = Settings()
+    store = TokenStore(capacity=20, ttl_seconds=600)
+    record = store.reserve(
+        [
+            MediaTokenDraft(
+                purpose="preview",
+                source_url="https://video.twimg.com/1.mp4",
+                media_class="video",
+                filename="video.mp4",
+                platform="x",
+                request_headers={},
+                preview_mode="generated",
+            )
+        ]
+    )[0]
+    service = ExtractionService(settings, extractor=FakeExtractor(), token_store=store)
+    media_client = FakeMediaClient(content_type="video/mp4")
+    client = TestClient(create_app(extraction_service=service, media_client=media_client))
+
+    response = client.get(f"/api/media/{record.token}/preview")
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "token_not_found"
+    assert media_client.requests == []

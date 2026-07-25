@@ -2,6 +2,11 @@
 .gitignore
 .opencode
 .worktrees
+secrets/
+*.cookies.txt
+cookies.txt
+x-cookies.txt
+gallery-dl.conf
 docs/superpowers
 
 **/node_modules

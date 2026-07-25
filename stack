@@ -1,0 +1,4 @@
+services:
+  app:
+    environment:
+      SNS_MEDIA_INSTAGRAM_COOKIE_FILE: /run/secrets/instagram.cookies.txt

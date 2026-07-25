@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360" role="img" aria-labelledby="title">
+  <title id="title">Preview unavailable</title>
+  <rect width="640" height="360" fill="#e8e3d8"/>
+  <path d="M0 280 160 170l100 70 110-135 270 175v80H0Z" fill="#b7c1bd"/>
+  <circle cx="470" cy="105" r="38" fill="#d38b68"/>
+  <text x="32" y="326" fill="#263331" font-family="sans-serif" font-size="24">Preview unavailable</text>
+</svg>

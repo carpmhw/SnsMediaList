@@ -6,9 +6,15 @@ from typing import Any
 
 import pytest
 
+from sns_media_list.app import _EXTRACTION_HOSTS
 from sns_media_list.errors import AppError
 from sns_media_list.network.connect_proxy import ConnectProxy, parse_connect_request
 from sns_media_list.network.dns import DestinationPolicy
+
+
+def test_x_authenticated_client_asset_host_is_allowlisted() -> None:
+    """Verify authenticated X extraction can load its client transaction asset."""
+    assert "abs.twimg.com" in _EXTRACTION_HOSTS
 
 
 class FakeStreamReader:

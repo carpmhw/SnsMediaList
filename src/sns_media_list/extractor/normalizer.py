@@ -5,7 +5,7 @@ import re
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from ..errors import AppError
 
@@ -137,7 +137,8 @@ def _parse_record(line: str | Mapping[str, object]) -> GalleryItem:
     try:
         record = json.loads(line) if isinstance(line, str) else dict(line)
         raw_type = str(record["type"])
-        media_type = "video" if raw_type in {"video", "animated_gif"} else "image"
+        has_video_url = isinstance(record.get("video_url"), str) and bool(record["video_url"])
+        media_type = "video" if raw_type in {"video", "animated_gif"} or has_video_url else "image"
         post_url = str(record["post_url"])
         platform = str(record["platform"])
         post_id = str(record["post_id"])
@@ -146,7 +147,9 @@ def _parse_record(line: str | Mapping[str, object]) -> GalleryItem:
         index = _optional_int(record["num"])
         extension = _safe_extension(str(record.get("extension") or "bin"))
         source_url = _optional_url(record.get("url"))
-        preview_url = _optional_url(record.get("preview_url"))
+        preview_url = _optional_url(
+            record.get("preview_url") or record.get("display_url") or record.get("poster_url")
+        )
         if platform not in {"instagram", "x"} or index is None or index < 1:
             raise ValueError("invalid platform or index")
         return GalleryItem(
@@ -181,7 +184,7 @@ def _to_normalized_media(item: GalleryItem) -> NormalizedMedia:
         index=item.index,
         media_type=item.media_type,
         source_url=item.source_url or "",
-        preview_source_url=item.preview_url,
+        preview_source_url=_select_preview_source(item),
         filename=filename,
         width=item.width,
         height=item.height,
@@ -233,9 +236,77 @@ def _safe_extension(value: str) -> str:
 
 def _validate_source_url(value: str) -> None:
     """Reject non-HTTPS or credential-bearing upstream media URLs."""
+    if any(ord(char) < 0x20 or ord(char) == 0x7F or ord(char) > 0x7F for char in value):
+        raise AppError("extraction_failed", "The extractor returned an unsafe media URL.")
     parsed = urlsplit(value)
     if parsed.scheme != "https" or parsed.username or parsed.password or parsed.fragment:
         raise AppError("extraction_failed", "The extractor returned an unsafe media URL.")
+
+
+def _select_preview_source(item: GalleryItem) -> str | None:
+    """Select a trusted raster preview or a tested platform thumbnail variant."""
+    if item.preview_url and _is_trusted_cdn_url(item.preview_url, item.platform):
+        return item.preview_url
+    if item.platform == "x" and item.media_type == "image":
+        return _x_small_variant(item.source_url or "")
+    return None
+
+
+def _is_trusted_cdn_url(value: str, platform: str) -> bool:
+    """Accept only HTTPS preview URLs on the platform's known media CDNs."""
+    if any(ord(char) < 0x20 or ord(char) == 0x7F or ord(char) > 0x7F for char in value):
+        return False
+    try:
+        parsed = urlsplit(value)
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError:
+        return False
+    if (
+        parsed.scheme != "https"
+        or parsed.username
+        or parsed.password
+        or parsed.fragment
+        or port not in {None, 443}
+    ):
+        return False
+    if platform == "x":
+        return host in {"pbs.twimg.com", "video.twimg.com"}
+    return host.endswith(".cdninstagram.com") or host.endswith(".fbcdn.net")
+
+
+def _x_small_variant(value: str) -> str | None:
+    """Rewrite only the tested X image query from the original to small size."""
+    if any(ord(char) < 0x20 or ord(char) == 0x7F or ord(char) > 0x7F for char in value):
+        return None
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+        query = parse_qsl(parsed.query, keep_blank_values=True)
+    except ValueError:
+        return None
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "pbs.twimg.com"
+        or parsed.username
+        or parsed.password
+        or parsed.fragment
+        or port not in {None, 443}
+    ):
+        return None
+    if not query or {key for key, _value in query} - {"format", "name"}:
+        return None
+    if sum(key == "name" for key, _value in query) != 1:
+        return None
+    if not any(key == "name" and value == "orig" for key, value in query):
+        return None
+    format_values = [value for key, value in query if key == "format"]
+    if len(format_values) > 1 or (
+        format_values and format_values[0].lower() not in {"jpg", "jpeg", "png", "webp"}
+    ):
+        return None
+    rewritten = [(key, "small" if key == "name" else value) for key, value in query]
+    return urlunsplit(parsed._replace(query=urlencode(rewritten)))
 
 
 def _optional_url(value: object) -> str | None:

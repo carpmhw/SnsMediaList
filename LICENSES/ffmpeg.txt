@@ -1,0 +1,10 @@
+FFmpeg runtime dependency
+
+This image installs the Debian Bookworm ffmpeg package at the version pinned
+by FFMPEG_VERSION in Dockerfile. FFmpeg is available from:
+
+https://ffmpeg.org/
+
+The FFmpeg package is distributed under GPL-2.0-or-later where built with
+the GPL-enabled configuration used by the Debian package. The corresponding
+Debian copyright and license texts are provided by the package metadata.
