@@ -115,6 +115,7 @@ def test_submits_and_replaces_results(page: Page, base_url: str) -> None:
         fulfill_json(route, first_payload if len(calls) == 1 else SUCCESS_PAYLOAD)
 
     page.route("**/api/extractions", extraction)
+    page.set_viewport_size({"width": 1280, "height": 900})
     page.goto(base_url)
     page.fill("#post-url", "https://x.com/creator/status/1")
     page.click("#analyze-button")
@@ -123,12 +124,24 @@ def test_submits_and_replaces_results(page: Page, base_url: str) -> None:
     expect(page.locator("#results-summary")).to_contain_text("2 個媒體項目")
     expect(page.locator("#unavailable-warning")).to_be_visible()
     expect(page.locator(".media-card")).to_have_count(2)
+    multi_column_count = page.locator(".media-grid").evaluate(
+        "element => getComputedStyle(element).gridTemplateColumns.split(' ').length"
+    )
+    assert multi_column_count >= 2
 
     page.fill("#post-url", "https://x.com/creator/status/2")
     page.click("#analyze-button")
 
     expect(page.locator("#results-summary")).to_contain_text("1 個媒體項目已準備就緒")
     expect(page.locator(".media-card")).to_have_count(1)
+    grid_box = page.locator(".media-grid").bounding_box()
+    card_box = page.locator(".media-card").bounding_box()
+    assert grid_box is not None
+    assert card_box is not None
+    assert card_box["width"] <= 480
+    grid_center = grid_box["x"] + grid_box["width"] / 2
+    card_center = card_box["x"] + card_box["width"] / 2
+    assert abs(grid_center - card_center) <= 1
     assert calls == [
         {"url": "https://x.com/creator/status/1"},
         {"url": "https://x.com/creator/status/2"},
@@ -374,6 +387,11 @@ def test_mobile_layout_has_no_horizontal_overflow_and_supports_keyboard(
         "element => getComputedStyle(element).gridTemplateColumns.split(' ').length"
     )
     assert column_count == 1
+    grid_box = page.locator(".media-grid").bounding_box()
+    card_box = page.locator(".media-card").bounding_box()
+    assert grid_box is not None
+    assert card_box is not None
+    assert abs(grid_box["width"] - card_box["width"]) <= 1
     assert extraction_calls == [{"url": "https://x.com/creator/status/1"}]
 
 
