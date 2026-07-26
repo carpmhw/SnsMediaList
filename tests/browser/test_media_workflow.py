@@ -1,8 +1,35 @@
 """Browser-facing static contract tests for the contact-sheet workflow."""
 
+import struct
+import zlib
+
 from fastapi.testclient import TestClient
 
 from sns_media_list.app import create_app
+
+
+def _png_corner_rgba(payload: bytes) -> tuple[int, int, int, int]:
+    """Read the transparent top-left pixel from an RGBA PNG payload."""
+    assert payload.startswith(b"\x89PNG\r\n\x1a\n")
+    chunk_length, chunk_type = struct.unpack_from(">I4s", payload, 8)
+    assert chunk_type == b"IHDR"
+    ihdr = payload[16 : 16 + chunk_length]
+    bit_depth, color_type, interlace = struct.unpack_from(">BBB", ihdr, 8)
+    assert (bit_depth, color_type, interlace) == (8, 6, 0)
+
+    compressed = bytearray()
+    offset = 8
+    while offset < len(payload):
+        length, chunk_type = struct.unpack_from(">I4s", payload, offset)
+        chunk_start = offset + 8
+        if chunk_type == b"IDAT":
+            compressed.extend(payload[chunk_start : chunk_start + length])
+        offset = chunk_start + length + 4
+        if chunk_type == b"IEND":
+            break
+
+    pixels = zlib.decompress(compressed)
+    return pixels[1], pixels[2], pixels[3], pixels[4]
 
 
 def test_home_page_contains_contact_sheet_workflow() -> None:
@@ -33,6 +60,61 @@ def test_home_page_contains_contact_sheet_workflow() -> None:
     assert "只下載你有權保存的內容" in response.text
 
 
+def test_home_page_advertises_same_origin_favicon_formats() -> None:
+    """Verify the document head advertises both favicon candidates locally."""
+    response = TestClient(create_app()).get("/")
+
+    assert response.status_code == 200
+    assert (
+        '<link rel="icon" href="/favicon.ico" type="image/x-icon" sizes="16x16 32x32 48x48">'
+        in response.text
+    )
+    assert '<link rel="icon" href="/favicon.svg" type="image/svg+xml">' in response.text
+
+
+def test_svg_favicon_is_self_contained_and_uses_approved_palette() -> None:
+    """Verify the SVG favicon is a safe, opaque rendering of the approved design."""
+    response = TestClient(create_app()).get("/favicon.svg")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/svg+xml")
+    assert 'viewBox="0 0 64 64"' in response.text
+    for color in ("#171D1C", "#202A27", "#EDB37C", "#F3EEE6", "#3B4741"):
+        assert color in response.text
+    assert '<rect width="64" height="64" rx="15" fill="#171D1C"' in response.text
+    assert "<script" not in response.text
+    assert "<text" not in response.text
+    assert "<image" not in response.text
+    assert "<animate" not in response.text
+    assert 'href="http:' not in response.text
+    assert 'href="https:' not in response.text
+    assert "xlink:href" not in response.text
+    assert "url(" not in response.text
+
+
+def test_ico_favicon_contains_standard_tab_sizes() -> None:
+    """Verify the ICO fallback is valid and includes 16, 32, and 48 pixel frames."""
+    response = TestClient(create_app()).get("/favicon.ico")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/vnd.microsoft.icon")
+    reserved, image_type, image_count = struct.unpack_from("<HHH", response.content)
+    assert reserved == 0
+    assert image_type == 1
+    assert image_count == 3
+
+    directory_end = 6 + image_count * 16
+    directory_entries = list(struct.iter_unpack("<BBBBHHII", response.content[6:directory_end]))
+    frame_sizes = {
+        (width or 256, height or 256)
+        for width, height, _colors, _reserved, _planes, _bits, _length, _offset in directory_entries
+    }
+    assert frame_sizes == {(16, 16), (32, 32), (48, 48)}
+    for _width, _height, _colors, _reserved, _planes, _bits, length, offset in directory_entries:
+        payload = response.content[offset : offset + length]
+        assert _png_corner_rgba(payload)[3] == 0
+
+
 def test_static_assets_include_responsive_and_recovery_hooks() -> None:
     """Verify CSS and JavaScript expose required responsive behavior hooks."""
     client = TestClient(create_app())
@@ -51,6 +133,21 @@ def test_static_assets_include_responsive_and_recovery_hooks() -> None:
     assert "token_expired" in javascript.text
     assert "token_not_found" in javascript.text
     assert "method: 'HEAD'" in javascript.text
+    assert ".blob()" not in javascript.text
+
+
+def test_javascript_coordinates_token_previews_without_buffering_media() -> None:
+    """Verify static client code keeps preview work bounded and cancellable."""
+    javascript = TestClient(create_app()).get("/app.js")
+
+    assert javascript.status_code == 200
+    assert "previewQueue" in javascript.text
+    assert "activePreview" in javascript.text
+    assert "extractionGeneration" in javascript.text
+    assert "pumpPreviewQueue" in javascript.text
+    assert "cancelPreviewLoading" in javascript.text
+    assert "PREVIEW_RETRY_DELAY_MS = 1000" in javascript.text
+    assert "removeAttribute('src')" in javascript.text
     assert ".blob()" not in javascript.text
 
 

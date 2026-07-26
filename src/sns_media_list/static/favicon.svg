@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="SNS Media List">
+  <rect width="64" height="64" rx="15" fill="#171D1C"/>
+  <rect x="12" y="14" width="35" height="29" rx="6" fill="#202A27" stroke="#EDB37C" stroke-width="4" transform="rotate(-8 30 29)"/>
+  <rect x="17" y="18" width="35" height="29" rx="6" fill="#F3EEE6"/>
+  <circle cx="27" cy="28" r="3.5" fill="#EDB37C"/>
+  <path d="M22 41l8-8 5 5 4-4 8 7" fill="none" stroke="#3B4741" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
