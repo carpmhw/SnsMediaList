@@ -9,7 +9,14 @@ const sourceLink = document.querySelector('#source-link');
 const resultsSummary = document.querySelector('#results-summary');
 const unavailableWarning = document.querySelector('#unavailable-warning');
 const mediaGrid = document.querySelector('#media-grid');
+const LOCAL_PREVIEW_URL = '/placeholder.svg';
+const PREVIEW_RETRY_DELAY_MS = 1000;
 let submittedUrl = '';
+let extractionGeneration = 0;
+let previewGeneration = 0;
+let previewQueue = [];
+let activePreview = null;
+const previewRetryTimers = new Set();
 
 const ERROR_MESSAGES = {
   invalid_url: '請輸入 HTTPS Instagram 貼文、Reel、單則 Story 或 X 狀態貼文 URL。',
@@ -54,6 +61,7 @@ function setStatus(message, state = 'info', canReanalyze = false) {
 
 /** Hide and empty the previous extraction result before a new request. */
 function clearResults() {
+  cancelPreviewLoading();
   results.hidden = true;
   mediaGrid.replaceChildren();
   unavailableWarning.hidden = true;
@@ -61,6 +69,20 @@ function clearResults() {
   postDescription.textContent = '';
   sourceLink.textContent = '';
   sourceLink.removeAttribute('href');
+}
+
+/** Cancel all preview work belonging to the currently displayed result. */
+function cancelPreviewLoading() {
+  previewGeneration += 1;
+  previewQueue = [];
+  if (activePreview) {
+    activePreview.image.removeAttribute('src');
+    activePreview = null;
+  }
+  for (const timer of previewRetryTimers) {
+    window.clearTimeout(timer);
+  }
+  previewRetryTimers.clear();
 }
 
 /** Format a positive media duration as a compact human-readable value. */
@@ -101,29 +123,105 @@ function createFallbackTile(media) {
   return fallback;
 }
 
-/** Replace a broken preview with a local non-network fallback tile. */
-function handlePreviewError(event) {
-  const image = event.currentTarget;
-  const visual = image.closest('.media-visual');
-  if (visual) {
-    visual.replaceChildren(createFallbackTile({ media_type: image.dataset.mediaType }));
-  }
+/** Check whether a queued preview still belongs to the visible extraction result. */
+function isCurrentPreviewEntry(entry) {
+  return (
+    entry.generation === previewGeneration &&
+    entry.image.isConnected &&
+    mediaGrid.contains(entry.image) &&
+    entry.visual.contains(entry.image)
+  );
 }
 
-/** Create one ordered media card from the public API model. */
+/** Replace an exhausted preview with the local non-network fallback tile. */
+function replacePreviewWithFallback(entry) {
+  if (!isCurrentPreviewEntry(entry)) {
+    return;
+  }
+  entry.visual.replaceChildren(createFallbackTile({ media_type: entry.mediaType }));
+}
+
+/** Queue one retry after the minimum delay advertised by local rate limits. */
+function schedulePreviewRetry(entry) {
+  const timer = window.setTimeout(() => {
+    previewRetryTimers.delete(timer);
+    if (!isCurrentPreviewEntry(entry)) {
+      return;
+    }
+    previewQueue.push(entry);
+    pumpPreviewQueue();
+  }, PREVIEW_RETRY_DELAY_MS);
+  previewRetryTimers.add(timer);
+}
+
+/** Finish one preview attempt and advance the bounded queue. */
+function completePreviewAttempt(entry, loaded) {
+  if (!isCurrentPreviewEntry(entry)) {
+    return;
+  }
+  if (activePreview !== entry) {
+    if (!loaded) {
+      replacePreviewWithFallback(entry);
+    }
+    return;
+  }
+  activePreview = null;
+  if (loaded) {
+    pumpPreviewQueue();
+    return;
+  }
+  if (entry.attempts < 2) {
+    schedulePreviewRetry(entry);
+  } else {
+    replacePreviewWithFallback(entry);
+  }
+  pumpPreviewQueue();
+}
+
+/** Start the next valid opaque preview while keeping one request active. */
+function pumpPreviewQueue() {
+  if (activePreview || previewQueue.length === 0) {
+    return;
+  }
+  const entry = previewQueue.shift();
+  if (!isCurrentPreviewEntry(entry)) {
+    pumpPreviewQueue();
+    return;
+  }
+  activePreview = entry;
+  entry.attempts += 1;
+  entry.image.src = entry.url;
+}
+
+/** Create one ordered media card and queue only its opaque preview URL. */
 function renderMediaCard(media, index) {
   const card = document.createElement('article');
   card.className = 'media-card';
 
   const visual = document.createElement('div');
   visual.className = 'media-visual';
-  if (media.preview_url) {
+  if (media.preview_url === LOCAL_PREVIEW_URL) {
     const image = document.createElement('img');
-    image.src = media.preview_url;
+    image.src = LOCAL_PREVIEW_URL;
     image.alt = `${media.media_type === 'video' ? '影片' : '圖片'} ${index + 1} 預覽`;
     image.dataset.mediaType = media.media_type;
-    image.addEventListener('error', handlePreviewError);
     visual.append(image);
+  } else if (media.preview_url) {
+    const image = document.createElement('img');
+    image.alt = `${media.media_type === 'video' ? '影片' : '圖片'} ${index + 1} 預覽`;
+    image.dataset.mediaType = media.media_type;
+    visual.append(image);
+    const entry = {
+      generation: previewGeneration,
+      image,
+      mediaType: media.media_type,
+      url: media.preview_url,
+      visual,
+      attempts: 0,
+    };
+    image.addEventListener('load', () => completePreviewAttempt(entry, true));
+    image.addEventListener('error', () => completePreviewAttempt(entry, false));
+    previewQueue.push(entry);
   } else {
     visual.append(createFallbackTile(media));
   }
@@ -167,6 +265,7 @@ function renderResults(payload) {
     unavailableWarning.hidden = true;
   }
   results.hidden = false;
+  pumpPreviewQueue();
 }
 
 /** Convert a stable API error response into a safe browser Error. */
@@ -186,6 +285,7 @@ async function readApiError(response) {
 /** Submit the current content URL and replace the result state. */
 async function analyze(event) {
   event?.preventDefault();
+  const requestGeneration = ++extractionGeneration;
   submittedUrl = input.value.trim();
   button.disabled = true;
   clearResults();
@@ -196,16 +296,28 @@ async function analyze(event) {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ url: submittedUrl }),
     });
+    if (requestGeneration !== extractionGeneration) {
+      return;
+    }
     if (!response.ok) {
       throw await readApiError(response);
     }
-    renderResults(await response.json());
+    const payload = await response.json();
+    if (requestGeneration !== extractionGeneration) {
+      return;
+    }
+    renderResults(payload);
     setStatus('準備就緒，請選擇個別下載。', 'success');
   } catch (error) {
+    if (requestGeneration !== extractionGeneration) {
+      return;
+    }
     const canReanalyze = error.code === 'token_expired' || error.code === 'token_not_found';
     setStatus(error.message || '目前無法分析此內容。', 'error', canReanalyze);
   } finally {
-    button.disabled = false;
+    if (requestGeneration === extractionGeneration) {
+      button.disabled = false;
+    }
   }
 }
 
