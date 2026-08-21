@@ -150,7 +150,10 @@ def test_nginx_example_authenticates_and_suppresses_sensitive_logs() -> None:
     assert 'proxy_set_header Forwarded "";' in nginx
     assert 'proxy_set_header Cookie "";' in nginx
     assert 'proxy_set_header Authorization "";' in nginx
+    assert 'proxy_set_header Proxy-Authorization "";' in nginx
+    assert "proxy_hide_header Set-Cookie;" in nginx
     assert "proxy_buffering off;" in nginx
+    assert "proxy_read_timeout 300s;" in nginx
     assert "client_max_body_size 4k;" in nginx
 
 

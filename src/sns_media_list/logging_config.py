@@ -14,9 +14,12 @@ def build_event(
     outcome: str,
     duration_ms: float,
     item_count: int | None = None,
+    media_class: str | None = None,
+    bytes_streamed: int | None = None,
+    reason_code: str | None = None,
     **_sensitive: Any,
 ) -> dict[str, Any]:
-    """Build an event containing only the approved observability fields."""
+    """建立只包含核准觀測欄位的結構化事件。"""
     event: dict[str, Any] = {
         "request_id": request_id,
         "platform": platform,
@@ -25,6 +28,12 @@ def build_event(
     }
     if item_count is not None:
         event["item_count"] = item_count
+    if media_class is not None:
+        event["media_class"] = media_class
+    if bytes_streamed is not None:
+        event["bytes_streamed"] = bytes_streamed
+    if reason_code is not None:
+        event["reason_code"] = reason_code
     return event
 
 

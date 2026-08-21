@@ -21,7 +21,7 @@ _TRIVY_IMAGE = (
 
 
 def evaluate_pip_audit(report: Any) -> list[str]:
-    """Return one failure for every vulnerability in a pip-audit report."""
+    """逐 dependency 驗證 pip-audit schema，並回傳所有安全 gate findings。"""
     if not isinstance(report, Mapping):
         return ["pip-audit report must be a JSON object"]
     if "dependencies" not in report:
@@ -36,8 +36,18 @@ def evaluate_pip_audit(report: Any) -> list[str]:
         if not isinstance(dependency, Mapping):
             findings.append("pip-audit report contains an invalid dependency entry")
             continue
-        name = str(dependency.get("name", "unknown"))
-        version = str(dependency.get("version", "unknown"))
+        name_value = dependency.get("name")
+        version_value = dependency.get("version")
+        if (
+            not isinstance(name_value, str)
+            or not name_value.strip()
+            or not isinstance(version_value, str)
+            or not version_value.strip()
+        ):
+            findings.append("pip-audit report has invalid dependency metadata")
+            continue
+        name = name_value.strip()
+        version = version_value.strip()
         if "vulns" not in dependency:
             findings.append(f"pip-audit report has invalid vulnerabilities for {name}")
             continue
@@ -60,7 +70,7 @@ def evaluate_trivy(
     exceptions: Sequence[Mapping[str, Any]],
     today: date,
 ) -> list[str]:
-    """Return failures for fixable or unaccepted High/Critical Trivy findings."""
+    """回傳可修復或未接受之 High/Critical Trivy 漏洞失敗項目。"""
     if not isinstance(report, Mapping):
         return ["Trivy report must be a JSON object"]
     if "Results" not in report:
@@ -76,8 +86,8 @@ def evaluate_trivy(
             findings.append("Trivy report contains an invalid result entry")
             continue
         target = str(result.get("Target", "unknown"))
-        vulnerabilities = result.get("Vulnerabilities") or []
-        if not isinstance(vulnerabilities, list):
+        vulnerabilities = _trivy_vulnerabilities(result)
+        if vulnerabilities is None:
             findings.append(f"Trivy report has invalid vulnerabilities for {target}")
             continue
         for vulnerability in vulnerabilities:
@@ -127,6 +137,16 @@ def evaluate_trivy(
                 continue
             findings.extend(_validate_exception(exception, identifier, package, today))
     return findings
+
+
+def _trivy_vulnerabilities(result: Mapping[str, Any]) -> list[Any] | None:
+    """依 Trivy result 類型解析 Vulnerabilities，並只放寬 Python 缺欄位情況。"""
+    if "Vulnerabilities" not in result:
+        if result.get("Class") == "lang-pkgs" and result.get("Type") == "python-pkg":
+            return []
+        return None
+    vulnerabilities = result["Vulnerabilities"]
+    return vulnerabilities if isinstance(vulnerabilities, list) else None
 
 
 def _find_exception(
@@ -214,6 +234,11 @@ def _trivy_image_digest(report: Mapping[str, Any]) -> str:
 
 def _audit_site_packages(environment: Path) -> Path:
     """Return the installed-distribution directory inside a Python virtualenv."""
+    candidates = tuple(
+        path for path in (environment / "lib").glob("python*/site-packages") if path.is_dir()
+    )
+    if len(candidates) == 1:
+        return candidates[0]
     version = f"{sys.version_info.major}.{sys.version_info.minor}"
     return environment / "lib" / f"python{version}" / "site-packages"
 
@@ -224,7 +249,7 @@ def validate_trivy_report(
     expected_image: str | None = None,
     expected_digest: str | None = None,
 ) -> None:
-    """Validate scanner identity and non-empty results before evaluating findings."""
+    """驗證掃描器識別資訊與非空結果，再進一步評估漏洞。"""
     if not isinstance(report, Mapping):
         raise ValueError("Trivy report must be a JSON object")
     results = report.get("Results")
@@ -258,8 +283,7 @@ def validate_trivy_report(
                 raise ValueError(f"Trivy report result is missing {field}")
         if not isinstance(result.get("Packages"), list):
             raise ValueError("Trivy report result is missing Packages")
-        vulnerabilities = result.get("Vulnerabilities")
-        if vulnerabilities is not None and not isinstance(vulnerabilities, list):
+        if _trivy_vulnerabilities(result) is None:
             raise ValueError("Trivy report result has invalid Vulnerabilities")
 
 

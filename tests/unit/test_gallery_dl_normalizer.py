@@ -7,6 +7,7 @@ import pytest
 
 from sns_media_list.errors import AppError
 from sns_media_list.extractor.normalizer import (
+    _validate_source_url,
     build_media_request_headers,
     ensure_downloadable_media,
     normalize_gallery_output,
@@ -145,6 +146,15 @@ def test_media_source_rejects_request_line_unsafe_characters(source_url: str) ->
         )
 
     assert exc_info.value.code == "extraction_failed"
+
+
+def test_source_url_split_error_maps_to_safe_extraction_error() -> None:
+    """不完整 IPv6 authority 不得讓 urlsplit ValueError 穿透。"""
+    with pytest.raises(AppError) as exc_info:
+        _validate_source_url("https://[")
+
+    assert exc_info.value.code == "extraction_failed"
+    assert exc_info.value.message == "The extractor returned an unsafe media URL."
 
 
 def test_unknown_preview_host_falls_back_to_generated_mode() -> None:

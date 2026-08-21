@@ -238,7 +238,12 @@ def _validate_source_url(value: str) -> None:
     """Reject non-HTTPS or credential-bearing upstream media URLs."""
     if any(ord(char) < 0x20 or ord(char) == 0x7F or ord(char) > 0x7F for char in value):
         raise AppError("extraction_failed", "The extractor returned an unsafe media URL.")
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+    except ValueError as error:
+        raise AppError(
+            "extraction_failed", "The extractor returned an unsafe media URL."
+        ) from error
     if parsed.scheme != "https" or parsed.username or parsed.password or parsed.fragment:
         raise AppError("extraction_failed", "The extractor returned an unsafe media URL.")
 

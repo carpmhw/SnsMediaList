@@ -54,6 +54,17 @@ def test_security_settings_accept_environment_overrides(monkeypatch) -> None:
     assert settings.generated_previews_enabled is True
 
 
+def test_legacy_download_timeout_environment_is_ignored(monkeypatch) -> None:
+    """驗證移除的下載總時間設定與舊環境變數都不再進入 Settings。"""
+    monkeypatch.setenv("SNS_MEDIA_DOWNLOAD_TIMEOUT_SECONDS", "1")
+
+    settings = Settings()
+
+    assert "download_timeout_seconds" not in Settings.model_fields
+    assert not hasattr(settings, "download_timeout_seconds")
+    assert settings.media_response_timeout_seconds == 120.0
+
+
 def test_security_settings_reject_values_outside_safe_bounds() -> None:
     """Verify request and response security limits cannot be unbounded or disabled."""
     invalid = (

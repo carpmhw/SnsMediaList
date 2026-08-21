@@ -234,6 +234,32 @@ def test_application_lifecycle_starts_and_closes_extraction_proxy(monkeypatch) -
     assert calls == [("127.0.0.1", 8765), ("close", 0), ("wait_closed", 0)]
 
 
+def test_create_app_wires_extraction_timeout_to_connect_proxy(monkeypatch) -> None:
+    """驗證 app 建立 proxy 時使用 extractor 的 bounded operation timeout。"""
+    captured: dict[str, object] = {}
+
+    def fake_init(
+        proxy: object,
+        _policy: object,
+        *,
+        max_header_bytes: int = 8192,
+        operation_timeout_seconds: float = 45.0,
+    ) -> None:
+        """捕捉 app 傳入 ConnectProxy 的 timeout 設定。"""
+        captured.update(
+            {
+                "proxy": proxy,
+                "max_header_bytes": max_header_bytes,
+                "operation_timeout_seconds": operation_timeout_seconds,
+            }
+        )
+
+    monkeypatch.setattr("sns_media_list.network.connect_proxy.ConnectProxy.__init__", fake_init)
+    create_app(settings=Settings(extraction_timeout_seconds=7.5))
+
+    assert captured["operation_timeout_seconds"] == 7.5
+
+
 def test_valid_cookie_mount_keeps_health_local_and_invalid_mount_fails(tmp_path) -> None:
     """Verify valid secret mounts start while invalid configured mounts fail safely."""
     cookie_file = tmp_path / "instagram.cookies.txt"

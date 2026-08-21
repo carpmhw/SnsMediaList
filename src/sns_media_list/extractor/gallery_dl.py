@@ -109,6 +109,17 @@ _KNOWN_ERROR_TYPES = frozenset(
         _NOT_FOUND_ERROR_TYPE,
     }
 )
+_EXTRACTION_READ_CHUNK = 64 * 1024
+_EXTRACTION_STDERR_LIMIT = 64 * 1024
+_EXTRACTION_CLEANUP_TIMEOUT_SECONDS = 2.0
+
+
+class _ExtractionOutputLimitExceeded(Exception):
+    """表示 extractor stdout 已超過允許保留的大小。"""
+
+
+class _ExtractionOperationTimeout(Exception):
+    """表示 extractor 自身的 bounded process 等待已超時。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,13 +225,18 @@ class GalleryDlRunner:
             environment = build_sanitized_environment(
                 dict(os.environ), home=home, proxy_url=self.proxy_url
             )
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=environment,
-                start_new_session=True,
-            )
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=environment,
+                    start_new_session=True,
+                )
+            except OSError as error:
+                raise AppError(
+                    "extraction_failed", "The extractor process could not be started."
+                ) from error
             stdout, stderr = await self._communicate(process)
         if len(stdout) > self.settings.extraction_output_limit:
             raise AppError("extraction_failed", "The extractor output exceeded its limit.")
@@ -248,19 +264,215 @@ class GalleryDlRunner:
         return _add_post_context(records, target)
 
     async def _communicate(self, process: asyncio.subprocess.Process) -> tuple[bytes, bytes]:
-        """Collect bounded subprocess output and terminate on timeout."""
+        """以 bounded pipe readers concurrently drain subprocess output。"""
+        stdout = process.stdout
+        stderr = process.stderr
+        if not isinstance(stdout, asyncio.StreamReader) or not isinstance(
+            stderr, asyncio.StreamReader
+        ):
+            return await self._communicate_test_double(process)
+
+        tasks: list[asyncio.Task[Any]] = [
+            asyncio.create_task(
+                _read_extraction_stream(
+                    stdout,
+                    limit=self.settings.extraction_output_limit,
+                    reject_over_limit=True,
+                )
+            ),
+            asyncio.create_task(
+                _read_extraction_stream(
+                    stderr,
+                    limit=_EXTRACTION_STDERR_LIMIT,
+                    reject_over_limit=False,
+                )
+            ),
+            asyncio.create_task(process.wait()),
+        ]
+        try:
+            done, pending = await asyncio.wait(
+                tasks,
+                timeout=self.settings.extraction_timeout_seconds,
+                return_when=asyncio.FIRST_EXCEPTION,
+            )
+            if pending:
+                for task in done:
+                    if task.cancelled():
+                        raise asyncio.CancelledError
+                    error = task.exception()
+                    if error is not None:
+                        raise error
+                raise _ExtractionOperationTimeout
+            stdout_bytes, stderr_bytes, _returncode = await asyncio.gather(*tasks)
+            return stdout_bytes, stderr_bytes
+        except _ExtractionOutputLimitExceeded as error:
+            await _stop_extraction_process(process, tasks[2])
+            raise AppError(
+                "extraction_failed", "The extractor output exceeded its limit."
+            ) from error
+        except _ExtractionOperationTimeout as error:
+            await _stop_extraction_process(process, tasks[2])
+            raise AppError("extraction_timeout", "The extraction timed out.") from error
+        except OSError as error:
+            await _stop_extraction_process(process, tasks[2])
+            raise AppError(
+                "extraction_failed", "The extractor output could not be read."
+            ) from error
+        except BaseException:
+            await _stop_extraction_process(process, tasks[2])
+            raise
+        finally:
+            await _cleanup_extraction_tasks(tasks)
+
+    async def _communicate_test_double(self, process: Any) -> tuple[bytes, bytes]:
+        """保留沒有 asyncio pipe 的既有 test double communicate fallback。"""
         try:
             return await asyncio.wait_for(
                 process.communicate(), self.settings.extraction_timeout_seconds
             )
         except TimeoutError as error:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), 2.0)
-            except TimeoutError:
-                process.kill()
-                await process.wait()
+            await _stop_extraction_process(process)
             raise AppError("extraction_timeout", "The extraction timed out.") from error
+        except OSError as error:
+            await _stop_extraction_process(process)
+            raise AppError(
+                "extraction_failed", "The extractor output could not be read."
+            ) from error
+
+
+async def _read_extraction_stream(
+    stream: asyncio.StreamReader,
+    *,
+    limit: int,
+    reject_over_limit: bool,
+) -> bytes:
+    """以固定 chunk drain stream，僅在 stdout 路徑對超限立即失敗。"""
+    output = bytearray()
+    while True:
+        if reject_over_limit:
+            read_size = min(_EXTRACTION_READ_CHUNK, limit - len(output) + 1)
+        else:
+            read_size = _EXTRACTION_READ_CHUNK
+        chunk = await stream.read(read_size)
+        if not chunk:
+            return bytes(output)
+        if reject_over_limit and len(output) + len(chunk) > limit:
+            raise _ExtractionOutputLimitExceeded
+        if len(output) < limit:
+            output.extend(chunk[: limit - len(output)])
+
+
+async def _await_extraction_process_exit(
+    process: Any,
+    wait_task: asyncio.Task[Any] | None,
+    timeout: float,
+) -> bool:
+    """在不重複建立或取消 wait task 的前提下 bounded 等待 process 結束。"""
+    del process
+    if wait_task is None:
+        return False
+    if wait_task.done():
+        try:
+            wait_task.result()
+        except BaseException:
+            return False
+        return True
+    try:
+        done, _pending = await asyncio.wait({wait_task}, timeout=timeout)
+    except asyncio.CancelledError:
+        _observe_extraction_wait_task(wait_task)
+        raise
+    if wait_task not in done:
+        return False
+    try:
+        wait_task.result()
+    except BaseException:
+        return False
+    return True
+
+
+async def _stop_extraction_process(
+    process: Any,
+    wait_task: asyncio.Task[Any] | None = None,
+) -> None:
+    """終止 extractor 並在 terminate 無效時 fallback 到 kill，保留 primary error。"""
+    cancellation_received = False
+    try:
+        process.terminate()
+    except OSError:
+        pass
+    if wait_task is None:
+        try:
+            wait_task = asyncio.create_task(process.wait())
+        except BaseException:
+            wait_task = None
+    try:
+        exited = await _await_extraction_process_exit(
+            process, wait_task, _EXTRACTION_CLEANUP_TIMEOUT_SECONDS
+        )
+    except asyncio.CancelledError:
+        cancellation_received = True
+        exited = False
+    except BaseException:
+        exited = False
+    if not exited:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            await _await_extraction_process_exit(
+                process, wait_task, _EXTRACTION_CLEANUP_TIMEOUT_SECONDS
+            )
+        except asyncio.CancelledError:
+            cancellation_received = True
+        except BaseException:
+            pass
+    if wait_task is not None:
+        _observe_extraction_wait_task(wait_task)
+    if cancellation_received:
+        raise asyncio.CancelledError
+
+
+def _observe_extraction_wait_task(task: asyncio.Task[Any]) -> None:
+    """消耗或 detached 觀察 process.wait task 的最終結果。"""
+    if task.done():
+        _consume_extraction_task_exception(task)
+    else:
+        task.add_done_callback(_consume_extraction_task_exception)
+
+
+async def _cleanup_extraction_tasks(tasks: list[asyncio.Task[Any]]) -> None:
+    """取消並 bounded 觀察 extractor pipe tasks，避免 cleanup 例外遺失。"""
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    try:
+        done, pending = await asyncio.wait(
+            tasks,
+            timeout=_EXTRACTION_CLEANUP_TIMEOUT_SECONDS,
+        )
+    except asyncio.CancelledError:
+        for task in tasks:
+            if task.done():
+                _consume_extraction_task_exception(task)
+            else:
+                task.add_done_callback(_consume_extraction_task_exception)
+        raise
+    for task in done:
+        _consume_extraction_task_exception(task)
+    for task in pending:
+        task.add_done_callback(_consume_extraction_task_exception)
+
+
+def _consume_extraction_task_exception(task: asyncio.Future[Any]) -> None:
+    """消耗 detached extractor task 結果，避免事件迴圈發出未觀察例外。"""
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except BaseException:
+        pass
 
 
 def _parse_json_records(stdout: bytes) -> _ParsedGalleryOutput:
