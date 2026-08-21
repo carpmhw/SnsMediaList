@@ -14,8 +14,16 @@ def test_build_event_omits_sensitive_fields() -> None:
         duration_ms=12.5,
         item_count=2,
         source_url="https://x.com/user/status/123",
+        range_url="https://pbs.twimg.com/video.mp4?token=secret",
         token="secret-token",
+        cookie="private-cookie",
+        authorization="Bearer private-token",
+        proxy_authorization="Basic private-proxy-token",
+        etag='"private-etag"',
+        resolved_ip="192.0.2.1",
+        transport_exception="private transport detail",
         description="private description",
+        resume_attempt=1,
     )
 
     assert event == {
@@ -24,6 +32,7 @@ def test_build_event_omits_sensitive_fields() -> None:
         "outcome": "success",
         "duration_ms": 12.5,
         "item_count": 2,
+        "resume_attempt": 1,
     }
 
 

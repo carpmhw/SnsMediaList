@@ -48,10 +48,41 @@ def test_pip_audit_dependency_without_vulnerability_list_fails_closed() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "dependency",
+    [
+        {"vulns": []},
+        {"name": "", "version": "1.0.0", "vulns": []},
+        {"name": "example", "version": "", "vulns": []},
+        {"name": "   ", "version": "1.0.0", "vulns": []},
+        {"name": "example", "version": "   ", "vulns": []},
+    ],
+)
+def test_pip_audit_dependency_metadata_schema_fails_closed(dependency: dict[str, object]) -> None:
+    """Verify missing or blank dependency name/version cannot pass a clean audit."""
+    assert evaluate_pip_audit({"dependencies": [dependency]})
+
+
+def test_pip_audit_complete_dependency_with_no_vulnerabilities_is_clean() -> None:
+    """Verify only a complete dependency schema with an empty vuln list is clean."""
+    assert (
+        evaluate_pip_audit({"dependencies": [{"name": "example", "version": "1.0.0", "vulns": []}]})
+        == []
+    )
+
+
 def test_pip_audit_target_is_the_installed_site_packages_directory(tmp_path) -> None:
     """Verify the audit scans installed distributions instead of the empty venv root."""
     assert _audit_site_packages(tmp_path).name == "site-packages"
     assert _audit_site_packages(tmp_path).parent.parent.parent == tmp_path
+
+
+def test_audit_site_packages_uses_the_unique_uv_python_directory(tmp_path) -> None:
+    """uv venv 使用非目前 interpreter 版本時仍應掃描實際 site-packages。"""
+    site_packages = tmp_path / "lib" / "python3.13" / "site-packages"
+    site_packages.mkdir(parents=True)
+
+    assert _audit_site_packages(tmp_path) == site_packages
 
 
 def test_trivy_fixed_high_finding_fails_without_exception() -> None:
@@ -312,6 +343,188 @@ def test_trivy_report_without_results_fails_closed() -> None:
     assert evaluate_trivy({}, exceptions=[], today=date(2026, 7, 24)) == [
         "Trivy report is missing Results"
     ]
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"Target": "image"},
+        {"Target": "image", "Vulnerabilities": None},
+        {"Target": "image", "Vulnerabilities": {}},
+    ],
+)
+def test_evaluate_trivy_requires_vulnerability_list(result: dict[str, object]) -> None:
+    """驗證直接評估 Trivy 時缺失、null 或錯誤型別都不能被當成 clean。"""
+    assert evaluate_trivy({"Results": [result]}, exceptions=[], today=date(2026, 7, 24)) == [
+        "Trivy report has invalid vulnerabilities for image"
+    ]
+
+
+def test_evaluate_trivy_accepts_explicit_empty_vulnerability_list() -> None:
+    """驗證明確的空 Vulnerabilities list 仍代表 clean result。"""
+    assert (
+        evaluate_trivy(
+            {"Results": [{"Target": "image", "Vulnerabilities": []}]},
+            exceptions=[],
+            today=date(2026, 7, 24),
+        )
+        == []
+    )
+
+
+def test_evaluate_trivy_accepts_omitted_vulnerabilities_for_python_result() -> None:
+    """驗證 Python language scan 省略 Vulnerabilities 時可視為無漏洞。"""
+    assert (
+        evaluate_trivy(
+            {
+                "Results": [
+                    {
+                        "Target": "usr/local/lib/python3.12/site-packages",
+                        "Class": "lang-pkgs",
+                        "Type": "python-pkg",
+                    }
+                ]
+            },
+            exceptions=[],
+            today=date(2026, 7, 24),
+        )
+        == []
+    )
+
+
+def test_validate_trivy_report_accepts_omitted_vulnerabilities_for_python_result() -> None:
+    """驗證完整 Trivy 報告接受 Python result 省略 Vulnerabilities。"""
+    validate_trivy_report(
+        {
+            "ArtifactName": "sns-media-list:candidate",
+            "ArtifactID": "sha256:report",
+            "Metadata": {"ImageID": "sha256:image"},
+            "Results": [
+                {
+                    "Target": "usr/local/lib/python3.12/site-packages",
+                    "Class": "lang-pkgs",
+                    "Type": "python-pkg",
+                    "Packages": [],
+                }
+            ],
+        },
+        expected_image="sns-media-list:candidate",
+    )
+
+
+def test_evaluate_trivy_rejects_null_vulnerabilities_for_python_result() -> None:
+    """驗證 Python result 明確為 null 時仍必須 fail closed。"""
+    assert evaluate_trivy(
+        {
+            "Results": [
+                {
+                    "Target": "usr/local/lib/python3.12/site-packages",
+                    "Class": "lang-pkgs",
+                    "Type": "python-pkg",
+                    "Vulnerabilities": None,
+                }
+            ]
+        },
+        exceptions=[],
+        today=date(2026, 7, 24),
+    ) == ["Trivy report has invalid vulnerabilities for usr/local/lib/python3.12/site-packages"]
+
+
+def test_validate_trivy_report_rejects_null_vulnerabilities_for_python_result() -> None:
+    """驗證完整報告中的 Python null Vulnerabilities 仍會被拒絕。"""
+    with pytest.raises(ValueError, match="Vulnerabilities"):
+        validate_trivy_report(
+            {
+                "ArtifactName": "sns-media-list:candidate",
+                "ArtifactID": "sha256:report",
+                "Metadata": {"ImageID": "sha256:image"},
+                "Results": [
+                    {
+                        "Target": "usr/local/lib/python3.12/site-packages",
+                        "Class": "lang-pkgs",
+                        "Type": "python-pkg",
+                        "Packages": [],
+                        "Vulnerabilities": None,
+                    }
+                ],
+            },
+            expected_image="sns-media-list:candidate",
+        )
+
+
+def test_validate_trivy_report_rejects_omitted_vulnerabilities_for_os_result() -> None:
+    """驗證 OS result 省略 Vulnerabilities 時仍會被拒絕。"""
+    with pytest.raises(ValueError, match="Vulnerabilities"):
+        validate_trivy_report(
+            {
+                "ArtifactName": "sns-media-list:candidate",
+                "ArtifactID": "sha256:report",
+                "Metadata": {"ImageID": "sha256:image"},
+                "Results": [
+                    {
+                        "Target": "rootfs",
+                        "Class": "os-pkgs",
+                        "Type": "debian",
+                        "Packages": [],
+                    }
+                ],
+            },
+            expected_image="sns-media-list:candidate",
+        )
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"Target": "image", "Class": "os-pkgs", "Type": "debian", "Packages": []},
+        {
+            "Target": "image",
+            "Class": "os-pkgs",
+            "Type": "debian",
+            "Packages": [],
+            "Vulnerabilities": None,
+        },
+        {
+            "Target": "image",
+            "Class": "os-pkgs",
+            "Type": "debian",
+            "Packages": [],
+            "Vulnerabilities": {},
+        },
+    ],
+)
+def test_validate_trivy_report_requires_vulnerability_list(result: dict[str, object]) -> None:
+    """驗證報告 schema 必須明確提供 list 型別的 Vulnerabilities 欄位。"""
+    report = {
+        "ArtifactName": "sns-media-list:candidate",
+        "ArtifactID": "sha256:report",
+        "Metadata": {"ImageID": "sha256:image"},
+        "Results": [result],
+    }
+
+    with pytest.raises(ValueError, match="Vulnerabilities"):
+        validate_trivy_report(report, expected_image="sns-media-list:candidate")
+
+
+def test_validate_trivy_report_accepts_explicit_empty_vulnerability_list() -> None:
+    """驗證 schema validator 接受合法的空 Vulnerabilities list。"""
+    validate_trivy_report(
+        {
+            "ArtifactName": "sns-media-list:candidate",
+            "ArtifactID": "sha256:report",
+            "Metadata": {"ImageID": "sha256:image"},
+            "Results": [
+                {
+                    "Target": "image",
+                    "Class": "os-pkgs",
+                    "Type": "debian",
+                    "Packages": [],
+                    "Vulnerabilities": [],
+                }
+            ],
+        },
+        expected_image="sns-media-list:candidate",
+    )
 
 
 def test_trivy_report_requires_complete_scan_metadata() -> None:

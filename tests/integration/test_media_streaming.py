@@ -338,13 +338,267 @@ def test_download_filename_is_sanitized() -> None:
     assert "\r" not in headers["Content-Disposition"]
 
 
-def test_forward_response_headers_do_not_trust_upstream_content_length() -> None:
-    """Verify streaming responses do not expose a stale upstream body length."""
+def test_preview_response_headers_do_not_forward_upstream_content_length() -> None:
+    """preview response 不得轉送 upstream Content-Length。"""
     response = make_response(b"body", content_type="image/jpeg")
 
-    headers = build_forward_response_headers(response, filename="image.jpg", preview=False)
+    headers = build_forward_response_headers(response, filename="image.jpg", preview=True)
 
     assert "Content-Length" not in headers
+
+
+@pytest.mark.parametrize("content_encoding", ["gzip", "br", "identity, gzip"])
+def test_media_response_rejects_non_identity_content_encoding(content_encoding: str) -> None:
+    """MediaResponse 不得接受會讓 raw media bytes 被誤標的壓縮編碼。"""
+    with pytest.raises(AppError) as exc_info:
+        MediaResponse(
+            200,
+            {"content-type": "image/jpeg", "content-encoding": content_encoding},
+            Reader(b"\xff\xd8\xffbody"),
+            Writer(),
+            max_bytes=100,
+        )
+
+    assert exc_info.value.code == "upstream_media_invalid"
+
+
+def test_media_response_normalizes_identity_content_encoding() -> None:
+    """MediaResponse 應接受並正規化 case/OWS 形式的 identity。"""
+    response = MediaResponse(
+        200,
+        {"content-type": "image/jpeg", "Content-Encoding": "\t IdEnTiTy \t"},
+        Reader(b"\xff\xd8\xffbody"),
+        Writer(),
+        max_bytes=100,
+    )
+
+    assert response.headers["content-encoding"] == "identity"
+
+
+@pytest.mark.parametrize("transfer_encoding", ["gzip", "gzip, chunked"])
+def test_forward_headers_reject_unsupported_transfer_encoding(transfer_encoding: str) -> None:
+    """MediaResponse constructor 遇到不支援的 transfer coding 時應 fail closed。"""
+    with pytest.raises(AppError) as exc_info:
+        MediaResponse(
+            200,
+            {"content-type": "image/jpeg", "transfer-encoding": transfer_encoding},
+            Reader(b"body"),
+            Writer(),
+            max_bytes=100,
+        )
+
+    assert exc_info.value.code == "upstream_media_invalid"
+
+
+@pytest.mark.asyncio
+async def test_media_response_rejects_conflicting_framing_headers() -> None:
+    """MediaResponse constructor 遇到 CL 與 TE 共存時應 fail closed。"""
+    with pytest.raises(AppError) as exc_info:
+        MediaResponse(
+            200,
+            {
+                "content-type": "video/mp4",
+                "content-length": "2",
+                "transfer-encoding": "chunked",
+            },
+            ChunkedReader(b"2\r\nab\r\n0\r\n\r\n"),
+            Writer(),
+            max_bytes=100,
+        )
+
+    assert exc_info.value.code == "upstream_media_invalid"
+
+
+def test_forward_headers_reject_conflicting_framing_headers() -> None:
+    """direct response fixture 遇到 CL 與 TE 共存時不得建立。"""
+    with pytest.raises(AppError) as exc_info:
+        MediaResponse(
+            200,
+            {
+                "content-type": "video/mp4",
+                "content-length": "2",
+                "transfer-encoding": "chunked",
+            },
+            Reader(b""),
+            Writer(),
+            max_bytes=100,
+        )
+
+    assert exc_info.value.code == "upstream_media_invalid"
+
+
+@pytest.mark.parametrize(
+    "chunk_size",
+    [b"+2", b"2 ", b" 2", b"0x2", b""],
+    ids=["plus", "trailing-ows", "leading-ows", "hex-prefix", "empty"],
+)
+@pytest.mark.asyncio
+async def test_chunked_response_rejects_non_strict_chunk_size(chunk_size: bytes) -> None:
+    """chunk size 必須是非空且只含 ASCII hex digits 的 token。"""
+    response = MediaResponse(
+        200,
+        {"content-type": "video/mp4", "transfer-encoding": "chunked"},
+        ChunkedReader(chunk_size + b"\r\nab\r\n0\r\n\r\n"),
+        Writer(),
+        max_bytes=100,
+    )
+
+    with pytest.raises(AppError) as exc_info:
+        _ = [chunk async for chunk in response.iter_bytes()]
+
+    assert exc_info.value.code == "upstream_media_invalid"
+
+
+@pytest.mark.parametrize(
+    "extension",
+    [
+        b";bad\x00=value",
+        b';name="quoted"',
+        b";=value",
+        b";name=",
+        b";name=value\xff",
+        b";name value",
+    ],
+    ids=["nul", "quoted", "missing-name", "missing-value", "non-ascii", "ows"],
+)
+@pytest.mark.asyncio
+async def test_chunked_response_rejects_invalid_chunk_extensions(extension: bytes) -> None:
+    """chunk extension 只允許嚴格的 token 或 token-valued 格式。"""
+    response = MediaResponse(
+        200,
+        {"content-type": "video/mp4", "transfer-encoding": "chunked"},
+        ChunkedReader(b"2" + extension + b"\r\nab\r\n0\r\n\r\n"),
+        Writer(),
+        max_bytes=100,
+    )
+
+    with pytest.raises(AppError) as exc_info:
+        _ = [chunk async for chunk in response.iter_bytes()]
+
+    assert exc_info.value.code == "upstream_media_invalid"
+
+
+@pytest.mark.asyncio
+async def test_chunked_response_accepts_token_chunk_extensions() -> None:
+    """chunk extension 可使用無引號 token 與 token-valued extension。"""
+    response = MediaResponse(
+        200,
+        {"content-type": "video/mp4", "transfer-encoding": "chunked"},
+        ChunkedReader(b"2;flag;name=value\r\nab\r\n0\r\n\r\n"),
+        Writer(),
+        max_bytes=100,
+    )
+
+    assert b"".join([chunk async for chunk in response.iter_bytes()]) == b"ab"
+
+
+@pytest.mark.asyncio
+async def test_chunked_response_consumes_complete_trailer_section() -> None:
+    """zero chunk 後應讀到 trailer section 的終止空 CRLF。"""
+    reader = ChunkedReader(b"2\r\nab\r\n0\r\nX-Trailer: ok\r\n\r\n")
+    response = MediaResponse(
+        200,
+        {"content-type": "video/mp4", "transfer-encoding": "chunked"},
+        reader,
+        Writer(),
+        max_bytes=100,
+    )
+
+    body = b"".join([chunk async for chunk in response.iter_bytes()])
+
+    assert body == b"ab"
+    assert reader.body == b""
+
+
+@pytest.mark.asyncio
+async def test_chunked_response_rejects_missing_trailer_terminator() -> None:
+    """缺少 trailer section 終止 CRLF 時應拒絕 response。"""
+    response = MediaResponse(
+        200,
+        {"content-type": "video/mp4", "transfer-encoding": "chunked"},
+        ChunkedReader(b"2\r\nab\r\n0\r\nX-Trailer: missing-end\r\n"),
+        Writer(),
+        max_bytes=100,
+    )
+
+    with pytest.raises(AppError) as exc_info:
+        _ = [chunk async for chunk in response.iter_bytes()]
+
+    assert exc_info.value.code == "upstream_media_invalid"
+
+
+@pytest.mark.asyncio
+async def test_chunked_response_rejects_invalid_trailer_field() -> None:
+    """zero chunk 後的 trailer 必須是合法 header field-name/value。"""
+    response = MediaResponse(
+        200,
+        {"content-type": "video/mp4", "transfer-encoding": "chunked"},
+        ChunkedReader(b"0\r\nBad Header: value\r\n\r\n"),
+        Writer(),
+        max_bytes=100,
+    )
+
+    with pytest.raises(AppError) as exc_info:
+        _ = [chunk async for chunk in response.iter_bytes()]
+
+    assert exc_info.value.code == "upstream_media_invalid"
+
+
+@pytest.mark.parametrize(
+    "forbidden_field",
+    [
+        "Content-Length",
+        "Transfer-Encoding",
+        "Host",
+        "Connection",
+        "TE",
+        "Trailer",
+        "Upgrade",
+        "Proxy-Authenticate",
+        "Proxy-Authorization",
+        "Keep-Alive",
+        "Authorization",
+        "Cache-Control",
+        "Content-Type",
+        "Content-Encoding",
+        "Content-Range",
+    ],
+)
+@pytest.mark.asyncio
+async def test_chunked_response_rejects_forbidden_trailer_fields(forbidden_field: str) -> None:
+    """chunk trailer 不得攜帶 framing、connection 或 proxy control 欄位。"""
+    trailer = f"{forbidden_field}: value\r\n".encode("ascii")
+    response = MediaResponse(
+        200,
+        {"content-type": "video/mp4", "transfer-encoding": "chunked"},
+        ChunkedReader(b"0\r\n" + trailer + b"\r\n"),
+        Writer(),
+        max_bytes=100,
+    )
+
+    with pytest.raises(AppError) as exc_info:
+        _ = [chunk async for chunk in response.iter_bytes()]
+
+    assert exc_info.value.code == "upstream_media_invalid"
+
+
+@pytest.mark.asyncio
+async def test_chunked_response_rejects_oversized_aggregate_trailers() -> None:
+    """trailer section 累計超過固定上限時應立即拒絕。"""
+    first = b"X-First: " + b"a" * 4090 + b"\r\n"
+    second = b"X-Second: " + b"b" * 4090 + b"\r\n"
+    response = MediaResponse(
+        200,
+        {"content-type": "video/mp4", "transfer-encoding": "chunked"},
+        ChunkedReader(b"0\r\n" + first + second + b"\r\n"),
+        Writer(),
+        max_bytes=100,
+    )
+
+    with pytest.raises(AppError) as exc_info:
+        _ = [chunk async for chunk in response.iter_bytes()]
+
+    assert exc_info.value.code == "upstream_media_invalid"
 
 
 @pytest.mark.asyncio

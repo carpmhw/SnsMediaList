@@ -25,7 +25,6 @@ Compose service 使用單一 worker，以 UID 10001 的 non-root user 執行，r
 | `SNS_MEDIA_MAX_DOWNLOAD_BYTES` | 500000000 bytes |
 | `SNS_MEDIA_CONNECT_TIMEOUT_SECONDS` | 10 seconds |
 | `SNS_MEDIA_READ_TIMEOUT_SECONDS` | 30 seconds |
-| `SNS_MEDIA_DOWNLOAD_TIMEOUT_SECONDS` | 120 seconds |
 | `SNS_MEDIA_MEDIA_RESPONSE_TIMEOUT_SECONDS` | 120 seconds |
 | `SNS_MEDIA_MAX_REDIRECTS` | 3 |
 | `SNS_MEDIA_MAX_EXTRACTIONS` | 1 |
@@ -44,6 +43,19 @@ Compose service 使用單一 worker，以 UID 10001 的 non-root user 執行，r
 | `SNS_MEDIA_THUMBNAIL_MAX_EDGE` | 640 pixels |
 
 請使用 deployment-specific Compose override 或 environment file 覆寫設定。預設 Compose 不掛載平台 Cookie；若啟用驗證，只能使用下方 read-only file mount，且仍維持 loopback binding，除非另行配置 authenticated 或 network-ACL-restricted trusted ingress。不得將 Cookie value、credentials、extractor config 或 proxy credentials 放入 environment、command line、request body 或 log。
+
+## 媒體下載 timeout 與長時間串流
+
+- `SNS_MEDIA_CONNECT_TIMEOUT_SECONDS` 預設 10 秒，限制上游連線建立與 request write 操作；連線階段不會無限等待。
+- `SNS_MEDIA_READ_TIMEOUT_SECONDS` 預設 30 秒，限制 response headers 與每一次 response body read 的 idle timeout。每次成功 read 後會重新計算 idle window；這不是整個檔案的 wall-clock deadline。
+- `SNS_MEDIA_MEDIA_RESPONSE_TIMEOUT_SECONDS` 預設 120 秒，只套用於 CDN preview 與 generated thumbnail 的 complete-response lifetime。attachment download 不繼承此完整回應期限；只要上游持續在 read idle timeout 內送出資料，下載可以超過 120 秒。
+- `SNS_MEDIA_MAX_DOWNLOAD_BYTES` 預設 500000000 bytes 仍是硬限制。合法且已知的 `Content-Length` 會在 downstream response 開始前檢查；沒有可信長度或使用 chunked transfer 時，application 持續累計實際 bytes，超過上限即中止，不會先完整緩衝媒體。
+
+長時間 active download 會在完成、失敗或取消前持續占用一個 process-wide download slot 與對應的 per-client slot，且新嘗試仍受 media rate limit 限制。上游若超過 read idle timeout 沒有資料，下載會中止；client disconnect 或取消時，application 會關閉 upstream connection 並以 idempotent cleanup 釋放 download lease。
+
+`SNS_MEDIA_DOWNLOAD_TIMEOUT_SECONDS` 已從本版本的 Settings、application wiring 與 Compose 移除。若舊 environment file、Compose override 或部署環境仍殘留此名稱，Pydantic settings 的 `extra="ignore"` 會忽略它而不阻止啟動，但它不再有任何作用，也不會恢復舊的 fixed whole-file timeout；請在 migration 時移除該變數，避免 operator 誤以為仍可控制下載期限。
+
+服務與 UI 不以「已開始下載」宣稱瀏覽器或 OS 已完成保存檔案。需要驗證落盤時，請在 client 端檢查實際檔案，而不要以 application response 已結束作為 OS 保存成功的證明。
 
 ## 平台 Cookie 驗證
 
@@ -118,14 +130,19 @@ server {
     location ^~ /api/media/ {
         access_log off;
         proxy_buffering off;
+        proxy_read_timeout 300s;
         proxy_pass http://127.0.0.1:8000;
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header Forwarded "";
         proxy_set_header Cookie "";
         proxy_set_header Authorization "";
+        proxy_set_header Proxy-Authorization "";
+        proxy_hide_header Set-Cookie;
     }
 }
 ```
+
+`/api/media/` 的 effective `proxy_read_timeout` 必須不短於 application 的 `SNS_MEDIA_READ_TIMEOUT_SECONDS`（預設 30 秒；目前 application 上限為 300 秒）。範例中的 `300s` 只套用於媒體 location，足以涵蓋目前設定上限；若 application 的 idle timeout 政策改變，必須同步校準此 media location 的 proxy 值。這是 read idle boundary，不是整個檔案的完成期限；保持 `proxy_buffering off`，不要以放寬全站 timeout 或啟用 buffering 取代同步設定。
 
 請先建立 deployment-owned `.htpasswd`，再由受控 ingress 使用此設定；也可用等效的 identity-aware authentication 或 restrictive network ACL。此設定不記錄 query string、request body、Cookie、authorization header 或 upstream response header。絕對不要記錄 `POST /api/extractions` body 或完整 upstream media URL。
 

@@ -58,7 +58,8 @@ def create_app(
     settings = settings or get_settings()
     if extraction_proxy is None:
         extraction_proxy = ConnectProxy(
-            DestinationPolicy(allowed_hosts=_EXTRACTION_HOSTS, resolver=resolve_system)
+            DestinationPolicy(allowed_hosts=_EXTRACTION_HOSTS, resolver=resolve_system),
+            operation_timeout_seconds=settings.extraction_timeout_seconds,
         )
     if extraction_service is None:
         extraction_service = ExtractionService(
@@ -81,7 +82,6 @@ def create_app(
             connect_timeout=settings.connect_timeout_seconds,
             max_bytes=settings.max_download_bytes,
             read_timeout=settings.read_timeout_seconds,
-            total_timeout=settings.download_timeout_seconds,
         )
     limiter = RequestLimiter(
         max_extractions=settings.max_extractions,

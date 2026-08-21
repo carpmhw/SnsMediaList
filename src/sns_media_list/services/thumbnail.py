@@ -19,6 +19,29 @@ _SUPPORTED_INPUTS = {
 }
 
 
+class _ThumbnailOperationTimeout(Exception):
+    """表示縮圖自身的 bounded operation 等待超時。"""
+
+
+def _consume_task_exception(task: asyncio.Task[Any]) -> None:
+    """消耗 detached task 的最終例外，避免事件迴圈發出未觀察例外警告。"""
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except BaseException:
+        pass
+
+
+def _cancel_task_without_waiting(task: asyncio.Task[Any]) -> None:
+    """取消 task 並註冊 detached observer，不等待 cancellation-resistant task。"""
+    if task.done():
+        _consume_task_exception(task)
+        return
+    task.cancel()
+    task.add_done_callback(_consume_task_exception)
+
+
 def validate_thumbnail_input(content_type: str, prefix: bytes) -> str:
     """Validate a supported content type against its bounded input signature."""
     normalized = content_type.split(";", 1)[0].strip().lower()
@@ -104,7 +127,7 @@ class ThumbnailGenerator:
         self.max_edge = max_edge
 
     async def generate(self, response: "MediaResponse") -> bytes:
-        """Stream one validated upstream response through FFmpeg and return JPEG bytes."""
+        """將 validated source 串流至 bounded FFmpeg；source close 由 route owner 負責。"""
         process: Any | None = None
         try:
             content_type = response.headers.get("content-type", "")
@@ -135,15 +158,28 @@ class ThumbnailGenerator:
                 asyncio.create_task(process.wait()),
             ]
             try:
-                results = await asyncio.wait_for(
-                    asyncio.gather(*tasks),
+                done, pending = await asyncio.wait(
+                    tasks,
                     timeout=self.timeout_seconds,
+                    return_when=asyncio.FIRST_EXCEPTION,
                 )
+                if pending:
+                    completed = [task for task in tasks if task in done]
+                    if completed:
+                        await asyncio.gather(*completed)
+                    raise _ThumbnailOperationTimeout
+                results = await asyncio.gather(*tasks)
             except BaseException:
                 for task in tasks:
-                    if not task.done():
-                        task.cancel()
-                done, _pending = await asyncio.wait(tasks, timeout=min(self.timeout_seconds, 1.0))
+                    _cancel_task_without_waiting(task)
+                try:
+                    done, _pending = await asyncio.wait(
+                        tasks, timeout=min(self.timeout_seconds, 1.0)
+                    )
+                except asyncio.CancelledError:
+                    for task in tasks:
+                        _cancel_task_without_waiting(task)
+                    raise
                 if done:
                     await asyncio.gather(*done, return_exceptions=True)
                 raise
@@ -169,7 +205,7 @@ class ThumbnailGenerator:
             if "size limit" in error.message:
                 error.deterministic = True
             raise
-        except TimeoutError as error:
+        except _ThumbnailOperationTimeout as error:
             raise _thumbnail_error(
                 "Thumbnail generation timed out.", deterministic=False
             ) from error
@@ -180,16 +216,6 @@ class ThumbnailGenerator:
         finally:
             if process is not None:
                 await self._stop_process(process)
-            await self._close_response(response)
-
-    async def _close_response(self, response: "MediaResponse") -> None:
-        """Close the source within the generated-preview deadline."""
-        task = asyncio.create_task(response.close())
-        done, _pending = await asyncio.wait({task}, timeout=min(self.timeout_seconds, 1.0))
-        if done:
-            await asyncio.gather(task, return_exceptions=True)
-        else:
-            task.cancel()
 
     async def _feed_process(self, process: Any, first_chunk: bytes, iterator: Any) -> None:
         """Feed bounded upstream chunks to FFmpeg stdin and close it reliably."""
@@ -214,11 +240,17 @@ class ThumbnailGenerator:
             wait_closed = getattr(stdin, "wait_closed", None)
             if wait_closed is not None:
                 task = asyncio.create_task(wait_closed())
-                done, _pending = await asyncio.wait({task}, timeout=min(self.timeout_seconds, 1.0))
+                try:
+                    done, _pending = await asyncio.wait(
+                        {task}, timeout=min(self.timeout_seconds, 1.0)
+                    )
+                except asyncio.CancelledError:
+                    _cancel_task_without_waiting(task)
+                    raise
                 if done:
                     await asyncio.gather(task, return_exceptions=True)
                 else:
-                    task.cancel()
+                    _cancel_task_without_waiting(task)
 
     async def _collect_output(self, process: Any) -> bytes:
         """Read FFmpeg stdout while rejecting output larger than the configured bound."""
@@ -246,28 +278,47 @@ class ThumbnailGenerator:
             continue
 
     async def _stop_process(self, process: Any) -> None:
-        """Terminate FFmpeg and escalate to kill if it does not exit promptly."""
+        """bounded terminate FFmpeg，未及時退出時再嘗試 kill 並吸收 OS cleanup 例外。"""
         cleanup_timeout = min(self.timeout_seconds, 1.0)
+        cancellation_received = False
         try:
             process.terminate()
-        except ProcessLookupError:
-            return
-        if await self._wait_process(process, cleanup_timeout):
+        except OSError:
+            pass
+        try:
+            exited = await self._wait_process(process, cleanup_timeout)
+        except asyncio.CancelledError:
+            cancellation_received = True
+            exited = False
+        if exited:
+            if cancellation_received:
+                raise asyncio.CancelledError
             return
         try:
             process.kill()
-        except ProcessLookupError:
+        except OSError:
+            if cancellation_received:
+                raise asyncio.CancelledError from None
             return
-        await self._wait_process(process, cleanup_timeout)
+        try:
+            await self._wait_process(process, cleanup_timeout)
+        except asyncio.CancelledError:
+            cancellation_received = True
+        if cancellation_received:
+            raise asyncio.CancelledError
 
     async def _wait_process(self, process: Any, timeout: float) -> bool:
-        """Wait for a subprocess with a hard cleanup bound."""
+        """在固定 cleanup 上限內等待 subprocess，並 detach 被取消的 wait task。"""
         task = asyncio.create_task(process.wait())
-        done, _pending = await asyncio.wait({task}, timeout=timeout)
+        try:
+            done, _pending = await asyncio.wait({task}, timeout=timeout)
+        except asyncio.CancelledError:
+            _cancel_task_without_waiting(task)
+            raise
         if done:
             await asyncio.gather(task, return_exceptions=True)
             return True
-        task.cancel()
+        _cancel_task_without_waiting(task)
         return False
 
 

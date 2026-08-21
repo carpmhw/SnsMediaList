@@ -1,6 +1,8 @@
 """Tests for bounded thumbnail input validation and FFmpeg command construction."""
 
 import asyncio
+import gc
+from typing import Any
 
 import pytest
 
@@ -118,6 +120,65 @@ class BlockingReadable(Readable):
         return b""
 
 
+class RawTimeoutReadable(Readable):
+    """模擬 FFmpeg child IO 自己拋出的 raw TimeoutError。"""
+
+    async def read(self, size: int) -> bytes:
+        """拋出不應被誤判為 generation timeout 的 child IO 例外。"""
+        _ = size
+        raise TimeoutError("private child IO timeout")
+
+
+class CancellationResistantOperation:
+    """模擬取消後仍等待外部訊號，完成時拋出例外的 awaitable。"""
+
+    def __init__(self) -> None:
+        """建立操作狀態同步事件。"""
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.finished = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def run(self) -> None:
+        """忽略取消直到收到釋放訊號，再拋出受控例外。"""
+        self.started.set()
+        while not self.release.is_set():
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+        self.finished.set()
+        raise RuntimeError("detached cleanup failure")
+
+
+class CancellationResistantReadable(Readable):
+    """以 cancellation-resistant operation 模擬不會及時結束的 stdout。"""
+
+    def __init__(self, operation: CancellationResistantOperation) -> None:
+        """保存 stdout 的受控延遲操作。"""
+        super().__init__(b"")
+        self.operation = operation
+
+    async def read(self, size: int) -> bytes:
+        """等待受控操作完成並拋出其最終例外。"""
+        del size
+        await self.operation.run()
+        return b""
+
+
+class CancellationResistantPipe(Pipe):
+    """以 cancellation-resistant operation 模擬延遲的 stdin close。"""
+
+    def __init__(self, operation: CancellationResistantOperation) -> None:
+        """建立帶有受控 wait_closed 的 stdin。"""
+        super().__init__()
+        self.operation = operation
+
+    async def wait_closed(self) -> None:
+        """等待受控操作完成並拋出其最終例外。"""
+        await self.operation.run()
+
+
 class Process:
     """Provide a controllable FFmpeg subprocess double."""
 
@@ -147,11 +208,87 @@ class Process:
         self.killed = True
 
 
+class TerminateOSErrorProcess(Process):
+    """模擬 process.terminate 拋出的 raw OS 例外。"""
+
+    def terminate(self) -> None:
+        """拋出不應覆蓋 generation primary error 的 OS 例外。"""
+        raise OSError("private terminate detail")
+
+
+class TerminateOSErrorAliveProcess(Process):
+    """模擬 terminate 失敗且 process 仍存活的 FFmpeg process。"""
+
+    def terminate(self) -> None:
+        """拋出 terminate OS 例外並保留 process 存活。"""
+        raise OSError("private terminate detail")
+
+    async def wait(self) -> int:
+        """process 存活時等待，收到 kill 後立即返回。"""
+        if not self.killed:
+            await asyncio.sleep(1)
+        return -9
+
+
+class KillOSErrorProcess(Process):
+    """模擬 process.kill 拋出的 raw OS 例外。"""
+
+    async def wait(self) -> int:
+        """持續等待以迫使 stop process 進入 kill 分支。"""
+        await asyncio.sleep(1)
+        return -9
+
+    def kill(self) -> None:
+        """拋出不應穿透 bounded process cleanup 的 OS 例外。"""
+        raise OSError("private kill detail")
+
+
+class CancellationResistantStopProcess:
+    """模擬第一次 wait 被取消後仍存活，且 kill 後才可完成的 process。"""
+
+    def __init__(self) -> None:
+        """初始化 process cleanup 的同步事件。"""
+        self.terminated = False
+        self.killed = False
+        self.wait_started = asyncio.Event()
+        self.wait_cancelled = asyncio.Event()
+        self.kill_called = asyncio.Event()
+        self.release_wait = asyncio.Event()
+        self.wait_finished = asyncio.Event()
+
+    def terminate(self) -> None:
+        """記錄 terminate 請求但不讓 process 結束。"""
+        self.terminated = True
+
+    def kill(self) -> None:
+        """記錄 kill 請求並通知測試 cleanup 已升級。"""
+        self.killed = True
+        self.kill_called.set()
+
+    async def wait(self) -> int:
+        """吞掉 wait task cancellation，直到測試釋放後拋出受控例外。"""
+        self.wait_started.set()
+        try:
+            await self.release_wait.wait()
+        except asyncio.CancelledError:
+            self.wait_cancelled.set()
+            await self.release_wait.wait()
+        finally:
+            self.wait_finished.set()
+        raise RuntimeError("detached process wait failure")
+
+
 class SlowCloseResponse(MediaResponse):
     """Delay source cleanup beyond the thumbnail generation deadline."""
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """初始化可追蹤 close ownership 的 upstream response。"""
+        super().__init__(*args, **kwargs)
+        self.close_calls = 0
+
     async def close(self) -> None:
         """Wait until generation cleanup is cancelled."""
+        self.close_calls += 1
         await asyncio.sleep(1)
 
 
@@ -262,6 +399,35 @@ async def test_thumbnail_generator_streams_input_and_returns_jpeg(monkeypatch) -
     assert output.startswith(b"\xff\xd8\xff")
     assert bytes(process.stdin.body) == source
     assert process.stdin.closed is True
+
+
+@pytest.mark.asyncio
+async def test_thumbnail_generator_leaves_source_cleanup_to_caller(monkeypatch) -> None:
+    """縮圖 generator 不得 close source，source cleanup 應由 route owner 負責。"""
+    process = Process(VALID_JPEG)
+
+    async def fake_create(*_args, **_kwargs):
+        """回傳受控的成功 FFmpeg process。"""
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+    source_body = b"\xff\xd8\xff\xe0source-image\xff\xd9"
+    source = SlowCloseResponse(
+        200,
+        {"content-type": "image/jpeg", "content-length": str(len(source_body))},
+        Reader(source_body),
+        Writer(),
+        max_bytes=100,
+    )
+
+    output = await ThumbnailGenerator(
+        input_bytes=100,
+        output_bytes=100,
+        timeout_seconds=0.01,
+    ).generate(source)
+
+    assert output == VALID_JPEG
+    assert source.close_calls == 0
 
 
 @pytest.mark.asyncio
@@ -422,36 +588,6 @@ async def test_thumbnail_generator_cancels_sibling_io_tasks_on_feed_failure(monk
 
 
 @pytest.mark.asyncio
-async def test_thumbnail_generator_bounds_source_cleanup_to_generation_deadline(
-    monkeypatch,
-) -> None:
-    """Verify source cleanup cannot outlive the generated-preview deadline."""
-    process = Process(VALID_JPEG)
-
-    async def fake_create(*_args, **_kwargs):
-        """Return a process with a valid generated JPEG."""
-        return process
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
-    source = SlowCloseResponse(
-        200,
-        {"content-type": "image/jpeg"},
-        Reader(b"\xff\xd8\xff\xe0source\xff\xd9"),
-        Writer(),
-        max_bytes=100,
-    )
-
-    output = await asyncio.wait_for(
-        ThumbnailGenerator(input_bytes=100, output_bytes=100, timeout_seconds=0.01).generate(
-            source
-        ),
-        timeout=0.1,
-    )
-
-    assert output == VALID_JPEG
-
-
-@pytest.mark.asyncio
 async def test_thumbnail_generator_maps_timeout_and_terminates(monkeypatch) -> None:
     """Verify a stalled FFmpeg process is terminated at the configured deadline."""
     process = Process(VALID_JPEG)
@@ -477,6 +613,28 @@ async def test_thumbnail_generator_maps_timeout_and_terminates(monkeypatch) -> N
 
     assert exc_info.value.code == "upstream_media_invalid"
     assert process.terminated is True
+
+
+@pytest.mark.asyncio
+async def test_thumbnail_generator_maps_child_raw_timeout_to_safe_failure(monkeypatch) -> None:
+    """child IO 自己拋出的 raw timeout 應映射為 generic thumbnail failure。"""
+    process = Process(VALID_JPEG)
+    process.stdout = RawTimeoutReadable(b"")
+
+    async def fake_create(*_args, **_kwargs):
+        """回傳 child stdout 自己拋出 timeout 的受控 process。"""
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+
+    with pytest.raises(AppError) as exc_info:
+        await ThumbnailGenerator(input_bytes=100, output_bytes=100).generate(
+            make_response(b"\xff\xd8\xff\xe0source\xff\xd9")
+        )
+
+    assert exc_info.value.message == "Thumbnail generation failed."
+    assert "timed out" not in exc_info.value.message
+    assert "private child IO timeout" not in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -506,6 +664,228 @@ async def test_thumbnail_generator_bounds_uncooperative_process_cleanup(monkeypa
         )
 
     assert exc_info.value.code == "upstream_media_invalid"
+
+
+@pytest.mark.parametrize("process_type", [TerminateOSErrorProcess, KillOSErrorProcess])
+@pytest.mark.asyncio
+async def test_thumbnail_stop_process_absorbs_raw_os_errors(process_type: type[Process]) -> None:
+    """terminate 或 kill 的 raw OS 例外不得穿透 bounded process cleanup。"""
+    process = process_type(VALID_JPEG)
+
+    await ThumbnailGenerator(timeout_seconds=0.01)._stop_process(process)
+
+
+@pytest.mark.asyncio
+async def test_thumbnail_stop_process_kills_when_terminate_fails_and_process_lives() -> None:
+    """terminate 失敗且 process 仍存活時應繼續 fallback 到 kill。"""
+    process = TerminateOSErrorAliveProcess(VALID_JPEG)
+
+    await ThumbnailGenerator(timeout_seconds=0.01)._stop_process(process)
+
+    assert process.killed is True
+
+
+@pytest.mark.asyncio
+async def test_thumbnail_stop_process_kills_after_first_wait_cancellation() -> None:
+    """第一次 wait 遇 caller cancellation 時仍須 kill 並重拋取消。"""
+    process = CancellationResistantStopProcess()
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict[str, Any]] = []
+    previous_handler = loop.get_exception_handler()
+
+    def exception_handler(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        """記錄未被 wait task observer 消費的 detached 例外。"""
+        unhandled.append(context)
+
+    loop.set_exception_handler(exception_handler)
+    stop_task = asyncio.create_task(ThumbnailGenerator(timeout_seconds=0.01)._stop_process(process))
+    try:
+        await asyncio.wait_for(process.wait_started.wait(), timeout=0.1)
+        stop_task.cancel()
+        await asyncio.wait_for(process.wait_cancelled.wait(), timeout=0.1)
+        await asyncio.wait_for(process.kill_called.wait(), timeout=0.1)
+        with pytest.raises(asyncio.CancelledError):
+            await stop_task
+        assert process.killed is True
+    finally:
+        process.release_wait.set()
+        if not stop_task.done():
+            stop_task.cancel()
+            await asyncio.gather(stop_task, return_exceptions=True)
+        await asyncio.wait_for(process.wait_finished.wait(), timeout=0.1)
+        await asyncio.sleep(0)
+        assert unhandled == []
+        loop.set_exception_handler(previous_handler)
+
+
+@pytest.mark.asyncio
+async def test_thumbnail_generator_preserves_primary_error_when_terminate_fails(
+    monkeypatch,
+) -> None:
+    """process terminate 失敗時仍應保留原始 generated thumbnail error。"""
+    process = TerminateOSErrorProcess(b"not-a-jpeg")
+
+    async def fake_create(*_args, **_kwargs):
+        """回傳輸出無效且 terminate 會失敗的 FFmpeg process。"""
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+
+    with pytest.raises(AppError, match="generated thumbnail is invalid"):
+        await ThumbnailGenerator(input_bytes=100, output_bytes=100).generate(
+            make_response(b"\xff\xd8\xff\xe0source\xff\xd9")
+        )
+
+
+@pytest.mark.parametrize("cleanup_kind", ["pipe", "process"])
+@pytest.mark.asyncio
+async def test_thumbnail_cleanup_detaches_cancellation_resistant_task(cleanup_kind: str) -> None:
+    """縮圖清理 timeout 後應 detach task 並消費其最終例外。"""
+    operation = CancellationResistantOperation()
+    generator = ThumbnailGenerator(timeout_seconds=0.01)
+    process = Process(VALID_JPEG)
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict[str, Any]] = []
+    previous_handler = loop.get_exception_handler()
+
+    def exception_handler(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        """記錄未被 detached cleanup observer 消費的 task 例外。"""
+        unhandled.append(context)
+
+    loop.set_exception_handler(exception_handler)
+    try:
+        if cleanup_kind == "pipe":
+            process.stdin = CancellationResistantPipe(operation)
+
+            async def chunks() -> Any:
+                """提供沒有額外 body 的空 async iterator。"""
+                if False:
+                    yield b""
+
+            await generator._feed_process(process, b"source", chunks())
+        else:
+            process.wait = operation.run  # type: ignore[method-assign]
+            assert await generator._wait_process(process, 0.01) is False
+
+        await asyncio.wait_for(operation.cancelled.wait(), timeout=0.1)
+        operation.release.set()
+        await asyncio.wait_for(operation.finished.wait(), timeout=0.1)
+        gc.collect()
+        await asyncio.sleep(0)
+        assert unhandled == []
+    finally:
+        operation.release.set()
+        if not operation.finished.is_set():
+            await asyncio.wait_for(operation.finished.wait(), timeout=0.1)
+        loop.set_exception_handler(previous_handler)
+
+
+@pytest.mark.asyncio
+async def test_thumbnail_generation_detaches_cancelled_io_task(monkeypatch) -> None:
+    """取消縮圖時，無法及時結束的 IO task 最終例外不得產生警告。"""
+    operation = CancellationResistantOperation()
+    process = Process(VALID_JPEG)
+    process.stdout = CancellationResistantReadable(operation)
+
+    async def fake_create(*_args, **_kwargs):
+        """回傳 stdout 會延遲失敗的受控 process。"""
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict[str, Any]] = []
+    previous_handler = loop.get_exception_handler()
+
+    def exception_handler(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        """記錄未被 aggregate task observer 消費的例外。"""
+        unhandled.append(context)
+
+    loop.set_exception_handler(exception_handler)
+    generation = asyncio.create_task(
+        ThumbnailGenerator(input_bytes=100, output_bytes=100, timeout_seconds=0.01).generate(
+            make_response(b"\xff\xd8\xff\xe0source\xff\xd9")
+        )
+    )
+    try:
+        await operation.started.wait()
+        generation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await generation
+        await asyncio.wait_for(operation.cancelled.wait(), timeout=0.1)
+        operation.release.set()
+        await asyncio.wait_for(operation.finished.wait(), timeout=0.1)
+        gc.collect()
+        await asyncio.sleep(0)
+        assert unhandled == []
+    finally:
+        operation.release.set()
+        if not operation.finished.is_set():
+            await asyncio.wait_for(operation.finished.wait(), timeout=0.1)
+        if not generation.done():
+            generation.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await generation
+        loop.set_exception_handler(previous_handler)
+
+
+@pytest.mark.asyncio
+async def test_thumbnail_generation_timeout_detaches_cancellation_resistant_io(
+    monkeypatch,
+) -> None:
+    """縮圖 timeout 時不得等待 cancellation-resistant IO task 無限完成。"""
+    operation = CancellationResistantOperation()
+    process = Process(VALID_JPEG)
+    process.stdout = CancellationResistantReadable(operation)
+
+    async def fake_create(*_args, **_kwargs):
+        """回傳 stdout 會在 timeout 後延遲失敗的受控 process。"""
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict[str, Any]] = []
+    previous_handler = loop.get_exception_handler()
+    generation = asyncio.create_task(
+        ThumbnailGenerator(input_bytes=100, output_bytes=100, timeout_seconds=0.01).generate(
+            make_response(b"\xff\xd8\xff\xe0source\xff\xd9")
+        )
+    )
+
+    def exception_handler(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        """記錄未被 timeout cleanup observer 消費的例外。"""
+        unhandled.append(context)
+
+    loop.set_exception_handler(exception_handler)
+    try:
+        await operation.started.wait()
+        started = loop.time()
+        done, _pending = await asyncio.wait({generation}, timeout=0.2)
+        assert generation in done
+        with pytest.raises(AppError) as exc_info:
+            await generation
+        assert exc_info.value.code == "upstream_media_invalid"
+        assert loop.time() - started < 0.1
+        await asyncio.wait_for(operation.cancelled.wait(), timeout=0.1)
+        operation.release.set()
+        await asyncio.wait_for(operation.finished.wait(), timeout=0.1)
+        gc.collect()
+        await asyncio.sleep(0)
+        assert unhandled == []
+    finally:
+        operation.release.set()
+        if not operation.finished.is_set():
+            await asyncio.wait_for(operation.finished.wait(), timeout=0.1)
+        if not generation.done():
+            try:
+                await asyncio.wait_for(generation, timeout=0.2)
+            except BaseException:
+                pass
+        if generation.done():
+            try:
+                generation.exception()
+            except BaseException:
+                pass
+        loop.set_exception_handler(previous_handler)
 
 
 def test_validate_generated_jpeg_requires_dimensions_within_edge() -> None:

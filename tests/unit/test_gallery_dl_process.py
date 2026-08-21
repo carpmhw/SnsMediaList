@@ -1,6 +1,7 @@
 """Tests for the isolated gallery-dl subprocess adapter."""
 
 import asyncio
+import gc
 import json
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,8 @@ from sns_media_list.config import Settings
 from sns_media_list.errors import AppError
 from sns_media_list.extractor.gallery_dl import (
     GalleryDlRunner,
+    _cleanup_extraction_tasks,
+    _stop_extraction_process,
     build_gallery_command,
     build_sanitized_environment,
 )
@@ -130,6 +133,89 @@ class FakeProcess:
     async def wait(self) -> int:
         """Return the configured process exit status."""
         return self.returncode
+
+
+class StreamProcess:
+    """提供真實 asyncio StreamReader pipe 的 extractor process double。"""
+
+    def __init__(self, stdout: bytes, stderr: bytes) -> None:
+        """建立已填入 stdout/stderr 並可被 terminate 喚醒的 process。"""
+        self.stdout = asyncio.StreamReader()
+        self.stdout.feed_data(stdout)
+        self.stdout.feed_eof()
+        self.stderr = asyncio.StreamReader()
+        self.stderr.feed_data(stderr)
+        self.stderr.feed_eof()
+        self.returncode: int | None = None
+        self.terminated = False
+        self.killed = False
+        self._exited = asyncio.Event()
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        """若 production path 使用 communicate，立即讓 regression test 失敗。"""
+        raise AssertionError("bounded pipe path must not call communicate")
+
+    def terminate(self) -> None:
+        """記錄 graceful termination 並完成 process wait。"""
+        self.terminated = True
+        self.returncode = -15
+        self._exited.set()
+
+    def kill(self) -> None:
+        """記錄 forced termination 並完成 process wait。"""
+        self.killed = True
+        self.returncode = -9
+        self._exited.set()
+
+    async def wait(self) -> int:
+        """等待 process 被停止並回傳 exit code。"""
+        await self._exited.wait()
+        return self.returncode or 0
+
+
+class RaisingStreamReader(asyncio.StreamReader):
+    """模擬真實 asyncio pipe read 拋出的 raw OSError 或 TimeoutError。"""
+
+    def __init__(self, error: OSError) -> None:
+        """保存要由 pipe read 拋出的受控例外。"""
+        super().__init__()
+        self.error = error
+
+    async def read(self, n: int = -1) -> bytes:
+        """拋出 private pipe 例外以驗證 public safe mapping。"""
+        _ = n
+        raise self.error
+
+
+class CancellationResistantStopProcess:
+    """模擬 terminate wait 取消後仍存在且 kill 後才可釋放的 process。"""
+
+    def __init__(self) -> None:
+        """初始化 process cleanup lifecycle 事件。"""
+        self.terminated = False
+        self.killed = False
+        self.wait_started = asyncio.Event()
+        self.kill_called = asyncio.Event()
+        self.release_wait = asyncio.Event()
+        self.wait_finished = asyncio.Event()
+
+    def terminate(self) -> None:
+        """記錄 graceful terminate 請求。"""
+        self.terminated = True
+
+    def kill(self) -> None:
+        """記錄 fallback kill 請求但暫不釋放 process wait。"""
+        self.killed = True
+        self.kill_called.set()
+
+    async def wait(self) -> int:
+        """等待測試釋放後拋出 detached wait 例外。"""
+        self.wait_started.set()
+        try:
+            await self.release_wait.wait()
+        finally:
+            self.wait_finished.set()
+        raise RuntimeError("detached process wait failure")
 
 
 def load_fixture_records(fixture_name: str) -> list[dict[str, object]]:
@@ -980,3 +1066,172 @@ async def test_runner_rejects_oversized_output(monkeypatch: Any) -> None:
         await runner.extract(validate_post_url("https://x.com/creator/status/1"))
 
     assert exc_info.value.code == "extraction_failed"
+
+
+@pytest.mark.asyncio
+async def test_runner_terminates_real_pipe_when_stdout_exceeds_limit(monkeypatch: Any) -> None:
+    """真實 asyncio pipe stdout 超限時應立即終止 process 並回傳安全錯誤。"""
+    process = StreamProcess(b"x" * 101, b"diagnostics" * 1000)
+
+    async def fake_create(*_args: Any, **_kwargs: Any) -> StreamProcess:
+        """回傳帶有 bounded pipe stream 的 process double。"""
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+
+    with pytest.raises(AppError) as exc_info:
+        await GalleryDlRunner(Settings(extraction_output_limit=100)).extract(
+            validate_post_url("https://x.com/creator/status/1")
+        )
+
+    assert exc_info.value.code == "extraction_failed"
+    assert process.terminated is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "pipe_error",
+    [
+        OSError("private stdout pipe detail"),
+        TimeoutError("private stdout timeout detail"),
+    ],
+    ids=["os-error", "raw-timeout"],
+)
+async def test_runner_maps_raw_pipe_errors_to_safe_extraction_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    pipe_error: OSError,
+) -> None:
+    """真實 pipe 的 raw 讀取例外應安全映射且完成 bounded process cleanup。"""
+    process = StreamProcess(b"", b"")
+    process.stdout = RaisingStreamReader(pipe_error)
+
+    async def fake_create(*_args: Any, **_kwargs: Any) -> StreamProcess:
+        """回傳會在 stdout read 失敗的 bounded pipe process。"""
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+
+    with pytest.raises(AppError) as exc_info:
+        await GalleryDlRunner(Settings()).extract(
+            validate_post_url("https://x.com/creator/status/1")
+        )
+
+    assert exc_info.value.code == "extraction_failed"
+    assert exc_info.value.message == "The extractor output could not be read."
+    assert isinstance(exc_info.value.__cause__, OSError)
+    assert str(pipe_error) not in exc_info.value.message
+    assert process.terminated is True
+
+
+@pytest.mark.asyncio
+async def test_runner_maps_spawn_oserror_to_safe_extraction_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """create_subprocess_exec 的 raw OSError 應映射成安全 extraction_failed。"""
+
+    async def fake_create(*_args: Any, **_kwargs: Any) -> StreamProcess:
+        """模擬 gallery-dl process 無法啟動的 raw spawn 例外。"""
+        raise OSError("private spawn detail")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+
+    with pytest.raises(AppError) as exc_info:
+        await GalleryDlRunner(Settings()).extract(
+            validate_post_url("https://x.com/creator/status/1")
+        )
+
+    assert exc_info.value.code == "extraction_failed"
+    assert exc_info.value.message == "The extractor process could not be started."
+    assert isinstance(exc_info.value.__cause__, OSError)
+    assert "private spawn detail" not in exc_info.value.message
+
+
+@pytest.mark.asyncio
+async def test_cleanup_extraction_tasks_observes_done_failure_when_cancelled() -> None:
+    """extractor cleanup 被取消時仍應消耗已完成 failed task 的例外。"""
+    release_pending = asyncio.Event()
+    pending_cancelled = asyncio.Event()
+
+    async def fail_task() -> None:
+        """建立尚未被 await 的已完成 extractor task 例外。"""
+        raise RuntimeError("completed extraction failure")
+
+    async def cancellation_resistant_task() -> None:
+        """收到取消後等待釋放，再拋出供 detached observer 消耗的例外。"""
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            pending_cancelled.set()
+            await release_pending.wait()
+        raise RuntimeError("pending extraction failure")
+
+    completed_task = asyncio.create_task(fail_task())
+    await asyncio.wait({completed_task})
+    pending_task = asyncio.create_task(cancellation_resistant_task())
+    cleanup_task = asyncio.create_task(_cleanup_extraction_tasks([completed_task, pending_task]))
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict[str, Any]] = []
+    previous_handler = loop.get_exception_handler()
+
+    def exception_handler(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        """記錄未被 extractor cleanup observer 消耗的 task 例外。"""
+        unhandled.append(context)
+
+    loop.set_exception_handler(exception_handler)
+    try:
+        await asyncio.wait_for(pending_cancelled.wait(), timeout=0.1)
+        cleanup_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cleanup_task
+        release_pending.set()
+        with pytest.raises(RuntimeError, match="pending extraction failure"):
+            await asyncio.wait_for(asyncio.shield(pending_task), timeout=0.1)
+        del completed_task
+        gc.collect()
+        await asyncio.sleep(0)
+        assert unhandled == []
+    finally:
+        release_pending.set()
+        if not pending_task.done():
+            pending_task.cancel()
+        await asyncio.gather(pending_task, return_exceptions=True)
+        if not cleanup_task.done():
+            cleanup_task.cancel()
+            await asyncio.gather(cleanup_task, return_exceptions=True)
+        loop.set_exception_handler(previous_handler)
+
+
+@pytest.mark.asyncio
+async def test_stop_extraction_process_kills_after_repeated_cancellation() -> None:
+    """terminate wait 連續收到取消時仍應 kill 並保留 caller cancellation。"""
+    process = CancellationResistantStopProcess()
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict[str, Any]] = []
+    previous_handler = loop.get_exception_handler()
+
+    def exception_handler(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        """記錄未被 process wait observer 消耗的 detached 例外。"""
+        unhandled.append(context)
+
+    loop.set_exception_handler(exception_handler)
+    stop_task = asyncio.create_task(_stop_extraction_process(process))
+    try:
+        await asyncio.wait_for(process.wait_started.wait(), timeout=0.1)
+        stop_task.cancel()
+        await asyncio.wait_for(process.kill_called.wait(), timeout=0.1)
+        stop_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stop_task
+        process.release_wait.set()
+        await asyncio.wait_for(process.wait_finished.wait(), timeout=0.1)
+        await asyncio.sleep(0)
+        assert process.killed is True
+        assert unhandled == []
+    finally:
+        process.release_wait.set()
+        if not stop_task.done():
+            stop_task.cancel()
+        await asyncio.gather(stop_task, return_exceptions=True)
+        if not process.wait_finished.is_set():
+            await asyncio.wait_for(process.wait_finished.wait(), timeout=0.1)
+        loop.set_exception_handler(previous_handler)

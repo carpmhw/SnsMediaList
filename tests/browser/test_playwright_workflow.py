@@ -40,6 +40,25 @@ SUCCESS_PAYLOAD: dict[str, Any] = {
         }
     ],
 }
+X_VIDEO_FILENAME = "x-1-1.mp4"
+X_VIDEO_BYTES = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom\x00\x00\x00\x0cmdatSNSM"
+X_VIDEO_PAYLOAD: dict[str, Any] = {
+    **SUCCESS_PAYLOAD,
+    "description": "A deterministic X video",
+    "unavailable_media_count": 0,
+    "media": [
+        {
+            "token": "opaque-x-video-download",
+            "media_type": "video",
+            "filename": X_VIDEO_FILENAME,
+            "width": 1920,
+            "height": 1080,
+            "duration": 12.5,
+            "preview_url": None,
+            "download_url": "/api/media/opaque-x-video-download/download",
+        }
+    ],
+}
 
 
 class PreviewServer:
@@ -308,14 +327,59 @@ STORY_SUCCESS_PAYLOAD: dict[str, Any] = {
 class QuietStaticHandler(SimpleHTTPRequestHandler):
     """Serve static files without writing access logs into test output."""
 
+    def __init__(
+        self,
+        request: Any,
+        client_address: Any,
+        server: Any,
+        *,
+        download_request_methods: list[str],
+        directory: str,
+    ) -> None:
+        """保存下載 method 紀錄並初始化靜態檔案 handler。"""
+        self.download_request_methods = download_request_methods
+        super().__init__(request, client_address, server, directory=directory)
+
+    def do_HEAD(self) -> None:
+        """以 204 回應 token 下載預檢並記錄 HEAD。"""
+        if urlsplit(self.path).path != X_VIDEO_PAYLOAD["media"][0]["download_url"]:
+            super().do_HEAD()
+            return
+        self.download_request_methods.append("HEAD")
+        self.send_response(204)
+        self.end_headers()
+
+    def do_GET(self) -> None:
+        """以 attachment 200 回應 token 下載並記錄 GET。"""
+        if urlsplit(self.path).path != X_VIDEO_PAYLOAD["media"][0]["download_url"]:
+            super().do_GET()
+            return
+        self.download_request_methods.append("GET")
+        self.send_response(200)
+        self.send_header("Content-Type", "video/mp4")
+        self.send_header("Content-Disposition", f'attachment; filename="{X_VIDEO_FILENAME}"')
+        self.send_header("Content-Length", str(len(X_VIDEO_BYTES)))
+        self.end_headers()
+        self.wfile.write(X_VIDEO_BYTES)
+
     def log_message(self, format: str, *_args: object) -> None:
         """Suppress access logging for the local browser server."""
 
 
 @pytest.fixture
-def base_url() -> Generator[str, None, None]:
-    """Serve the static client from an ephemeral local HTTP port."""
-    handler = partial(QuietStaticHandler, directory=str(STATIC_DIR))
+def download_request_methods() -> list[str]:
+    """提供每個 browser test 隔離的下載 method 紀錄。"""
+    return []
+
+
+@pytest.fixture
+def base_url(download_request_methods: list[str]) -> Generator[str, None, None]:
+    """從 ephemeral 本機 HTTP port 提供靜態 client 與 mock 下載。"""
+    handler = partial(
+        QuietStaticHandler,
+        directory=str(STATIC_DIR),
+        download_request_methods=download_request_methods,
+    )
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -791,31 +855,38 @@ def test_expired_download_offers_reanalysis(page: Page, base_url: str) -> None:
     ]
 
 
-def test_download_requests_only_after_click(page: Page, base_url: str) -> None:
-    """Verify fallback cards avoid media fetches until Download is clicked."""
-    download_calls: list[str] = []
+def test_x_video_download_saves_exact_attachment(
+    page: Page,
+    base_url: str,
+    tmp_path: Path,
+    download_request_methods: list[str],
+) -> None:
+    """驗證 X 影片只在點擊後依序預檢並下載完全相同的附件 bytes。"""
 
     def extraction(route: Any, _request: Any) -> None:
-        """Return a media item without a preview URL."""
-        fulfill_json(route, SUCCESS_PAYLOAD)
-
-    def download(route: Any, request: Any) -> None:
-        """Return a tiny JPEG body and record the request path."""
-        download_calls.append(request.url)
-        route.fulfill(status=200, content_type="image/jpeg", body=b"\xff\xd8\xff\xe0test")
+        """回傳沒有預覽且具有 token 下載 URL 的 deterministic X 影片。"""
+        fulfill_json(route, X_VIDEO_PAYLOAD)
 
     page.route("**/api/extractions", extraction)
-    page.route("**/api/media/opaque-download/download", download)
     page.goto(base_url)
     page.fill("#post-url", "https://x.com/creator/status/1")
     page.click("#analyze-button")
 
     expect(page.locator(".fallback-tile")).to_contain_text("找不到預覽")
     assert page.locator("video").count() == 0
-    assert download_calls == []
-    page.click(".download-action")
-    expect(page.locator("#status")).to_contain_text("已開始下載")
-    assert len(download_calls) == 1
+    assert download_request_methods == []
+    with page.expect_download() as download_info:
+        page.click(".download-action")
+    browser_download = download_info.value
+    saved_path = tmp_path / browser_download.suggested_filename
+    browser_download.save_as(saved_path)
+
+    expect(page.locator("#status")).to_have_text("已開始下載。")
+    assert browser_download.suggested_filename == X_VIDEO_FILENAME
+    assert saved_path.exists()
+    assert saved_path.stat().st_size == len(X_VIDEO_BYTES)
+    assert saved_path.read_bytes() == X_VIDEO_BYTES
+    assert download_request_methods == ["HEAD", "GET"]
 
 
 def test_generated_preview_renders_and_failed_preview_uses_local_fallback(

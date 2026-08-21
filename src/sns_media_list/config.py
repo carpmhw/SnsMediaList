@@ -25,7 +25,6 @@ class Settings(BaseSettings):
     max_download_bytes: int = Field(default=500_000_000, gt=0, le=5_000_000_000)
     connect_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
     read_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
-    download_timeout_seconds: float = Field(default=120.0, gt=0, le=600)
     media_response_timeout_seconds: float = Field(default=120.0, gt=0, le=3_600)
     max_redirects: int = Field(default=3, ge=0, le=10)
     max_extractions: int = Field(default=1, gt=0, le=16)

@@ -37,6 +37,17 @@ SNS Media List 是一個低併發、自架式 Web 工具，可分析支援的 In
 
 Story 輸出限於精確 URL 的主要媒體：每則 Story 只回傳一個主要圖片或可直接下載的漸進式影片。圖片 Story 即使帶有音樂貼紙或音訊 metadata，也不會另行輸出 audio；不提供 Story 批次封存、ZIP 或轉碼，也不會合成圖片與音樂。
 
+## 媒體串流與 timeout
+
+- `SNS_MEDIA_CONNECT_TIMEOUT_SECONDS` 預設 10 秒：限制每次上游連線建立與 request write 操作。
+- `SNS_MEDIA_READ_TIMEOUT_SECONDS` 預設 30 秒：限制 response headers，以及每一次 response body read 的 idle timeout。只要上游在每個 idle window 內持續送出資料，計時就會在下一次 read 重新計算。
+- `SNS_MEDIA_MEDIA_RESPONSE_TIMEOUT_SECONDS` 預設 120 秒：限制 CDN preview 與 generated thumbnail 的 complete-response lifetime；attachment download 不使用固定的 whole-file wall-clock timeout，因此持續有資料的長下載可以超過 120 秒。
+- `SNS_MEDIA_MAX_DOWNLOAD_BYTES` 預設 500000000 bytes 仍是硬限制。已知的合法 `Content-Length` 會在串流前檢查，chunked 或未知長度則累計實際 bytes；超過上限立即中止，不會先將完整檔案緩衝在 process memory。
+- `SNS_MEDIA_DOWNLOAD_TIMEOUT_SECONDS` 已移除。若舊部署仍殘留此環境變數，settings 的 `extra="ignore"` 會忽略它而不阻止啟動，但它不再控制任何下載生命週期；請從 environment file 或 Compose override 移除以免誤解。
+- 長時間 active download 仍會占用 `SNS_MEDIA_MAX_DOWNLOADS` 與 `SNS_MEDIA_MAX_DOWNLOADS_PER_CLIENT` 的 slot，並受 media rate limit 約束。client disconnect 或取消下載時，application 會清理 upstream connection 與 download lease。
+
+下載 UI 的「已開始下載」只表示 browser download 已啟動，不表示瀏覽器或 OS 已完成檔案保存；需要確認落盤結果時，請在 client 端檢查實際檔案。
+
 ## 安全設計
 
 - 僅接受明確支援的 HTTPS 貼文與精確單則 Story URL，以及平台/CDN host。
