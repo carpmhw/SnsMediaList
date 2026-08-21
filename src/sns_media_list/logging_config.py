@@ -17,6 +17,7 @@ def build_event(
     media_class: str | None = None,
     bytes_streamed: int | None = None,
     reason_code: str | None = None,
+    resume_attempt: int | None = None,
     **_sensitive: Any,
 ) -> dict[str, Any]:
     """建立只包含核准觀測欄位的結構化事件。"""
@@ -34,6 +35,8 @@ def build_event(
         event["bytes_streamed"] = bytes_streamed
     if reason_code is not None:
         event["reason_code"] = reason_code
+    if resume_attempt is not None:
+        event["resume_attempt"] = resume_attempt
     return event
 
 

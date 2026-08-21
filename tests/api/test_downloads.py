@@ -22,7 +22,7 @@ from sns_media_list.app import create_app
 from sns_media_list.config import Settings
 from sns_media_list.errors import AppError
 from sns_media_list.models import PrivateMediaRecord
-from sns_media_list.network.media_client import MediaResponse
+from sns_media_list.network.media_client import MediaResponse, MediaTruncatedError
 from sns_media_list.security.tokens import MediaTokenDraft, TokenStore
 from sns_media_list.services.extraction_service import ExtractionService
 from sns_media_list.services.thumbnail import ThumbnailGenerator
@@ -449,9 +449,44 @@ class OneResponseMediaClient:
         """保存要交給下載 route 的 response。"""
         self.response = response
 
-    async def fetch(self, _url: str, *, headers: Any) -> MediaResponse:
-        """不接觸網路並回傳受控 response。"""
+    async def fetch(
+        self,
+        _url: str,
+        *,
+        headers: Any,
+        range_start: int | None = None,
+    ) -> MediaResponse:
+        """不接觸網路並回傳受控 response，Range 續傳時模擬再次截斷。"""
+        _ = headers
+        if range_start is not None:
+            raise MediaTruncatedError(
+                "upstream_media_invalid", "The media response body was truncated."
+            )
         return self.response
+
+
+class ResumableMediaClient:
+    """依序回傳 initial 與一次受控 Range resume response。"""
+
+    read_timeout = 1.0
+    max_bytes = 100
+
+    def __init__(self, initial: MediaResponse, resumed: MediaResponse) -> None:
+        """保存兩條 response 與每次 fetch 的受控請求資訊。"""
+        self.initial = initial
+        self.resumed = resumed
+        self.requests: list[tuple[str, dict[str, str], int | None]] = []
+
+    async def fetch(
+        self,
+        url: str,
+        *,
+        headers: Any,
+        range_start: int | None = None,
+    ) -> MediaResponse:
+        """記錄 fetch 並依是否有 offset 回傳 initial 或 resumed response。"""
+        self.requests.append((url, dict(headers), range_start))
+        return self.initial if range_start is None else self.resumed
 
 
 class FailingCloseResponse(MediaResponse):
@@ -612,6 +647,25 @@ def make_download_record() -> PrivateMediaRecord:
     )
 
 
+def make_image_download_record(*, platform: str = "x") -> PrivateMediaRecord:
+    """建立不應啟用 video Range resume 的圖片下載紀錄。"""
+    source_url = (
+        "https://pbs.twimg.com/media/1.jpg"
+        if platform == "x"
+        else "https://scontent.cdninstagram.com/1.jpg"
+    )
+    return PrivateMediaRecord(
+        token="image-download-token",
+        purpose="download",
+        source_url=source_url,
+        media_class="image",
+        filename="image.jpg",
+        platform=platform,
+        expires_at=9999999999.0,
+        request_headers={},
+    )
+
+
 def make_preview_record() -> PrivateMediaRecord:
     """建立 deterministic 的私有圖片預覽紀錄。"""
     return PrivateMediaRecord(
@@ -755,6 +809,339 @@ async def test_download_streams_complete_body_forwards_length_and_cleans_up_once
 
 
 @pytest.mark.asyncio
+async def test_download_resumes_once_after_valid_truncation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """X progressive video 截斷後應只續傳一次並產生完整 bytes。"""
+    caplog.set_level(logging.INFO, logger="sns_media_list")
+    initial, initial_writer = make_tracked_media_response(
+        SequencedReader([(0, b"abcd"), (0, b"")]),
+        {"content-type": "video/mp4", "content-length": "10"},
+    )
+    resumed_writer = CountingWriter()
+    resumed = MediaResponse(
+        206,
+        {
+            "content-type": "video/mp4",
+            "content-range": "bytes 4-9/10",
+            "content-length": "6",
+        },
+        SequencedReader([(0, b"efghij")]),
+        resumed_writer,
+        max_bytes=100,
+    )
+    media_client = ResumableMediaClient(initial, resumed)
+    lease = make_counting_lease()
+
+    response = await _stream_media(
+        make_download_record(),
+        media_client,
+        preview=False,
+        lease=lease,
+    )
+    messages: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        """正常 attachment response 不應讀取 disconnect。"""
+        raise AssertionError("successful resume should not read receive")
+
+    async def send(message: dict[str, Any]) -> None:
+        """收集 successful resume 的完整 downstream body。"""
+        messages.append(message)
+
+    await response(make_asgi_scope(spec_version="2.4"), receive, send)
+    body = b"".join(
+        message.get("body", b"")
+        for message in messages
+        if message["type"] == "http.response.body"
+    )
+
+    assert body == b"abcdefghij"
+    assert [request[2] for request in media_client.requests] == [None, 4]
+    assert initial_writer.close_calls == 1
+    assert resumed_writer.close_calls == 1
+    assert lease.release_calls == 1
+    assert response.headers["content-length"] == "10"
+    events = download_event_records(caplog)
+    assert [name for name, _event in events] == [
+        "media_download_started",
+        "media_download_resume_attempted",
+        "media_download_resume_succeeded",
+        "media_download_completed",
+    ]
+    assert events[1][1]["resume_attempt"] == 1
+    assert events[2][1]["resume_attempt"] == 1
+    assert "reason_code" not in events[2][1]
+    assert "source_url" not in str(events)
+    assert "download-token" not in str(events)
+
+
+@pytest.mark.asyncio
+async def test_download_does_not_resume_after_repeated_truncation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """resume response 再次截斷時不得進入第二次 Range retry。"""
+    caplog.set_level(logging.INFO, logger="sns_media_list")
+    initial, initial_writer = make_tracked_media_response(
+        SequencedReader([(0, b"abcd"), (0, b"")]),
+        {"content-type": "video/mp4", "content-length": "10"},
+    )
+    resumed_writer = CountingWriter()
+    resumed = MediaResponse(
+        206,
+        {
+            "content-type": "video/mp4",
+            "content-range": "bytes 4-9/10",
+            "content-length": "6",
+        },
+        SequencedReader([(0, b"ef"), (0, b"")]),
+        resumed_writer,
+        max_bytes=100,
+    )
+    media_client = ResumableMediaClient(initial, resumed)
+    lease = make_counting_lease()
+
+    response = await _stream_media(
+        make_download_record(),
+        media_client,
+        preview=False,
+        lease=lease,
+    )
+
+    with pytest.raises(MediaTruncatedError):
+        _ = [chunk async for chunk in response.body_iterator]
+
+    assert [request[2] for request in media_client.requests] == [None, 4]
+    assert initial_writer.close_calls == 1
+    assert resumed_writer.close_calls == 1
+    assert lease.release_calls == 1
+    events = download_event_records(caplog)
+    assert [name for name, _event in events] == [
+        "media_download_started",
+        "media_download_resume_attempted",
+        "media_download_resume_failed",
+        "media_download_failed",
+    ]
+    assert events[2][1]["resume_attempt"] == 1
+    assert events[2][1]["reason_code"] == "upstream_truncation"
+    assert events[3][1]["reason_code"] == "upstream_truncation"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "record_factory",
+    [make_image_download_record, make_preview_record],
+    ids=["image-download", "preview"],
+)
+async def test_download_does_not_resume_image_or_preview(record_factory: Any) -> None:
+    """圖片與 preview 截斷時應保持 fail-closed 且不建立 Range request。"""
+    initial, _writer = make_tracked_media_response(
+        SequencedReader([(0, b"abc"), (0, b"")]),
+        {"content-type": "image/jpeg", "content-length": "6"},
+    )
+    resumed, _resumed_writer = make_tracked_media_response(
+        SequencedReader([(0, b"unused")]),
+        {"content-type": "image/jpeg", "content-length": "6"},
+    )
+    media_client = ResumableMediaClient(initial, resumed)
+    lease = make_counting_lease()
+    record = record_factory()
+
+    with pytest.raises(AppError):
+        response = await _stream_media(
+            record,
+            media_client,
+            preview=record.purpose == "preview",
+            lease=lease,
+        )
+        _ = [chunk async for chunk in response.body_iterator]
+
+    assert [request[2] for request in media_client.requests] == [None]
+    assert lease.release_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_download_does_not_resume_when_initial_validation_or_size_fails() -> None:
+    """initial MIME 或大小驗證失敗時不得啟動 Range resume。"""
+    validation_response, _validation_writer = make_tracked_media_response(
+        SequencedReader([(0, b"body")]),
+        {"content-type": "image/jpeg", "content-length": "4"},
+    )
+    size_response, _size_writer = make_tracked_media_response(
+        SequencedReader([(0, b"body")]),
+        {"content-type": "video/mp4", "content-length": "101"},
+        max_bytes=100,
+    )
+
+    for upstream in (validation_response, size_response):
+        media_client = ResumableMediaClient(upstream, upstream)
+        lease = make_counting_lease()
+        with pytest.raises(AppError):
+            response = await _stream_media(
+                make_download_record(),
+                media_client,
+                preview=False,
+                lease=lease,
+            )
+            _ = [chunk async for chunk in response.body_iterator]
+        assert [request[2] for request in media_client.requests] == [None]
+        assert lease.release_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_download_does_not_resume_after_client_disconnect() -> None:
+    """client disconnect 中斷 body read 時不得啟動 Range resume。"""
+    initial, writer = make_tracked_media_response(
+        BlockingSecondReadReader(),
+        {"content-type": "video/mp4", "content-length": "4"},
+    )
+    media_client = ResumableMediaClient(initial, initial)
+    lease = make_counting_lease()
+    response = await _stream_media(
+        make_download_record(),
+        media_client,
+        preview=False,
+        lease=lease,
+    )
+    iterator = response.body_iterator.__aiter__()
+    await anext(iterator)
+    read_task = asyncio.create_task(anext(iterator))
+    assert isinstance(initial._reader, BlockingSecondReadReader)
+    await initial._reader.blocked.wait()
+    read_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await read_task
+
+    assert [request[2] for request in media_client.requests] == [None]
+    assert writer.close_calls == 1
+    assert lease.release_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_download_rejects_invalid_resume_response_and_closes_both_responses() -> None:
+    """無效 resumed response 應在讀取 body 前 fail closed 並清理兩條 connection。"""
+    initial, initial_writer = make_tracked_media_response(
+        SequencedReader([(0, b"abcd"), (0, b"")]),
+        {"content-type": "video/mp4", "content-length": "10"},
+    )
+    resumed_writer = CountingWriter()
+    resumed = MediaResponse(
+        200,
+        {
+            "content-type": "video/mp4",
+            "content-length": "6",
+        },
+        SequencedReader([(0, b"efghij")]),
+        resumed_writer,
+        max_bytes=100,
+    )
+    media_client = ResumableMediaClient(initial, resumed)
+    lease = make_counting_lease()
+
+    response = await _stream_media(
+        make_download_record(),
+        media_client,
+        preview=False,
+        lease=lease,
+    )
+
+    with pytest.raises(AppError) as exc_info:
+        _ = [chunk async for chunk in response.body_iterator]
+
+    assert exc_info.value.code == "upstream_media_invalid"
+    assert [request[2] for request in media_client.requests] == [None, 4]
+    assert initial_writer.close_calls == 1
+    assert resumed_writer.close_calls == 1
+    assert lease.release_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_download_resume_enforces_remaining_byte_budget(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """resumed body 超過原始剩餘 bytes 時應停止並記錄 bounded size failure。"""
+    caplog.set_level(logging.INFO, logger="sns_media_list")
+    initial, _initial_writer = make_tracked_media_response(
+        SequencedReader([(0, b"abcd"), (0, b"")]),
+        {"content-type": "video/mp4", "content-length": "10"},
+    )
+    resumed = MediaResponse(
+        206,
+        {
+            "content-type": "video/mp4",
+            "content-range": "bytes 4-9/10",
+        },
+        SequencedReader([(0, b"efghij"), (0, b"k")]),
+        Writer(),
+        max_bytes=100,
+    )
+    media_client = ResumableMediaClient(initial, resumed)
+    lease = make_counting_lease()
+    response = await _stream_media(
+        make_download_record(),
+        media_client,
+        preview=False,
+        lease=lease,
+    )
+
+    chunks: list[bytes] = []
+    with pytest.raises(AppError) as exc_info:
+        async for chunk in response.body_iterator:
+            chunks.append(chunk)
+
+    assert exc_info.value.code == "upstream_media_invalid"
+    assert b"".join(chunks) == b"abcdefghij"
+    assert lease.release_calls == 1
+    events = download_event_records(caplog)
+    assert [name for name, _event in events] == [
+        "media_download_started",
+        "media_download_resume_attempted",
+        "media_download_resume_failed",
+        "media_download_failed",
+    ]
+    assert events[2][1]["reason_code"] == "size_limit"
+    assert events[3][1]["reason_code"] == "size_limit"
+
+
+@pytest.mark.asyncio
+async def test_download_resume_cleanup_error_does_not_replace_primary_error() -> None:
+    """resumed body truncation 應優先於 resumed response cleanup error。"""
+    initial, initial_writer = make_tracked_media_response(
+        SequencedReader([(0, b"abcd"), (0, b"")]),
+        {"content-type": "video/mp4", "content-length": "10"},
+    )
+    resumed = CountingFailingCloseResponse(
+        206,
+        {
+            "content-type": "video/mp4",
+            "content-range": "bytes 4-9/10",
+            "content-length": "6",
+        },
+        SequencedReader([(0, b"ef"), (0, b"")]),
+        Writer(),
+        max_bytes=100,
+    )
+    media_client = ResumableMediaClient(initial, resumed)
+    lease = make_counting_lease()
+
+    response = await _stream_media(
+        make_download_record(),
+        media_client,
+        preview=False,
+        lease=lease,
+    )
+
+    with pytest.raises(MediaTruncatedError) as exc_info:
+        _ = [chunk async for chunk in response.body_iterator]
+
+    assert exc_info.value.code == "upstream_media_invalid"
+    assert initial_writer.close_calls == 1
+    assert resumed.close_calls == 1
+    assert lease.release_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_download_send_timeout_detaches_blackhole_and_releases_lease(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -804,9 +1191,7 @@ async def test_download_send_timeout_detaches_blackhole_and_releases_lease(
         await asyncio.wait_for(send_started.wait(), timeout=0.1)
         done, _pending = await asyncio.wait({response_task}, timeout=0.2)
         assert response_task in done
-        with pytest.raises(AppError) as exc_info:
-            response_task.result()
-        assert exc_info.value.message == "The downstream response timed out."
+        response_task.result()
         assert send_cancelled.is_set()
         assert writer.close_calls == 1
         assert lease.release_calls == 1
@@ -1230,11 +1615,18 @@ async def test_download_logs_bounded_failure_reasons(
         _ = [chunk async for chunk in response.body_iterator]
 
     events = download_event_records(caplog)
-    assert [name for name, _event in events] == [
-        "media_download_started",
-        "media_download_failed",
-    ]
+    expected_events = ["media_download_started", "media_download_failed"]
+    if failure_kind == "truncation":
+        expected_events = [
+            "media_download_started",
+            "media_download_resume_attempted",
+            "media_download_resume_failed",
+            "media_download_failed",
+        ]
+    assert [name for name, _event in events] == expected_events
     failed = events[1][1]
+    if failure_kind == "truncation":
+        failed = events[-1][1]
     assert failed["outcome"] == "failed"
     assert failed["reason_code"] == expected_reason
     assert failed["bytes_streamed"] in {0, 1}
@@ -2278,14 +2670,18 @@ async def test_preview_prevalidation_cleanup_is_bounded_and_releases_lease() -> 
 
 
 @pytest.mark.asyncio
-async def test_deadline_response_preserves_upstream_timeout_error() -> None:
-    """deadline 尚未到期時，body 原始 TimeoutError 不得被 response 吞掉。"""
+@pytest.mark.parametrize("send_timeout", [None, 1.0], ids=["unbounded-send", "bounded-send"])
+async def test_deadline_response_suppresses_stream_error_after_response_started(
+    send_timeout: float | None,
+) -> None:
+    """response 已開始後，body 原始錯誤不得再觸發第二個 HTTP response。"""
     cleanup_calls = 0
+    errors: list[BaseException] = []
 
     async def body() -> Any:
-        """先送出一段資料，再模擬 upstream 自己拋出 timeout。"""
+        """先送出一段資料，再模擬 upstream 提前 EOF。"""
         yield b"first"
-        raise TimeoutError("upstream timeout")
+        raise AppError("upstream_media_invalid", "The media response body was truncated.")
 
     async def cleanup() -> None:
         """記錄 response failure path 的 cleanup 呼叫。"""
@@ -2298,18 +2694,157 @@ async def test_deadline_response_preserves_upstream_timeout_error() -> None:
         return {"type": "http.request"}
 
     async def send(_message: dict[str, Any]) -> None:
-        """接受第一段 body，讓第二次迭代觸發 upstream timeout。"""
+        """接受 response start 與第一段 body，讓第二次迭代觸發 truncation。"""
+
+    def on_error(error: BaseException) -> None:
+        """收集已開始 response 的 stream error。"""
+        errors.append(error)
 
     response = DeadlineStreamingResponse(
         body(),
         deadline=asyncio.get_running_loop().time() + 1.0,
         cleanup=cleanup,
+        send_timeout=send_timeout,
+        on_stream_error=on_error,
     )
 
-    with pytest.raises(TimeoutError, match="upstream timeout"):
+    await response(make_asgi_scope(spec_version="2.3"), receive, send)
+
+    assert cleanup_calls == 1
+    assert len(errors) == 1
+    assert isinstance(errors[0], AppError)
+    assert "truncated" in str(errors[0])
+
+
+@pytest.mark.asyncio
+async def test_deadline_response_raises_stream_error_before_response_start() -> None:
+    """response start 失敗時，原始安全 error 仍應向 framework 傳遞。"""
+    cleanup_calls = 0
+    errors: list[BaseException] = []
+
+    async def body() -> Any:
+        """提供會觸發 response start 的 body。"""
+        yield b"unreachable"
+
+    async def cleanup() -> None:
+        """記錄 pre-start failure cleanup。"""
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+
+    async def receive() -> dict[str, Any]:
+        """保持 ASGI disconnect listener 等待。"""
+        await asyncio.Event().wait()
+        return {"type": "http.request"}
+
+    async def send(_message: dict[str, Any]) -> None:
+        """在 response start 送出前拋出安全 upstream error。"""
+        raise AppError("upstream_media_invalid", "safe pre-start failure")
+
+    def on_error(error: BaseException) -> None:
+        """收集 pre-start stream error。"""
+        errors.append(error)
+
+    response = DeadlineStreamingResponse(
+        body(),
+        deadline=asyncio.get_running_loop().time() + 1.0,
+        cleanup=cleanup,
+        on_stream_error=on_error,
+    )
+
+    with pytest.raises(AppError, match="safe pre-start failure"):
         await response(make_asgi_scope(spec_version="2.3"), receive, send)
 
     assert cleanup_calls == 1
+    assert len(errors) == 1
+
+
+@pytest.mark.asyncio
+async def test_deadline_response_does_not_mark_failed_response_start() -> None:
+    """response start send failure 不得被誤判為已開始。"""
+    cleanup_calls = 0
+    errors: list[BaseException] = []
+
+    async def body() -> Any:
+        """提供一段會觸發 response start 的 body。"""
+        yield b"body"
+
+    async def cleanup() -> None:
+        """記錄 failed response start 的 cleanup。"""
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+
+    async def receive() -> dict[str, Any]:
+        """保持 ASGI disconnect listener 等待。"""
+        await asyncio.Event().wait()
+        return {"type": "http.request"}
+
+    async def send(message: dict[str, Any]) -> None:
+        """在 response start 本身失敗。"""
+        if message["type"] == "http.response.start":
+            raise RuntimeError("response start failed")
+
+    def on_error(error: BaseException) -> None:
+        """收集 failed response start error。"""
+        errors.append(error)
+
+    response = DeadlineStreamingResponse(
+        body(),
+        deadline=asyncio.get_running_loop().time() + 1.0,
+        cleanup=cleanup,
+        on_stream_error=on_error,
+    )
+
+    with pytest.raises(RuntimeError, match="response start failed"):
+        await response(make_asgi_scope(spec_version="2.3"), receive, send)
+
+    assert cleanup_calls == 1
+    assert len(errors) == 1
+
+
+@pytest.mark.asyncio
+async def test_deadline_response_suppresses_cleanup_error_after_response_started() -> None:
+    """response 已開始後 cleanup error 不得觸發第二個 response。"""
+    errors: list[BaseException] = []
+    complete_calls = 0
+
+    async def body() -> Any:
+        """提供可完整送出的 body。"""
+        yield b"body"
+
+    async def cleanup() -> None:
+        """模擬 response 已開始後的 cleanup failure。"""
+        raise RuntimeError("cleanup failed after response start")
+
+    async def receive() -> dict[str, Any]:
+        """ASGI 2.3 disconnect listener 保持等待。"""
+        await asyncio.Event().wait()
+        return {"type": "http.request"}
+
+    async def send(_message: dict[str, Any]) -> None:
+        """接受完整 response lifecycle。"""
+
+    def on_error(error: BaseException) -> None:
+        """收集 cleanup failure。"""
+        errors.append(error)
+
+    def on_complete() -> None:
+        """記錄不應發生的 completion callback。"""
+        nonlocal complete_calls
+        complete_calls += 1
+
+    response = DeadlineStreamingResponse(
+        body(),
+        deadline=asyncio.get_running_loop().time() + 1.0,
+        cleanup=cleanup,
+        on_stream_error=on_error,
+        on_stream_complete=on_complete,
+    )
+
+    await response(make_asgi_scope(spec_version="2.3"), receive, send)
+
+    assert len(errors) == 1
+    assert "cleanup failed after response start" in str(errors[0])
+    assert complete_calls == 0
 
 
 @pytest.mark.asyncio
@@ -2530,8 +3065,9 @@ async def test_await_with_expired_deadline_detaches_task_and_consumes_exception(
 
 
 @pytest.mark.asyncio
-async def test_deadline_response_does_not_swallow_body_timeout_after_cancel() -> None:
-    """deadline cancellation 後 body 自行拋出的 raw timeout 不得變成成功 response。"""
+async def test_deadline_response_suppresses_body_timeout_after_cancel() -> None:
+    """response 已開始後，deadline cancellation 造成的 body timeout 不得外洩。"""
+    errors: list[BaseException] = []
 
     async def body() -> Any:
         """將自身取消轉換成 upstream raw TimeoutError。"""
@@ -2549,13 +3085,20 @@ async def test_deadline_response_does_not_swallow_body_timeout_after_cancel() ->
     async def send(_message: dict[str, Any]) -> None:
         """接受測試 response 訊息。"""
 
+    def on_error(error: BaseException) -> None:
+        """收集 deadline cancel 後的 body timeout。"""
+        errors.append(error)
+
     response = DeadlineStreamingResponse(
         body(),
         deadline=asyncio.get_running_loop().time() + 0.01,
+        on_stream_error=on_error,
     )
 
-    with pytest.raises(TimeoutError, match="body timeout"):
-        await response(make_asgi_scope(spec_version="2.3"), receive, send)
+    await response(make_asgi_scope(spec_version="2.3"), receive, send)
+
+    assert len(errors) == 1
+    assert isinstance(errors[0], TimeoutError)
 
 
 @pytest.mark.asyncio

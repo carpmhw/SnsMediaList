@@ -20,9 +20,11 @@ from ..models import ExtractionResponse, PrivateMediaRecord
 from ..network.media_client import (
     MediaClient,
     MediaResponse,
+    MediaTruncatedError,
     build_forward_response_headers,
     build_preview_headers,
     iter_validated_body,
+    validate_resume_response,
 )
 from ..services.extraction_service import ExtractionService
 from ..services.thumbnail import ThumbnailGenerator, validate_thumbnail_media_class
@@ -71,6 +73,7 @@ class DeadlineStreamingResponse(StreamingResponse):
         stream_error: BaseException | None = None
         stream_completed = False
         disconnect_received = False
+        response_started = False
         response_completed = False
         deadline_timeout = False
         caller_cancelled = False
@@ -84,8 +87,18 @@ class DeadlineStreamingResponse(StreamingResponse):
             return message
 
         async def tracked_send(message: Message) -> None:
-            """以單次 downstream send idle bound 傳送訊息並標記 response 完成。"""
-            nonlocal response_completed
+            """以單次 downstream send idle bound 傳送訊息並標記 response lifecycle。"""
+
+            def mark_sent() -> None:
+                """只在底層 send 成功後更新 response start/completion 狀態。"""
+                nonlocal response_started, response_completed
+                if message["type"] == "http.response.start":
+                    response_started = True
+                if message["type"] == "http.response.body" and not message.get(
+                    "more_body", False
+                ):
+                    response_completed = True
+
             if self.send_timeout is None:
                 await send(message)
             else:
@@ -102,10 +115,10 @@ class DeadlineStreamingResponse(StreamingResponse):
                         except BaseException:
                             _consume_task_exception(send_task)
                             raise
+                        mark_sent()
                         if message["type"] == "http.response.body" and not message.get(
                             "more_body", False
                         ):
-                            response_completed = True
                             return
                     _cancel_task_without_waiting(send_task)
                     raise
@@ -116,8 +129,7 @@ class DeadlineStreamingResponse(StreamingResponse):
                         "The downstream response timed out.",
                     )
                 send_task.result()
-            if message["type"] == "http.response.body" and not message.get("more_body", False):
-                response_completed = True
+            mark_sent()
 
         try:
             if self.deadline is None:
@@ -204,9 +216,9 @@ class DeadlineStreamingResponse(StreamingResponse):
 
         if caller_cancelled:
             raise asyncio.CancelledError
-        if cleanup_error is not None and stream_error is cleanup_error:
-            raise cleanup_error
-        if stream_error is not None and not deadline_timeout:
+        if isinstance(stream_error, ClientDisconnect):
+            raise ClientDisconnect
+        if stream_error is not None and not response_started and not deadline_timeout:
             raise stream_error
 
     async def _run_cleanup(self) -> None:
@@ -449,6 +461,7 @@ def _log_download_event(
     duration_ms: float,
     bytes_streamed: int,
     reason_code: str | None = None,
+    resume_attempt: int | None = None,
 ) -> None:
     """以安全欄位記錄下載事件，且不讓 logging 例外影響下載流程。"""
     if reason_code is not None and reason_code not in _DOWNLOAD_REASON_CODES:
@@ -465,6 +478,7 @@ def _log_download_event(
                     duration_ms=duration_ms,
                     bytes_streamed=bytes_streamed,
                     reason_code=reason_code,
+                    resume_attempt=resume_attempt,
                 )
             },
         )
@@ -539,6 +553,27 @@ async def _stream_media(
         """在完整 downstream response 成功返回後記錄 completed 事件。"""
         log_terminal(None)
 
+    def log_resume_event(
+        message: str,
+        *,
+        outcome: str,
+        error: BaseException | None = None,
+    ) -> None:
+        """記錄只含 bounded 欄位的單次 Range resume telemetry。"""
+        if preview:
+            return
+        _safe_log_download_event(
+            message,
+            request_id=event_request_id,
+            platform=platform,
+            media_class=media_class,
+            outcome=outcome,
+            duration_ms=(perf_counter() - started) * 1000,
+            bytes_streamed=bytes_streamed,
+            reason_code=None if error is None else _download_reason_code(error),
+            resume_attempt=1,
+        )
+
     async def cleanup_failed_response(response: MediaResponse | None) -> None:
         """盡力 close/release 失敗路徑資源，但不覆蓋原始例外。"""
         if response is not None:
@@ -577,6 +612,13 @@ async def _stream_media(
         await cleanup_failed_response(None)
         log_terminal(error)
         raise
+    try:
+        original_total_length = response.content_length
+    except BaseException as error:
+        await cleanup_failed_response(response)
+        log_terminal(error)
+        raise
+    original_content_type = response.headers.get("content-type", "")
     iterator = iter_validated_body(
         response,
         preview=preview,
@@ -594,35 +636,147 @@ async def _stream_media(
         log_terminal(error)
         raise
 
+    open_responses = [response]
+    closed_response_ids: set[int] = set()
+    cleanup_errors: list[BaseException] = []
     cleaned = False
     send_timeout = getattr(media_client, "read_timeout", _DEFAULT_STREAM_SEND_TIMEOUT_SECONDS)
 
+    async def close_response_once(response_to_close: MediaResponse) -> None:
+        """以 bounded timeout 關閉單一 response，並保留 cleanup error。"""
+        response_id = id(response_to_close)
+        if response_id in closed_response_ids:
+            return
+        closed_response_ids.add(response_id)
+        try:
+            timeout = None if deadline is None else max(0.0, deadline - monotonic())
+            await _close_response_with_timeout(response_to_close, timeout=timeout)
+        except BaseException as error:
+            cleanup_errors.append(error)
+
     async def cleanup() -> None:
-        """只清理一次 upstream response 並釋放下載 lease。"""
+        """只清理所有 upstream response 一次並釋放下載 lease。"""
         nonlocal cleaned
         if cleaned:
             return
         cleaned = True
+        for response_to_close in open_responses:
+            await close_response_once(response_to_close)
         try:
-            timeout = None if deadline is None else max(0.0, deadline - monotonic())
-            await _close_response_with_timeout(response, timeout=timeout)
-        finally:
             await lease.release()
+        except BaseException as error:
+            cleanup_errors.append(error)
+        if cleanup_errors:
+            raise cleanup_errors[0]
 
     async def body() -> AsyncIterator[bytes]:
         """依序送出預檢 chunk 與後續 upstream bytes，並記錄終止原因。"""
         nonlocal bytes_streamed
         primary_error: BaseException | None = None
+        current_iterator = iterator
+        resume_attempted = False
         try:
             yield first_chunk
             bytes_streamed += len(first_chunk)
             while True:
                 try:
-                    chunk = await _await_with_deadline(anext(iterator), deadline)
+                    chunk = await _await_with_deadline(anext(current_iterator), deadline)
+                except MediaTruncatedError as truncation_error:
+                    can_resume = (
+                        not preview
+                        and not resume_attempted
+                        and record.platform == "x"
+                        and record.media_class == "video"
+                        and response.status_code == 200
+                        and original_total_length is not None
+                        and 0 < bytes_streamed < original_total_length
+                    )
+                    if not can_resume:
+                        if resume_attempted:
+                            log_resume_event(
+                                "media_download_resume_failed",
+                                outcome="failed",
+                                error=truncation_error,
+                            )
+                        raise
+                    if original_total_length is None:
+                        raise truncation_error
+                    resume_attempted = True
+                    resume_offset = bytes_streamed
+                    log_resume_event(
+                        "media_download_resume_attempted",
+                        outcome="attempted",
+                    )
+                    await close_response_once(response)
+                    try:
+                        resumed_response = await _await_with_deadline(
+                            media_client.fetch(
+                                source_url,
+                                headers=request_headers,
+                                range_start=resume_offset,
+                            ),
+                            deadline,
+                            detached_result_cleanup=cleanup_detached_fetch,
+                        )
+                        open_responses.append(resumed_response)
+                        validate_resume_response(
+                            resumed_response,
+                            requested_offset=resume_offset,
+                            original_total_length=original_total_length,
+                            original_content_type=original_content_type,
+                        )
+                        current_iterator = iter_validated_body(
+                            resumed_response,
+                            expected_media_class="video",
+                            max_bytes=original_total_length - resume_offset,
+                        )
+                    except BaseException as resume_error:
+                        log_resume_event(
+                            "media_download_resume_failed",
+                            outcome="failed",
+                            error=resume_error,
+                        )
+                        raise
+                    continue
                 except StopAsyncIteration:
                     break
+                except BaseException as error:
+                    if resume_attempted and not isinstance(
+                        error, asyncio.CancelledError | ClientDisconnect
+                    ):
+                        log_resume_event(
+                            "media_download_resume_failed",
+                            outcome="failed",
+                            error=error,
+                        )
+                    raise
                 yield chunk
                 bytes_streamed += len(chunk)
+            if resume_attempted and original_total_length is not None:
+                if bytes_streamed < original_total_length:
+                    incomplete_error = MediaTruncatedError(
+                        "upstream_media_invalid", "The media response body was truncated."
+                    )
+                    log_resume_event(
+                        "media_download_resume_failed",
+                        outcome="failed",
+                        error=incomplete_error,
+                    )
+                    raise incomplete_error
+                if bytes_streamed > original_total_length:
+                    oversized_error = AppError(
+                        "upstream_media_invalid", "The resumed media body is invalid."
+                    )
+                    log_resume_event(
+                        "media_download_resume_failed",
+                        outcome="failed",
+                        error=oversized_error,
+                    )
+                    raise oversized_error
+                log_resume_event(
+                    "media_download_resume_succeeded",
+                    outcome="success",
+                )
         except BaseException as error:
             primary_error = error
             raise

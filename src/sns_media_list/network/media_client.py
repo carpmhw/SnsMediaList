@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import ssl
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -46,6 +47,10 @@ _FORBIDDEN_TRAILER_FIELDS = frozenset(
 
 class _BoundedOperationTimeout(Exception):
     """表示由 bounded operation helper 自己觸發的 timeout。"""
+
+
+class MediaTruncatedError(AppError):
+    """表示合法 Content-Length 宣告的 body 在收滿前提前 EOF。"""
 
 
 async def _await_bounded[T](
@@ -93,6 +98,15 @@ class ConnectionTarget:
     port: int
     server_hostname: str
     host_header: str
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedContentRange:
+    """表示通過嚴格語法與數值檢查的單一 Content-Range。"""
+
+    start: int
+    end: int
+    total: int
 
 
 class MediaResponse:
@@ -148,7 +162,7 @@ class MediaResponse:
             chunk = await self._read(size)
             if not chunk:
                 if remaining is not None and remaining > 0:
-                    raise AppError(
+                    raise MediaTruncatedError(
                         "upstream_media_invalid", "The media response body was truncated."
                     )
                 break
@@ -335,10 +349,23 @@ class MediaClient:
         self,
         url: str,
         headers: Mapping[str, str] | None = None,
+        *,
+        range_start: int | None = None,
     ) -> MediaResponse:
         """取得 URL，並對每次允許的 redirect 重新執行驗證。"""
         current_url = url
         request_headers = normalize_request_headers(headers or {})
+        if range_start is not None:
+            if (
+                isinstance(range_start, bool)
+                or not isinstance(range_start, int)
+                or range_start < 0
+            ):
+                raise AppError("upstream_media_invalid", "The media range offset is invalid.")
+            request_headers = {
+                **request_headers,
+                "Range": f"bytes={range_start}-",
+            }
         deadline = None if self.total_timeout is None else time.monotonic() + self.total_timeout
         for redirect_count in range(self.max_redirects + 1):
             target = await self._validate_target(current_url, deadline=deadline)
@@ -612,6 +639,22 @@ def _parse_response_headers(raw_headers: bytes) -> tuple[int, dict[str, str]]:
         ) from error
 
 
+def _parse_content_range(value: str) -> ParsedContentRange:
+    """嚴格解析單一 ASCII byte Content-Range 並拒絕寬鬆數值格式。"""
+    if not isinstance(value, str) or not value.isascii():
+        raise AppError("upstream_media_invalid", "The media response Content-Range is invalid.")
+    match = re.fullmatch(r"bytes ([0-9]+)-([0-9]+)/([0-9]+)", value, flags=re.ASCII)
+    if match is None:
+        raise AppError("upstream_media_invalid", "The media response Content-Range is invalid.")
+    tokens = match.groups()
+    if any(token != "0" and token.startswith("0") for token in tokens):
+        raise AppError("upstream_media_invalid", "The media response Content-Range is invalid.")
+    start, end, total = (int(token) for token in tokens)
+    if end < start or total <= end:
+        raise AppError("upstream_media_invalid", "The media response Content-Range is invalid.")
+    return ParsedContentRange(start=start, end=end, total=total)
+
+
 def _normalize_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
     """將 response headers 正規化並集中執行欄位與 framing 驗證。"""
     try:
@@ -636,7 +679,8 @@ def _add_normalized_header(headers: dict[str, str], name: str, value: str) -> No
         raise ValueError("invalid header field value")
     header_name = name.lower()
     if (
-        header_name in {"content-length", "transfer-encoding", "content-encoding"}
+        header_name
+        in {"content-length", "transfer-encoding", "content-encoding", "content-range"}
         and header_name in headers
     ):
         raise ValueError("duplicate framing header")
@@ -747,6 +791,7 @@ async def iter_validated_body(
     *,
     preview: bool = False,
     expected_media_class: str | None = None,
+    max_bytes: int | None = None,
 ) -> AsyncIterator[bytes]:
     """Validate response status/MIME/class and optionally a raster signature before yielding."""
     if not 200 <= response.status_code < 300:
@@ -763,13 +808,16 @@ async def iter_validated_body(
         raise AppError("upstream_media_invalid", "The media content type is not supported.")
 
     if not preview:
-        async for chunk in response.iter_bytes():
+        async for chunk in response.iter_bytes(max_bytes=max_bytes):
             yield chunk
         return
 
     buffered = bytearray()
     validated = False
-    async for chunk in response.iter_bytes(chunk_size=512 if preview else 64 * 1024):
+    async for chunk in response.iter_bytes(
+        chunk_size=512 if preview else 64 * 1024,
+        max_bytes=max_bytes,
+    ):
         if not validated:
             buffered.extend(chunk)
             if len(buffered) < 512:
@@ -787,6 +835,39 @@ async def iter_validated_body(
         if not validate_preview_signature(content_type, bytes(buffered)):
             raise AppError("upstream_media_invalid", "The preview signature is invalid.")
         yield bytes(buffered)
+
+
+def validate_resume_response(
+    response: MediaResponse,
+    *,
+    requested_offset: int,
+    original_total_length: int,
+    original_content_type: str,
+) -> ParsedContentRange:
+    """驗證一次 Range response 的 status、range、MIME 與 framing 一致性。"""
+    if response.status_code != 206:
+        raise AppError("upstream_media_invalid", "The resumed media response was not partial.")
+    if requested_offset < 0 or original_total_length <= 0:
+        raise AppError("upstream_media_invalid", "The resumed media range is invalid.")
+    content_range = response.headers.get("content-range")
+    if content_range is None:
+        raise AppError("upstream_media_invalid", "The media response Content-Range is invalid.")
+    parsed = _parse_content_range(content_range)
+    if (
+        parsed.start != requested_offset
+        or parsed.end != original_total_length - 1
+        or parsed.total != original_total_length
+    ):
+        raise AppError("upstream_media_invalid", "The media response Content-Range is invalid.")
+
+    expected_content_type = original_content_type.split(";", 1)[0].strip().lower()
+    resumed_content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if not expected_content_type or resumed_content_type != expected_content_type:
+        raise AppError("upstream_media_invalid", "The resumed media content type is invalid.")
+    content_length = response.content_length
+    if content_length is not None and content_length != parsed.end - parsed.start + 1:
+        raise AppError("upstream_media_invalid", "The resumed media length is invalid.")
+    return parsed
 
 
 def build_download_headers(filename: str) -> dict[str, str]:

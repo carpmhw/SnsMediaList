@@ -12,10 +12,14 @@ from sns_media_list.network.media_client import (
     MediaClient,
     MediaDestinationPolicy,
     MediaResponse,
+    MediaTruncatedError,
+    ParsedContentRange,
+    _parse_content_range,
     _parse_response_headers,
     build_preview_headers,
     connection_target,
     validate_preview_signature,
+    validate_resume_response,
 )
 
 
@@ -257,6 +261,68 @@ def test_response_header_parser_rejects_conflicting_content_lengths() -> None:
     assert exc_info.value.code == "upstream_media_invalid"
 
 
+def test_content_range_parser_accepts_valid_range() -> None:
+    """Content-Range parser 應接受嚴格的完整 byte range。"""
+    parsed = _parse_content_range("bytes 4-9/10")
+
+    assert parsed == ParsedContentRange(start=4, end=9, total=10)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "bytes */123",
+        "bytes 10-9/123",
+        "bytes 10-20/*",
+        "bytes +10-20/123",
+        "bytes 010-20/123",
+        "bytes 10-020/123",
+        "bytes 10-20/0123",
+        "bytes 10-20/20",
+        "bytes 10-20/123 extra",
+        "bytes 10-20/123, bytes 30-40/123",
+        "bytes 10-é/123",
+    ],
+    ids=[
+        "unsatisfied",
+        "end-before-start",
+        "wildcard-total",
+        "plus-sign",
+        "leading-zero-start",
+        "leading-zero-end",
+        "leading-zero-total",
+        "total-not-greater-than-end",
+        "extra-token",
+        "multiple-ranges",
+        "non-ascii",
+    ],
+)
+def test_content_range_parser_rejects_invalid_syntax(value: str) -> None:
+    """Content-Range parser 應拒絕不完整、寬鬆或含額外 token 的格式。"""
+    with pytest.raises(AppError) as exc_info:
+        _parse_content_range(value)
+
+    assert exc_info.value.code == "upstream_media_invalid"
+
+
+@pytest.mark.asyncio
+async def test_media_response_raises_typed_error_for_early_eof() -> None:
+    """合法 Content-Length 提前 EOF 應保留可分類的 truncation error。"""
+    response = MediaResponse(
+        200,
+        {"content-type": "video/mp4", "content-length": "6"},
+        FakeResponseReader(b"abcd"),
+        FakeResponseWriter(),
+        max_bytes=100,
+    )
+
+    with pytest.raises(MediaTruncatedError) as exc_info:
+        _ = [chunk async for chunk in response.iter_bytes()]
+
+    assert exc_info.value.code == "upstream_media_invalid"
+    assert exc_info.value.message == "The media response body was truncated."
+
+
 def test_response_header_parser_rejects_content_length_and_transfer_encoding() -> None:
     """response 同時宣告 Content-Length 與 Transfer-Encoding 時應拒絕。"""
     raw_headers = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n"
@@ -388,6 +454,20 @@ def test_response_header_parser_rejects_duplicate_transfer_encoding() -> None:
     """重複 Transfer-Encoding header 不得被後值靜默覆蓋。"""
     raw_headers = (
         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n"
+    )
+
+    with pytest.raises(AppError) as exc_info:
+        _parse_response_headers(raw_headers)
+
+    assert exc_info.value.code == "upstream_media_invalid"
+
+
+def test_response_header_parser_rejects_duplicate_content_range() -> None:
+    """重複 Content-Range 不得被後值靜默覆蓋。"""
+    raw_headers = (
+        b"HTTP/1.1 206 Partial Content\r\n"
+        b"Content-Range: bytes 4-9/10\r\n"
+        b"Content-Range: bytes 4-9/10\r\n\r\n"
     )
 
     with pytest.raises(AppError) as exc_info:
@@ -1626,6 +1706,216 @@ async def test_media_client_pins_ip_and_preserves_tls_hostname(monkeypatch: Any)
     assert captured["args"][:2] == ("93.184.216.34", 443)
     assert captured["kwargs"]["server_hostname"] == "pbs.twimg.com"
     assert b"Host: pbs.twimg.com\r\n" in captured["writer"].writes[0]
+
+
+@pytest.mark.asyncio
+async def test_media_client_builds_internal_range_header(monkeypatch: Any) -> None:
+    """MediaClient 應只由內部 offset 建立 Range header。"""
+    policy = MediaDestinationPolicy(
+        allowed_exact_hosts=frozenset({"video.twimg.com"}),
+        allowed_suffixes=frozenset(),
+        resolver=public_resolver,
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_fetch_target(
+        _target: Any,
+        headers: dict[str, str],
+        *,
+        deadline: float | None,
+    ) -> MediaResponse:
+        """捕捉 normalized headers 並回傳受控 partial response。"""
+        captured["headers"] = dict(headers)
+        captured["deadline"] = deadline
+        return MediaResponse(
+            206,
+            {
+                "content-type": "video/mp4",
+                "content-range": "bytes 4-9/10",
+                "content-length": "6",
+            },
+            FakeResponseReader(b"efghij"),
+            FakeResponseWriter(),
+            max_bytes=100,
+        )
+
+    client = MediaClient(policy)
+    monkeypatch.setattr(client, "_fetch_target", fake_fetch_target)
+
+    response = await client.fetch(
+        "https://video.twimg.com/media/1.mp4",
+        headers={"User-Agent": "safe"},
+        range_start=4,
+    )
+
+    assert response.status_code == 206
+    assert captured["headers"] == {"User-Agent": "safe", "Range": "bytes=4-"}
+    assert captured["deadline"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header_name", ["Range", "range", "If-Range", "Authorization"])
+async def test_media_client_rejects_external_range_or_sensitive_header_injection(
+    header_name: str,
+) -> None:
+    """caller 不得注入 Range、If-Range 或 credentials header。"""
+    policy = MediaDestinationPolicy(
+        allowed_exact_hosts=frozenset({"video.twimg.com"}),
+        allowed_suffixes=frozenset(),
+        resolver=public_resolver,
+    )
+
+    with pytest.raises(AppError) as exc_info:
+        await MediaClient(policy).fetch(
+            "https://video.twimg.com/media/1.mp4",
+            headers={header_name: "bytes=0-"},
+            range_start=4,
+        )
+
+    assert exc_info.value.code == "extraction_failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("range_start", [-1, True, 1.5], ids=["negative", "boolean", "float"])
+async def test_media_client_rejects_invalid_internal_range_offset(range_start: Any) -> None:
+    """MediaClient 應拒絕非負整數以外的 internal Range offset。"""
+    policy = MediaDestinationPolicy(
+        allowed_exact_hosts=frozenset({"video.twimg.com"}),
+        allowed_suffixes=frozenset(),
+        resolver=public_resolver,
+    )
+
+    with pytest.raises(AppError) as exc_info:
+        await MediaClient(policy).fetch(
+            "https://video.twimg.com/media/1.mp4",
+            range_start=range_start,
+        )
+
+    assert exc_info.value.code == "upstream_media_invalid"
+
+
+@pytest.mark.asyncio
+async def test_media_client_revalidates_redirect_destination_for_range_request(
+    monkeypatch: Any,
+) -> None:
+    """Range request 的每一跳 redirect 都應重新驗證並保留內部 header。"""
+    addresses = {
+        "video.twimg.com": ipaddress.ip_address("93.184.216.34"),
+        "pbs.twimg.com": ipaddress.ip_address("93.184.216.35"),
+    }
+    policy = MediaDestinationPolicy(
+        allowed_exact_hosts=frozenset(addresses),
+        allowed_suffixes=frozenset(),
+        resolver=lambda host, _port: [addresses[host]],
+    )
+    responses = [
+        FakeResponseReader(
+            b"HTTP/1.1 302 Found\r\nLocation: https://pbs.twimg.com/media/1.mp4\r\n\r\n"
+        ),
+        FakeResponseReader(
+            b"HTTP/1.1 206 Partial Content\r\n"
+            b"Content-Type: video/mp4\r\n"
+            b"Content-Range: bytes 4-9/10\r\n"
+            b"Content-Length: 6\r\n\r\n",
+            b"efghij",
+        ),
+    ]
+    writers: list[FakeResponseWriter] = []
+
+    async def fake_open_connection(*_args: Any, **_kwargs: Any) -> tuple[Any, Any]:
+        """回傳 redirect 與 partial response，並保存每次 request writer。"""
+        writer = FakeResponseWriter()
+        writers.append(writer)
+        return responses.pop(0), writer
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open_connection)
+
+    response = await MediaClient(policy).fetch(
+        "https://video.twimg.com/media/1.mp4",
+        range_start=4,
+    )
+
+    assert response.status_code == 206
+    assert len(writers) == 2
+    assert all(b"Range: bytes=4-\r\n" in writer.writes[0] for writer in writers)
+
+
+def test_resume_accepts_matching_206_content_range() -> None:
+    """resume validator 應接受 offset、total、MIME 與長度都相符的 response。"""
+    response = MediaResponse(
+        206,
+        {
+            "content-type": "video/mp4 ; codecs=avc1",
+            "content-range": "bytes 4-9/10",
+            "content-length": "6",
+        },
+        FakeResponseReader(b"efghij"),
+        FakeResponseWriter(),
+        max_bytes=100,
+    )
+
+    parsed = validate_resume_response(
+        response,
+        requested_offset=4,
+        original_total_length=10,
+        original_content_type="video/mp4",
+    )
+
+    assert parsed == ParsedContentRange(start=4, end=9, total=10)
+
+
+@pytest.mark.parametrize(
+    ("status_code", "content_range", "content_length", "content_type"),
+    [
+        (200, "bytes 4-9/10", "6", "video/mp4"),
+        (206, None, "6", "video/mp4"),
+        (206, "bytes 5-9/10", "5", "video/mp4"),
+        (206, "bytes 4-8/10", "5", "video/mp4"),
+        (206, "bytes 4-9/11", "6", "video/mp4"),
+        (206, "bytes 4-9/10", "5", "video/mp4"),
+        (206, "bytes 4-9/10", "6", "video/webm"),
+        (206, "bytes 010-9/10", "0", "video/mp4"),
+    ],
+    ids=[
+        "status-200",
+        "missing-content-range",
+        "wrong-start",
+        "wrong-end",
+        "wrong-total",
+        "content-length-mismatch",
+        "mime-mismatch",
+        "invalid-content-range",
+    ],
+)
+def test_resume_rejects_invalid_response_proof(
+    status_code: int,
+    content_range: str | None,
+    content_length: str | None,
+    content_type: str,
+) -> None:
+    """resume validator 應在 body 拼接前拒絕所有不相符 response proof。"""
+    headers = {"content-type": content_type}
+    if content_range is not None:
+        headers["content-range"] = content_range
+    if content_length is not None:
+        headers["content-length"] = content_length
+    response = MediaResponse(
+        status_code,
+        headers,
+        FakeResponseReader(b"efghij"),
+        FakeResponseWriter(),
+        max_bytes=100,
+    )
+
+    with pytest.raises(AppError) as exc_info:
+        validate_resume_response(
+            response,
+            requested_offset=4,
+            original_total_length=10,
+            original_content_type="video/mp4",
+        )
+
+    assert exc_info.value.code == "upstream_media_invalid"
 
 
 @pytest.mark.asyncio
