@@ -356,11 +356,7 @@ class MediaClient:
         current_url = url
         request_headers = normalize_request_headers(headers or {})
         if range_start is not None:
-            if (
-                isinstance(range_start, bool)
-                or not isinstance(range_start, int)
-                or range_start < 0
-            ):
+            if isinstance(range_start, bool) or not isinstance(range_start, int) or range_start < 0:
                 raise AppError("upstream_media_invalid", "The media range offset is invalid.")
             request_headers = {
                 **request_headers,
@@ -679,8 +675,7 @@ def _add_normalized_header(headers: dict[str, str], name: str, value: str) -> No
         raise ValueError("invalid header field value")
     header_name = name.lower()
     if (
-        header_name
-        in {"content-length", "transfer-encoding", "content-encoding", "content-range"}
+        header_name in {"content-length", "transfer-encoding", "content-encoding", "content-range"}
         and header_name in headers
     ):
         raise ValueError("duplicate framing header")

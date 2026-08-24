@@ -94,9 +94,7 @@ class DeadlineStreamingResponse(StreamingResponse):
                 nonlocal response_started, response_completed
                 if message["type"] == "http.response.start":
                     response_started = True
-                if message["type"] == "http.response.body" and not message.get(
-                    "more_body", False
-                ):
+                if message["type"] == "http.response.body" and not message.get("more_body", False):
                     response_completed = True
 
             if self.send_timeout is None:

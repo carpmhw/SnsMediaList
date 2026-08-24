@@ -132,3 +132,18 @@ def test_operations_guide_documents_optional_story_file_workflow() -> None:
     assert re.search(r"repository.*(?:外|之外)", smoke_section)
     assert "尚未提供 Story 參數" not in smoke_section
     assert re.search(r"--instagram-story(?:[ =]|$)", smoke_section) is None
+
+
+def test_operations_guide_keeps_batch_ui_within_existing_limits() -> None:
+    """驗證操作文件不把前端批次功能誤導為提高伺服器併發的理由。"""
+    guide = (PROJECT_ROOT / "OPERATIONS.md").read_text(encoding="utf-8")
+
+    for required_text in (
+        "batch UI 不會改變 `SNS_MEDIA_MAX_EXTRACTIONS`",
+        "不是 server job queue",
+        "現有 download limits 與 rate limit",
+        "不得因 UI 批次功能任意提高 concurrency",
+        "已開始下載",
+        "不代表瀏覽器或 OS 已完成檔案保存",
+    ):
+        assert required_text in guide

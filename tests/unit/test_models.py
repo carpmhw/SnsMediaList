@@ -4,14 +4,14 @@ from sns_media_list.models import MediaItem, PrivateMediaRecord
 
 
 def test_public_media_model_excludes_private_fields() -> None:
-    """Verify upstream details cannot leak through the public model."""
+    """驗證公開媒體模型不會洩漏私有內容或裸 opaque token。"""
     media = MediaItem(
-        token="opaque",
         media_type="image",
         filename="x.jpg",
         download_url="/api/media/opaque/download",
     )
 
+    assert "token" not in media.model_dump()
     assert "source_url" not in media.model_dump()
     assert "request_headers" not in media.model_dump()
 
@@ -50,7 +50,6 @@ def test_private_preview_record_keeps_generation_mode_private() -> None:
     assert (
         "preview_mode"
         not in MediaItem(
-            token="opaque",
             media_type="video",
             filename="x.mp4",
             download_url="/api/media/opaque/download",

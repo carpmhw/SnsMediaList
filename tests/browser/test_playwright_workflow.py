@@ -235,10 +235,11 @@ def wait_for_loaded_previews(page: Page, count: int) -> None:
 class ExtractionServer:
     """Serve overlapping extraction responses with a controllable first response."""
 
-    def __init__(self, payloads: list[dict[str, Any]]) -> None:
+    def __init__(self, payloads: list[dict[str, Any]], statuses: list[int] | None = None) -> None:
         """Start a threaded extraction server using payloads in request order."""
         self._lock = Lock()
         self.payloads = payloads
+        self.statuses = statuses or [200]
         self.requests: list[str] = []
         self.first_started = Event()
         self.release_first = Event()
@@ -255,15 +256,18 @@ class ExtractionServer:
         """Return the local extraction server origin."""
         return f"http://127.0.0.1:{self.server.server_port}"
 
-    def response_for(self, url: str) -> dict[str, Any]:
-        """Record one extraction URL and return its ordered response payload."""
+    def response_for(self, url: str) -> tuple[int, dict[str, Any]]:
+        """Record one extraction URL and return its ordered status and payload."""
         with self._lock:
             index = len(self.requests)
             self.requests.append(url)
         if index == 0:
             self.first_started.set()
             self.release_first.wait(timeout=5)
-        return self.payloads[min(index, len(self.payloads) - 1)]
+        return (
+            self.statuses[min(index, len(self.statuses) - 1)],
+            self.payloads[min(index, len(self.payloads) - 1)],
+        )
 
     def close(self) -> None:
         """Stop the extraction server and release its delayed response."""
@@ -285,9 +289,9 @@ class ExtractionRequestHandler(SimpleHTTPRequestHandler):
         """Return the next extraction payload after recording its requested URL."""
         length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(length) or b"{}")
-        response_payload = self.state.response_for(str(payload.get("url", "")))
+        status, response_payload = self.state.response_for(str(payload.get("url", "")))
         body = json.dumps(response_payload).encode("utf-8")
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -408,6 +412,25 @@ def page() -> Generator[Page, None, None]:
             browser.close()
 
 
+@pytest.fixture
+def touch_page() -> Generator[Page, None, None]:
+    """建立具觸控能力的 Chromium context，供水平滑動互動測試使用。"""
+    with sync_playwright() as playwright:
+        browser = None
+        try:
+            browser = playwright.chromium.launch(headless=True)
+        except PlaywrightError as error:
+            pytest.skip(f"Chromium is unavailable: {error}")
+        assert browser is not None
+        context = browser.new_context(viewport={"width": 375, "height": 800}, has_touch=True)
+        browser_page = context.new_page()
+        try:
+            yield browser_page
+        finally:
+            context.close()
+            browser.close()
+
+
 def fulfill_json(route: Any, payload: dict[str, Any], *, status: int = 200) -> None:
     """Fulfill a mocked browser request with a JSON response."""
     route.fulfill(status=status, content_type="application/json", body=json.dumps(payload))
@@ -456,6 +479,7 @@ def test_submits_and_replaces_results(page: Page, base_url: str) -> None:
 
     expect(page.locator("#results-summary")).to_contain_text("1 個媒體項目已準備就緒")
     expect(page.locator(".media-card")).to_have_count(1)
+    expect(page.locator(".selection-toolbar")).to_have_count(1)
     grid_box = page.locator(".media-grid").bounding_box()
     card_box = page.locator(".media-card").bounding_box()
     assert grid_box is not None
@@ -663,13 +687,13 @@ def test_replacing_results_cancels_active_queued_and_delayed_preview_work(
     assert preview_server.attempts_for(retry_token) == 1
     assert preview_server.attempts_for(queued_token) == 0
     assert page.locator(".media-card").count() == 1
-    expect(page.locator(".media-index")).to_have_text("項目 01")
+    expect(page.locator(".media-visual .media-metadata")).to_contain_text("項目")
 
 
-def test_late_extraction_response_cannot_replace_a_newer_result(
+def test_unresolved_single_analysis_ignores_a_second_single_submit(
     page: Page, base_url: str, preview_server: PreviewServer
 ) -> None:
-    """Verify an older overlapping extraction response is ignored after a newer one."""
+    """驗證未完成的單筆分析會忽略第二次 submit，且原請求可正常完成。"""
     old_payload = build_preview_payload(
         [
             "/api/media/old-one/preview",
@@ -677,11 +701,10 @@ def test_late_extraction_response_cannot_replace_a_newer_result(
         ],
         post_number="old",
     )
-    new_payload = build_preview_payload(["/api/media/new-one/preview"], post_number="new")
-    extraction_server = ExtractionServer([old_payload, new_payload])
+    extraction_server = ExtractionServer([old_payload])
 
     def extraction(route: Any, request: Any) -> None:
-        """Rewrite overlapping extraction requests to the delayed local server."""
+        """將單筆 extraction 請求導向可延遲的本機 server。"""
         route_extraction_to_server(route, request, extraction_server)
 
     def preview(route: Any, request: Any) -> None:
@@ -697,21 +720,18 @@ def test_late_extraction_response_cannot_replace_a_newer_result(
 
     page.fill("#post-url", "https://x.com/creator/status/new")
     page.evaluate("document.querySelector('#extraction-form').requestSubmit()")
-    wait_for_condition(page, lambda: len(extraction_server.requests) == 2)
-    expect(page.locator("#results-summary")).to_contain_text("1 個媒體項目已準備就緒")
-    wait_for_loaded_previews(page, 1)
+    page.wait_for_timeout(150)
+    assert extraction_server.requests == ["https://x.com/creator/status/old"]
 
     extraction_server.release_first.set()
-    page.wait_for_timeout(250)
+    expect(page.locator("#results-summary")).to_contain_text("2 個媒體項目已準備就緒")
+    wait_for_loaded_previews(page, 2)
 
-    assert extraction_server.requests == [
-        "https://x.com/creator/status/old",
-        "https://x.com/creator/status/new",
-    ]
+    assert extraction_server.requests == ["https://x.com/creator/status/old"]
     expect(page.locator("#source-link")).to_have_attribute(
-        "href", "https://x.com/creator/status/new"
+        "href", "https://x.com/creator/status/old"
     )
-    assert preview_server.attempts_for("old-one") == 0
+    assert preview_server.attempts_for("old-one") == 1
 
 
 def test_story_submission_uses_existing_workflow(page: Page, base_url: str) -> None:
@@ -744,7 +764,7 @@ def test_story_submission_uses_existing_workflow(page: Page, base_url: str) -> N
     expect(page.locator("#results")).to_be_visible()
     expect(page.locator(".media-card")).to_have_count(1)
     expect(page.locator(".media-card")).to_be_visible()
-    expect(page.locator(".media-title")).to_have_text("圖片")
+    expect(page.locator(".media-metadata")).to_contain_text("圖片")
     expect(page.locator("#source-link")).to_be_visible()
     expect(page.locator("#source-link")).to_have_attribute("href", STORY_URL)
     assert submission_urls == [f"{base_url}/api/extractions"]
@@ -889,6 +909,329 @@ def test_x_video_download_saves_exact_attachment(
     assert download_request_methods == ["HEAD", "GET"]
 
 
+def test_group_selection_controls_and_download_in_source_order(page: Page, base_url: str) -> None:
+    """Verify one result group owns selection and starts native downloads in source order."""
+    payload = {
+        **SUCCESS_PAYLOAD,
+        "media": [
+            {
+                **SUCCESS_PAYLOAD["media"][0],
+                "token": "first",
+                "filename": "x-1-01.jpg",
+                "download_url": "/api/media/first/download",
+            },
+            {
+                **SUCCESS_PAYLOAD["media"][0],
+                "token": "second",
+                "media_type": "video",
+                "filename": "x-1-02.mp4",
+                "download_url": "/api/media/second/download",
+            },
+        ],
+    }
+    methods: list[str] = []
+
+    def extraction(route: Any, _request: Any) -> None:
+        """Return two deterministic downloadable media records."""
+        fulfill_json(route, payload)
+
+    def download(route: Any, request: Any) -> None:
+        """Record preflights while allowing browser-native anchor navigation."""
+        methods.append(f"{request.method}:{urlsplit(request.url).path}")
+        if request.method == "HEAD":
+            route.fulfill(status=204)
+        else:
+            route.fulfill(status=200, content_type="application/octet-stream", body=b"media")
+
+    page.route("**/api/extractions", extraction)
+    page.route("**/api/media/**/download", download)
+    page.goto(base_url)
+    page.fill("#post-url", "https://x.com/creator/status/1")
+    page.click("#analyze-button")
+
+    expect(page.locator(".media-selection")).to_have_count(2)
+    expect(page.get_by_role("button", name="下載選取項目")).to_be_disabled()
+    page.locator(".media-selection").nth(1).check()
+    expect(page.locator(".selection-summary")).to_contain_text("1 / 2")
+    page.get_by_role("button", name="全選", exact=True).click()
+    expect(page.get_by_role("button", name="下載選取項目")).to_be_enabled()
+    page.get_by_role("button", name="下載選取項目").click()
+
+    expect(page.locator(".download-summary")).to_contain_text("2 個下載已開始")
+    assert methods[:2] == ["HEAD:/api/media/first/download", "HEAD:/api/media/second/download"]
+
+
+def test_group_selection_filters_clear_and_replacement_reset(page: Page, base_url: str) -> None:
+    """Verify group selection filters, clearing, and replacement never retain stale items."""
+    payload = {
+        **SUCCESS_PAYLOAD,
+        "media": [
+            {**SUCCESS_PAYLOAD["media"][0], "token": "image"},
+            {
+                **SUCCESS_PAYLOAD["media"][0],
+                "token": "video",
+                "media_type": "video",
+                "filename": "x-1-02.mp4",
+            },
+        ],
+    }
+    requests = 0
+
+    def extraction(route: Any, _request: Any) -> None:
+        """Return a mixed-media result then a replacement result."""
+        nonlocal requests
+        requests += 1
+        fulfill_json(route, payload)
+
+    page.route("**/api/extractions", extraction)
+    page.set_viewport_size({"width": 320, "height": 800})
+    page.goto(base_url)
+    page.fill("#post-url", "https://x.com/creator/status/1")
+    page.click("#analyze-button")
+
+    page.get_by_role("button", name="只選圖片").click()
+    expect(page.locator(".selection-summary")).to_contain_text("1 / 2")
+    assert page.locator(".media-selection").nth(0).is_checked()
+    assert not page.locator(".media-selection").nth(1).is_checked()
+    page.get_by_role("button", name="只選影片").click()
+    assert not page.locator(".media-selection").nth(0).is_checked()
+    assert page.locator(".media-selection").nth(1).is_checked()
+    page.get_by_role("button", name="取消全選").click()
+    expect(page.locator(".selection-summary")).to_contain_text("0 / 2")
+    expect(page.get_by_role("button", name="下載選取項目")).to_be_disabled()
+
+    page.get_by_role("button", name="全選", exact=True).click()
+    page.fill("#post-url", "https://x.com/creator/status/2")
+    page.click("#analyze-button")
+
+    expect(page.locator(".selection-summary")).to_contain_text("0 / 2")
+    expect(page.get_by_role("button", name="下載選取項目")).to_be_disabled()
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    assert requests == 2
+
+
+def test_batch_download_paces_successes_and_continues_after_expired_token(
+    page: Page, base_url: str
+) -> None:
+    """Verify selected downloads remain ordered, paced, and recover safely after one failure."""
+    payload = {
+        **SUCCESS_PAYLOAD,
+        "media": [
+            {
+                **SUCCESS_PAYLOAD["media"][0],
+                "token": token,
+                "filename": f"x-1-{index:02d}.jpg",
+                "download_url": f"/api/media/{token}/download",
+            }
+            for index, token in enumerate(("first", "expired", "third"), start=1)
+        ],
+    }
+    requests: list[tuple[str, str, float]] = []
+
+    def extraction(route: Any, _request: Any) -> None:
+        """Return three source-ordered downloadable media records."""
+        fulfill_json(route, payload)
+
+    def download(route: Any, request: Any) -> None:
+        """Preflight two items successfully and expire the middle download reference."""
+        path = urlsplit(request.url).path
+        requests.append((request.method, path, time.monotonic()))
+        if request.method == "HEAD" and path == "/api/media/expired/download":
+            fulfill_json(route, {"code": "token_expired"}, status=410)
+        elif request.method == "HEAD":
+            route.fulfill(status=204)
+        else:
+            route.fulfill(
+                status=200,
+                headers={"Content-Disposition": 'attachment; filename="media.jpg"'},
+                body=b"media",
+            )
+
+    page.route("**/api/extractions", extraction)
+    page.route("**/api/media/**/download", download)
+    page.goto(base_url)
+    page.fill("#post-url", "https://x.com/creator/status/1")
+    page.click("#analyze-button")
+    page.get_by_role("button", name="全選", exact=True).click()
+    page.get_by_role("button", name="下載選取項目").click()
+
+    expect(page.locator(".download-summary")).to_contain_text("瀏覽器可能需要允許多檔下載")
+    expect(page.locator(".download-summary")).to_contain_text("2 個下載已開始，1 個無法啟動")
+    expect(page.locator(".re-analyze")).to_be_visible()
+    head_requests = [entry for entry in requests if entry[0] == "HEAD"]
+    assert [entry[1] for entry in head_requests] == [
+        "/api/media/first/download",
+        "/api/media/expired/download",
+        "/api/media/third/download",
+    ]
+    assert head_requests[1][2] - head_requests[0][2] >= 0.5
+    assert "opaque" not in page.locator("#status").inner_text()
+
+
+def test_selected_download_saves_exact_native_attachment(
+    page: Page,
+    base_url: str,
+    tmp_path: Path,
+    download_request_methods: list[str],
+) -> None:
+    """Verify selection downloads retain the API filename and complete attachment bytes."""
+
+    def extraction(route: Any, _request: Any) -> None:
+        """Return the deterministic video payload used by the local download server."""
+        fulfill_json(route, X_VIDEO_PAYLOAD)
+
+    page.route("**/api/extractions", extraction)
+    page.goto(base_url)
+    page.fill("#post-url", "https://x.com/creator/status/1")
+    page.click("#analyze-button")
+    page.locator(".media-selection").check()
+
+    with page.expect_download() as download_info:
+        page.get_by_role("button", name="下載選取項目").click()
+    browser_download = download_info.value
+    saved_path = tmp_path / browser_download.suggested_filename
+    browser_download.save_as(saved_path)
+
+    assert browser_download.suggested_filename == X_VIDEO_FILENAME
+    assert saved_path.read_bytes() == X_VIDEO_BYTES
+    expect(page.locator(".download-summary")).to_contain_text("1 個下載已開始，0 個無法啟動")
+    assert download_request_methods == ["HEAD", "GET"]
+
+
+def test_media_card_renders_available_structured_metadata(page: Page, base_url: str) -> None:
+    """Verify cards expose safe platform and author metadata from the extraction payload."""
+
+    def extraction(route: Any, _request: Any) -> None:
+        """Return the complete image metadata fixture."""
+        fulfill_json(route, SUCCESS_PAYLOAD)
+
+    page.route("**/api/extractions", extraction)
+    page.goto(base_url)
+    page.fill("#post-url", "https://x.com/creator/status/1")
+    page.click("#analyze-button")
+
+    metadata = page.locator(".media-metadata")
+    expect(metadata).to_contain_text("平台")
+    expect(metadata).to_contain_text("X")
+    expect(metadata).to_contain_text("作者")
+    expect(metadata).to_contain_text("creator")
+    expect(metadata).to_contain_text("1200 × 800")
+    expect(metadata).not_to_contain_text("undefined")
+
+
+def test_media_metadata_is_an_accessible_visual_overlay(page: Page, base_url: str) -> None:
+    """驗證結構化 metadata 位於縮圖浮層，並依桌機與手機互動條件顯示。"""
+
+    def extraction(route: Any, _request: Any) -> None:
+        """回傳含完整 metadata 的固定媒體項目。"""
+        fulfill_json(route, SUCCESS_PAYLOAD)
+
+    page.route("**/api/extractions", extraction)
+    page.set_viewport_size({"width": 1280, "height": 900})
+    page.goto(base_url)
+    page.fill("#post-url", "https://x.com/creator/status/1")
+    page.click("#analyze-button")
+
+    card = page.locator(".media-card")
+    visual = card.locator(".media-visual")
+    metadata = visual.locator(".media-metadata")
+    expect(metadata).to_contain_text("項目")
+    expect(metadata).to_contain_text("類型")
+    expect(metadata).to_contain_text("格式")
+    expect(metadata).to_contain_text("尺寸")
+    expect(metadata).to_contain_text("平台")
+    expect(metadata).to_contain_text("作者")
+    expect(card.locator(".media-body .media-metadata")).to_have_count(0)
+    assert metadata.evaluate("element => getComputedStyle(element).opacity") == "0"
+
+    visual.hover()
+    page.wait_for_timeout(200)
+    assert metadata.evaluate("element => getComputedStyle(element).opacity") == "1"
+
+    card.locator(".media-selection").focus()
+    page.wait_for_timeout(200)
+    assert metadata.evaluate("element => getComputedStyle(element).opacity") == "1"
+
+    page.set_viewport_size({"width": 640, "height": 900})
+    assert metadata.evaluate("element => getComputedStyle(element).opacity") == "1"
+
+
+def test_media_metadata_omits_invalid_values_and_formats_zero_duration(
+    page: Page, base_url: str
+) -> None:
+    """Verify unavailable metadata is omitted while a valid zero video duration remains visible."""
+    payload = {
+        **X_VIDEO_PAYLOAD,
+        "author": None,
+        "media": [{**X_VIDEO_PAYLOAD["media"][0], "width": None, "height": 1080, "duration": 0}],
+    }
+
+    def extraction(route: Any, _request: Any) -> None:
+        """Return a video with incomplete dimensions and zero duration."""
+        fulfill_json(route, payload)
+
+    page.route("**/api/extractions", extraction)
+    page.goto(base_url)
+    page.fill("#post-url", "https://x.com/creator/status/1")
+    page.click("#analyze-button")
+
+    metadata = page.locator(".media-metadata")
+    expect(metadata).to_contain_text("長度")
+    expect(metadata).to_contain_text("00:00")
+    expect(metadata).not_to_contain_text("尺寸")
+    expect(metadata).not_to_contain_text("作者")
+    expect(metadata).not_to_contain_text("null")
+    expect(metadata).not_to_contain_text("NaN")
+
+
+def test_media_metadata_formats_hour_duration(page: Page, base_url: str) -> None:
+    """Verify durations of at least one hour use the HH:MM:SS representation."""
+    payload = {**X_VIDEO_PAYLOAD, "media": [{**X_VIDEO_PAYLOAD["media"][0], "duration": 3723}]}
+
+    def extraction(route: Any, _request: Any) -> None:
+        """Return one video with an hour-scale duration."""
+        fulfill_json(route, payload)
+
+    page.route("**/api/extractions", extraction)
+    page.goto(base_url)
+    page.fill("#post-url", "https://x.com/creator/status/1")
+    page.click("#analyze-button")
+
+    expect(page.locator(".media-metadata")).to_contain_text("01:02:03")
+
+
+def test_copy_filename_reports_success_and_failure_without_disabling_download(
+    page: Page, base_url: str
+) -> None:
+    """Verify Clipboard outcomes are bounded and never affect the download control."""
+
+    def extraction(route: Any, _request: Any) -> None:
+        """Return a deterministic filename for the copy interaction."""
+        fulfill_json(route, SUCCESS_PAYLOAD)
+
+    page.route("**/api/extractions", extraction)
+    page.add_init_script(
+        """Object.defineProperty(navigator, 'clipboard', {
+          value: { writeText: () => Promise.resolve() }, configurable: true
+        });"""
+    )
+    page.goto(base_url)
+    page.fill("#post-url", "https://x.com/creator/status/1")
+    page.click("#analyze-button")
+    page.get_by_role("button", name="複製檔名").click()
+    expect(page.get_by_role("button", name="已複製檔名")).to_be_visible()
+    assert page.locator(".download-action").is_enabled()
+
+    page.evaluate(
+        """() => {
+          navigator.clipboard.writeText = () => Promise.reject(new Error('clipboard denied'));
+        }"""
+    )
+    page.get_by_role("button", name="已複製檔名").click()
+    expect(page.get_by_role("button", name="無法複製檔名")).to_be_visible()
+    assert page.locator(".download-action").is_enabled()
+
+
 def test_generated_preview_renders_and_failed_preview_uses_local_fallback(
     page: Page, base_url: str
 ) -> None:
@@ -966,6 +1309,769 @@ def test_mobile_layout_has_no_horizontal_overflow_and_supports_keyboard(
     assert card_box is not None
     assert abs(grid_box["width"] - card_box["width"]) <= 1
     assert extraction_calls == [{"url": "https://x.com/creator/status/1"}]
+
+
+def test_analysis_mode_switch_shows_only_the_selected_input_panel(
+    page: Page, base_url: str
+) -> None:
+    """Verify users can switch between preserved single and batch URL inputs."""
+    page.goto(base_url)
+
+    expect(page.locator("#single-mode-button")).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#batch-input-panel")).to_be_hidden()
+    page.fill("#post-url", "https://x.com/creator/status/1")
+    page.get_by_role("button", name="批次分析").click()
+    expect(page.locator("#batch-mode-button")).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#single-input-panel")).to_be_hidden()
+    expect(page.locator("#batch-input-panel")).to_be_visible()
+    page.fill("#batch-post-urls", "https://x.com/creator/status/2")
+    page.get_by_role("button", name="單筆分析").click()
+    expect(page.locator("#post-url")).to_have_value("https://x.com/creator/status/1")
+
+
+def test_batch_button_submits_each_parsed_url(page: Page, base_url: str) -> None:
+    """Verify batch analysis uses the existing extraction endpoint for each URL."""
+    submitted: list[str] = []
+
+    def extraction(route: Any, request: Any) -> None:
+        """Record each sequential client extraction request."""
+        submitted.append(json.loads(request.post_data or "{}")["url"])
+        fulfill_json(route, SUCCESS_PAYLOAD)
+
+    page.route("**/api/extractions", extraction)
+    page.goto(base_url)
+    page.get_by_role("button", name="批次分析").click()
+    page.fill("#batch-post-urls", "https://x.com/creator/status/1")
+    page.get_by_role("button", name="開始批次分析").click()
+
+    expect(page.locator("#status")).to_contain_text("準備就緒")
+    assert submitted == ["https://x.com/creator/status/1"]
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (" \n\t\n", "請至少輸入 1 個 URL"),
+        (
+            "\n".join(f"https://x.com/creator/status/{index}" for index in range(1, 7)),
+            "最多只能分析 5 個 URL",
+        ),
+    ],
+)
+def test_batch_parser_rejects_invalid_complete_input(
+    page: Page, base_url: str, value: str, message: str
+) -> None:
+    """Verify empty and over-limit batches never submit an extraction request."""
+    requests: list[str] = []
+
+    def extraction(route: Any, request: Any) -> None:
+        """Record unexpected client requests while returning a valid payload."""
+        requests.append(request.url)
+        fulfill_json(route, SUCCESS_PAYLOAD)
+
+    page.route("**/api/extractions", extraction)
+    page.goto(base_url)
+    page.get_by_role("button", name="批次分析").click()
+    page.fill("#batch-post-urls", value)
+    page.get_by_role("button", name="開始批次分析").click()
+
+    expect(page.locator("#status")).to_contain_text(message)
+    assert requests == []
+
+
+def test_batch_parser_trims_deduplicates_and_preserves_first_seen_order(
+    page: Page, base_url: str
+) -> None:
+    """Verify a valid mixed-platform batch submits at most five unique URLs in source order."""
+    submitted: list[str] = []
+    urls = [
+        "https://www.instagram.com/p/POST001/",
+        "https://x.com/creator/status/2",
+        "https://www.instagram.com/reel/REEL003/",
+        "https://x.com/creator/status/4",
+        "https://www.instagram.com/p/POST005/",
+    ]
+
+    def extraction(route: Any, request: Any) -> None:
+        """Record each parser-produced URL and return a stable success payload."""
+        submitted.append(json.loads(request.post_data or "{}")["url"])
+        fulfill_json(route, SUCCESS_PAYLOAD)
+
+    page.route("**/api/extractions", extraction)
+    page.goto(base_url)
+    page.get_by_role("button", name="批次分析").click()
+    page.fill(
+        "#batch-post-urls",
+        f"  {urls[0]}  \n\n{urls[1]}\n {urls[0]}\n{urls[2]}\n{urls[3]}\n{urls[4]} ",
+    )
+    page.get_by_role("button", name="開始批次分析").click()
+
+    expect(page.locator("#status")).to_contain_text("準備就緒")
+    assert submitted == urls
+
+
+def test_batch_queue_continues_after_a_mapped_item_error(page: Page, base_url: str) -> None:
+    """Verify a failed batch item does not prevent the next parsed URL from being analyzed."""
+    submitted: list[str] = []
+
+    def extraction(route: Any, request: Any) -> None:
+        """Return one bounded validation error between two successful responses."""
+        submitted.append(json.loads(request.post_data or "{}")["url"])
+        if len(submitted) == 2:
+            fulfill_json(route, {"code": "unsupported_url"}, status=400)
+        else:
+            fulfill_json(route, SUCCESS_PAYLOAD)
+
+    page.route("**/api/extractions", extraction)
+    page.goto(base_url)
+    page.get_by_role("button", name="批次分析").click()
+    page.fill(
+        "#batch-post-urls",
+        "https://x.com/creator/status/1\nhttps://invalid.example/post\nhttps://x.com/creator/status/3",
+    )
+    page.get_by_role("button", name="開始批次分析").click()
+
+    expect(page.locator("#status")).to_contain_text("準備就緒")
+    assert submitted == [
+        "https://x.com/creator/status/1",
+        "https://invalid.example/post",
+        "https://x.com/creator/status/3",
+    ]
+
+
+def test_batch_item_disables_competing_extraction_actions(page: Page, base_url: str) -> None:
+    """Verify a running batch item prevents every other extraction entry point from submitting."""
+    extraction_server = ExtractionServer([SUCCESS_PAYLOAD])
+
+    def extraction(route: Any, request: Any) -> None:
+        """Route API requests to the controllable delayed extraction server."""
+        route_extraction_to_server(route, request, extraction_server)
+
+    page.route("**/api/extractions", extraction)
+    try:
+        page.goto(base_url)
+        page.get_by_role("button", name="批次分析").click()
+        page.fill("#batch-post-urls", "https://x.com/creator/status/1")
+        page.get_by_role("button", name="開始批次分析").click()
+        wait_for_condition(page, lambda: len(extraction_server.requests) == 1)
+
+        expect(page.locator("#analyze-button")).to_be_disabled()
+        expect(page.locator("#analyze-batch-button")).to_be_disabled()
+        page.get_by_role("button", name="單筆分析").click()
+        page.fill("#post-url", "https://x.com/creator/status/2")
+        assert page.locator("#analyze-button").is_disabled()
+        assert len(extraction_server.requests) == 1
+    finally:
+        extraction_server.close()
+
+
+def test_single_analysis_blocks_batch_until_its_request_settles(page: Page, base_url: str) -> None:
+    """驗證單筆未完成時不能啟動批次，成功後會恢復有效控制項。"""
+    extraction_server = ExtractionServer([SUCCESS_PAYLOAD])
+
+    def extraction(route: Any, request: Any) -> None:
+        """將單筆與批次請求都導向可延遲的 extraction server。"""
+        route_extraction_to_server(route, request, extraction_server)
+
+    page.route("**/api/extractions", extraction)
+    try:
+        page.goto(base_url)
+        page.fill("#post-url", "https://x.com/creator/status/1")
+        page.click("#analyze-button")
+        wait_for_condition(page, lambda: len(extraction_server.requests) == 1)
+
+        expect(page.locator("#analyze-batch-button")).to_be_disabled()
+        page.get_by_role("button", name="批次分析").click()
+        page.fill("#batch-post-urls", "https://x.com/creator/status/2")
+        assert page.locator("#analyze-batch-button").is_disabled()
+        assert len(extraction_server.requests) == 1
+
+        extraction_server.release_first.set()
+        expect(page.locator("#analyze-batch-button")).to_be_enabled()
+        page.get_by_role("button", name="開始批次分析").click()
+        wait_for_condition(page, lambda: len(extraction_server.requests) == 2)
+    finally:
+        extraction_server.close()
+
+
+def test_group_recovery_blocks_other_starts_until_a_mapped_error(page: Page, base_url: str) -> None:
+    """驗證群組 recovery 未完成時互斥，mapped error 後會釋放有效控制項。"""
+    recovery_server = ExtractionServer([{"code": "extraction_timeout"}], [504])
+    extraction_calls = 0
+
+    def extraction(route: Any, request: Any) -> None:
+        """首次回傳結果，第二次 recovery 則延遲並回傳 mapped error。"""
+        nonlocal extraction_calls
+        extraction_calls += 1
+        if extraction_calls == 1:
+            fulfill_json(route, SUCCESS_PAYLOAD)
+            return
+        route_extraction_to_server(route, request, recovery_server)
+
+    def expired_download(route: Any, _request: Any) -> None:
+        """以 token 過期回應顯示群組局部 recovery 控制項。"""
+        fulfill_json(route, {"code": "token_expired"}, status=410)
+
+    page.route("**/api/extractions", extraction)
+    page.route("**/api/media/opaque-download/download", expired_download)
+    try:
+        page.goto(base_url)
+        page.fill("#post-url", "https://x.com/creator/status/1")
+        page.click("#analyze-button")
+        page.get_by_role("button", name="下載", exact=True).click()
+        page.get_by_role("button", name="重新分析此項").click()
+        wait_for_condition(page, lambda: len(recovery_server.requests) == 1)
+
+        expect(page.locator("#analyze-button")).to_be_disabled()
+        expect(page.locator("#analyze-batch-button")).to_be_disabled()
+        assert extraction_calls == 2
+
+        recovery_server.release_first.set()
+        expect(page.locator("#status")).to_contain_text("平台回應時間過長")
+        expect(page.locator("#analyze-button")).to_be_enabled()
+        expect(page.locator("#analyze-batch-button")).to_be_enabled()
+    finally:
+        recovery_server.close()
+
+
+def test_stop_queue_allows_running_item_and_skips_pending_items(page: Page, base_url: str) -> None:
+    """Verify stopping a batch waits for its running request but never starts pending URLs."""
+    extraction_server = ExtractionServer([SUCCESS_PAYLOAD])
+
+    def extraction(route: Any, request: Any) -> None:
+        """Route batch requests to a server whose first response is held open."""
+        route_extraction_to_server(route, request, extraction_server)
+
+    page.route("**/api/extractions", extraction)
+    try:
+        page.goto(base_url)
+        page.get_by_role("button", name="批次分析").click()
+        page.fill(
+            "#batch-post-urls",
+            "https://x.com/creator/status/1\nhttps://x.com/creator/status/2",
+        )
+        page.get_by_role("button", name="開始批次分析").click()
+        wait_for_condition(page, lambda: len(extraction_server.requests) == 1)
+        page.get_by_role("button", name="停止批次分析").click()
+        extraction_server.release_first.set()
+        expect(page.locator("#analyze-button")).to_be_enabled()
+        expect(page.locator("#analyze-batch-button")).to_be_enabled()
+
+        assert len(extraction_server.requests) == 1
+    finally:
+        extraction_server.close()
+
+
+def test_queue_progress_exposes_running_success_and_stopped_lifecycle(
+    page: Page, base_url: str
+) -> None:
+    """驗證 queue 會公告執行中、成功與停止的獨立項目生命週期。"""
+    extraction_server = ExtractionServer([SUCCESS_PAYLOAD])
+
+    def extraction(route: Any, request: Any) -> None:
+        """將第一筆 queue request 保持未完成以觀察停止前後狀態。"""
+        route_extraction_to_server(route, request, extraction_server)
+
+    page.route("**/api/extractions", extraction)
+    try:
+        page.goto(base_url)
+        page.get_by_role("button", name="批次分析").click()
+        page.fill(
+            "#batch-post-urls",
+            "https://x.com/creator/status/1\nhttps://x.com/creator/status/2",
+        )
+        page.get_by_role("button", name="開始批次分析").click()
+        wait_for_condition(page, lambda: len(extraction_server.requests) == 1)
+
+        expect(page.locator("#queue-progress")).to_contain_text("0 / 2")
+        expect(page.locator(".queue-item").nth(0)).to_contain_text("執行中")
+        expect(page.locator(".queue-item").nth(1)).to_contain_text("等待中")
+        page.get_by_role("button", name="停止批次分析").click()
+        expect(page.locator(".queue-item").nth(1)).to_contain_text("已停止")
+        expect(page.locator("#queue-progress")).to_contain_text("1 項已停止")
+
+        extraction_server.release_first.set()
+        expect(page.locator(".queue-item").nth(0)).to_contain_text("成功")
+        expect(page.locator("#queue-progress")).to_contain_text("1 / 2")
+        assert extraction_server.requests == ["https://x.com/creator/status/1"]
+    finally:
+        extraction_server.close()
+
+
+def test_batch_results_remain_as_independent_groups(page: Page, base_url: str) -> None:
+    """Verify successful batch items remain visible as separate result groups."""
+    calls = 0
+
+    def extraction(route: Any, _request: Any) -> None:
+        """Return a distinct payload for each sequential batch request."""
+        nonlocal calls
+        calls += 1
+        fulfill_json(route, {**SUCCESS_PAYLOAD, "description": f"Batch {calls}"})
+
+    page.route("**/api/extractions", extraction)
+    page.goto(base_url)
+    page.get_by_role("button", name="批次分析").click()
+    page.fill("#batch-post-urls", "https://x.com/creator/status/1\nhttps://x.com/creator/status/2")
+    page.get_by_role("button", name="開始批次分析").click()
+
+    expect(page.locator(".result-group")).to_have_count(2)
+
+
+def test_batch_result_groups_use_a_keyboard_navigable_scroll_snap_track(
+    page: Page, base_url: str
+) -> None:
+    """驗證批次結果在窄螢幕使用可鍵盤操作的水平 scroll-snap 軌道。"""
+    calls = 0
+
+    def extraction(route: Any, _request: Any) -> None:
+        """依序回傳三個結果以建立可滑動的群組軌道。"""
+        nonlocal calls
+        calls += 1
+        fulfill_json(route, {**SUCCESS_PAYLOAD, "description": f"Batch {calls}"})
+
+    page.route("**/api/extractions", extraction)
+    page.set_viewport_size({"width": 320, "height": 800})
+    page.goto(base_url)
+    page.get_by_role("button", name="批次分析").click()
+    page.fill(
+        "#batch-post-urls",
+        "https://x.com/creator/status/1\nhttps://x.com/creator/status/2\nhttps://x.com/creator/status/3",
+    )
+    page.get_by_role("button", name="開始批次分析").click()
+
+    groups = page.locator(".result-group")
+    expect(groups).to_have_count(3)
+    expect(page.locator("#result-groups")).to_have_css("scroll-snap-type", "x mandatory")
+    expect(page.get_by_role("status", name="結果群組位置")).to_have_text("第 1/3 組")
+    expect(page.get_by_role("button", name="上一組結果")).to_be_disabled()
+    page.get_by_role("button", name="下一組結果").press("Enter")
+    expect(page.get_by_role("status", name="結果群組位置")).to_have_text("第 2/3 組")
+    expect(page.get_by_role("button", name="上一組結果")).to_be_enabled()
+    page.locator("#result-groups").evaluate("element => element.scrollTo({ left: element.scrollWidth })")
+    expect(page.get_by_role("status", name="結果群組位置")).to_have_text("第 3/3 組")
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+
+
+def test_desktop_result_group_navigation_buttons_are_visible_and_operable(
+    page: Page, base_url: str
+) -> None:
+    """驗證桌面版可見的前後群組按鈕能切換位置摘要。"""
+    calls = 0
+
+    def extraction(route: Any, _request: Any) -> None:
+        """依序回傳三個結果群組供桌面導覽操作。"""
+        nonlocal calls
+        calls += 1
+        fulfill_json(route, {**SUCCESS_PAYLOAD, "description": f"Desktop {calls}"})
+
+    page.route("**/api/extractions", extraction)
+    page.set_viewport_size({"width": 1280, "height": 900})
+    page.goto(base_url)
+    page.get_by_role("button", name="批次分析").click()
+    page.fill(
+        "#batch-post-urls",
+        "https://x.com/creator/status/1\nhttps://x.com/creator/status/2\nhttps://x.com/creator/status/3",
+    )
+    page.get_by_role("button", name="開始批次分析").click()
+
+    expect(page.get_by_role("button", name="上一組結果")).to_be_visible()
+    expect(page.get_by_role("button", name="下一組結果")).to_be_visible()
+    page.get_by_role("button", name="下一組結果").click()
+    expect(page.get_by_role("status", name="結果群組位置")).to_have_text("第 2/3 組")
+    page.get_by_role("button", name="上一組結果").click()
+    expect(page.get_by_role("status", name="結果群組位置")).to_have_text("第 1/3 組")
+
+
+def test_touch_scroll_updates_result_group_position_summary(touch_page: Page, base_url: str) -> None:
+    """驗證觸控 context 的水平滑動會更新目前結果群組摘要。"""
+    calls = 0
+
+    def extraction(route: Any, _request: Any) -> None:
+        """依序回傳三個結果群組供觸控滑動測試。"""
+        nonlocal calls
+        calls += 1
+        fulfill_json(route, {**SUCCESS_PAYLOAD, "description": f"Touch {calls}"})
+
+    touch_page.route("**/api/extractions", extraction)
+    touch_page.goto(base_url)
+    assert touch_page.evaluate("matchMedia('(pointer: coarse)').matches")
+    touch_page.get_by_role("button", name="批次分析").click()
+    touch_page.fill(
+        "#batch-post-urls",
+        "https://x.com/creator/status/1\nhttps://x.com/creator/status/2\nhttps://x.com/creator/status/3",
+    )
+    touch_page.get_by_role("button", name="開始批次分析").click()
+
+    expect(touch_page.get_by_role("status", name="結果群組位置")).to_have_text("第 1/3 組")
+    touch_page.locator("#result-groups").dispatch_event(
+        "pointerdown", {"pointerType": "touch", "pointerId": 1, "clientX": 300}
+    )
+    touch_page.locator("#result-groups").evaluate(
+        "element => element.scrollBy({ left: element.clientWidth })"
+    )
+    touch_page.locator("#result-groups").dispatch_event(
+        "pointermove", {"pointerType": "touch", "pointerId": 1, "clientX": 40}
+    )
+    touch_page.locator("#result-groups").dispatch_event(
+        "pointerup", {"pointerType": "touch", "pointerId": 1, "clientX": 40}
+    )
+    expect(touch_page.get_by_role("status", name="結果群組位置")).to_have_text("第 2/3 組")
+
+
+def test_batch_result_group_selection_is_isolated(page: Page, base_url: str) -> None:
+    """驗證批次結果群組的選取控制項不會影響其他群組。"""
+    calls = 0
+
+    def extraction(route: Any, _request: Any) -> None:
+        """依序回傳兩個可辨識的成功結果群組。"""
+        nonlocal calls
+        calls += 1
+        fulfill_json(route, {**SUCCESS_PAYLOAD, "description": f"Batch {calls}"})
+
+    page.route("**/api/extractions", extraction)
+    page.goto(base_url)
+    page.get_by_role("button", name="批次分析").click()
+    page.fill("#batch-post-urls", "https://x.com/creator/status/1\nhttps://x.com/creator/status/2")
+    page.get_by_role("button", name="開始批次分析").click()
+
+    groups = page.locator(".result-group")
+    expect(groups).to_have_count(2)
+    groups.nth(0).get_by_role("button", name="全選", exact=True).click()
+
+    expect(groups.nth(0).locator(".selection-summary")).to_contain_text("1 / 1")
+    expect(groups.nth(1).locator(".selection-summary")).to_contain_text("0 / 1")
+    expect(groups.nth(0).get_by_role("button", name="下載選取項目")).to_be_enabled()
+    expect(groups.nth(1).get_by_role("button", name="下載選取項目")).to_be_disabled()
+
+
+def test_batch_result_groups_share_the_global_preview_coordinator(
+    page: Page, base_url: str, preview_server: PreviewServer
+) -> None:
+    """驗證不同批次結果群組的 opaque 預覽仍維持全域單一併發。"""
+    payloads = [
+        build_preview_payload(["/api/media/first-group/preview"], post_number="1"),
+        build_preview_payload(["/api/media/second-group/preview"], post_number="2"),
+    ]
+    calls = 0
+
+    def extraction(route: Any, _request: Any) -> None:
+        """依批次順序回傳各自帶有 opaque 預覽的結果。"""
+        nonlocal calls
+        fulfill_json(route, payloads[calls])
+        calls += 1
+
+    def preview(route: Any, request: Any) -> None:
+        """將 opaque 預覽改導向可觀測併發的本機伺服器。"""
+        route_preview_to_server(route, request, preview_server)
+
+    page.route("**/api/extractions", extraction)
+    page.route("**/api/media/**/preview**", preview)
+    page.goto(base_url)
+    page.get_by_role("button", name="批次分析").click()
+    page.fill("#batch-post-urls", "https://x.com/creator/status/1\nhttps://x.com/creator/status/2")
+    page.get_by_role("button", name="開始批次分析").click()
+
+    expect(page.locator(".result-group")).to_have_count(2)
+    wait_for_loaded_previews(page, 2)
+    assert preview_server.max_active == 1
+    assert preview_server.started_tokens == ["first-group", "second-group"]
+
+
+def test_reanalyzing_one_batch_group_preserves_another_group(page: Page, base_url: str) -> None:
+    """驗證重新分析一個批次群組時，其他群組的內容與選取狀態保持不變。"""
+    initial_payloads = [
+        {**SUCCESS_PAYLOAD, "description": "Group A", "post_url": "https://x.com/creator/status/1"},
+        {**SUCCESS_PAYLOAD, "description": "Group B", "post_url": "https://x.com/creator/status/2"},
+    ]
+    refreshed_payload = {
+        **SUCCESS_PAYLOAD,
+        "description": "Refreshed A",
+        "post_url": "https://x.com/creator/status/1",
+    }
+    extraction_calls = 0
+
+    def extraction(route: Any, _request: Any) -> None:
+        """依序回傳兩個初始群組與第一群組的新 payload。"""
+        nonlocal extraction_calls
+        payload = initial_payloads[extraction_calls] if extraction_calls < 2 else refreshed_payload
+        extraction_calls += 1
+        fulfill_json(route, payload)
+
+    def expired_download(route: Any, _request: Any) -> None:
+        """以安全的過期 token 回應觸發群組局部重新分析。"""
+        fulfill_json(route, {"code": "token_expired"}, status=410)
+
+    page.route("**/api/extractions", extraction)
+    page.route("**/api/media/opaque-download/download", expired_download)
+    page.goto(base_url)
+    page.get_by_role("button", name="批次分析").click()
+    page.fill("#batch-post-urls", "https://x.com/creator/status/1\nhttps://x.com/creator/status/2")
+    page.get_by_role("button", name="開始批次分析").click()
+
+    groups = page.locator(".result-group")
+    expect(groups).to_have_count(2)
+    groups.nth(1).locator(".media-selection").check()
+    groups.nth(0).get_by_role("button", name="下載", exact=True).click()
+    groups.nth(0).get_by_role("button", name="重新分析此項").click()
+
+    expect(groups.nth(0).locator(".post-description")).to_have_text("Refreshed A")
+    expect(groups.nth(0).locator(".selection-summary")).to_contain_text("0 / 1")
+    expect(groups.nth(1).locator(".post-description")).to_have_text("Group B")
+    assert groups.nth(1).locator(".media-selection").is_checked()
+    assert extraction_calls == 3
+
+
+@pytest.mark.parametrize("token_error", ["token_expired", "token_not_found"])
+def test_group_recovery_is_hidden_until_a_token_failure(
+    page: Page, base_url: str, token_error: str
+) -> None:
+    """驗證群組只在下載參照失效後顯示局部重新分析操作。"""
+
+    def extraction(route: Any, _request: Any) -> None:
+        """回傳一個可下載的結果群組。"""
+        fulfill_json(route, SUCCESS_PAYLOAD)
+
+    def failed_download(route: Any, _request: Any) -> None:
+        """回傳指定的安全 token 失效錯誤。"""
+        fulfill_json(route, {"code": token_error}, status=410)
+
+    page.route("**/api/extractions", extraction)
+    page.route("**/api/media/opaque-download/download", failed_download)
+    page.goto(base_url)
+    page.fill("#post-url", "https://x.com/creator/status/1")
+    page.click("#analyze-button")
+
+    group = page.locator(".result-group")
+    expect(group.locator(".group-recovery .re-analyze")).to_have_count(0)
+    group.get_by_role("button", name="下載", exact=True).click()
+    expect(group.get_by_role("button", name="重新分析此項")).to_be_visible()
+
+
+def test_group_recovery_replaces_only_target_clears_its_selection_and_does_not_rerun_batch(
+    page: Page, base_url: str
+) -> None:
+    """驗證成功 recovery 只更新目標群組、清空其選取且不重送批次項目。"""
+    initial_payloads = [
+        {**SUCCESS_PAYLOAD, "description": "Group A", "post_url": "https://x.com/creator/status/1"},
+        {**SUCCESS_PAYLOAD, "description": "Group B", "post_url": "https://x.com/creator/status/2"},
+    ]
+    refreshed_payload = {
+        **SUCCESS_PAYLOAD,
+        "description": "Refreshed B",
+        "post_url": "https://x.com/creator/status/2",
+    }
+    submitted: list[str] = []
+
+    def extraction(route: Any, request: Any) -> None:
+        """依請求順序回傳兩個 batch 結果與第二組的更新結果。"""
+        submitted.append(json.loads(request.post_data or "{}")["url"])
+        payloads = [*initial_payloads, refreshed_payload]
+        fulfill_json(route, payloads[len(submitted) - 1])
+
+    def expired_download(route: Any, _request: Any) -> None:
+        """讓第二個群組的下載預檢要求重新分析。"""
+        fulfill_json(route, {"code": "token_expired"}, status=410)
+
+    page.route("**/api/extractions", extraction)
+    page.route("**/api/media/opaque-download/download", expired_download)
+    page.goto(base_url)
+    page.get_by_role("button", name="批次分析").click()
+    page.fill("#batch-post-urls", "https://x.com/creator/status/1\nhttps://x.com/creator/status/2")
+    page.get_by_role("button", name="開始批次分析").click()
+
+    groups = page.locator(".result-group")
+    expect(groups).to_have_count(2)
+    groups.nth(0).locator(".media-selection").check()
+    groups.nth(1).locator(".media-selection").check()
+    groups.nth(1).get_by_role("button", name="下載", exact=True).click()
+    groups.nth(1).get_by_role("button", name="重新分析此項").click()
+
+    expect(groups.nth(1).locator(".post-description")).to_have_text("Refreshed B")
+    expect(groups.nth(1).locator(".selection-summary")).to_contain_text("0 / 1")
+    assert not groups.nth(1).locator(".media-selection").is_checked()
+    expect(groups.nth(0).locator(".post-description")).to_have_text("Group A")
+    assert groups.nth(0).locator(".media-selection").is_checked()
+    assert submitted == [
+        "https://x.com/creator/status/1",
+        "https://x.com/creator/status/2",
+        "https://x.com/creator/status/2",
+    ]
+
+
+def test_failed_group_recovery_keeps_other_batch_groups_available(
+    page: Page, base_url: str
+) -> None:
+    """驗證局部重新分析失敗時，其他群組仍可保留並繼續操作。"""
+    initial_payloads = [
+        {**SUCCESS_PAYLOAD, "description": "Group A", "post_url": "https://x.com/creator/status/1"},
+        {**SUCCESS_PAYLOAD, "description": "Group B", "post_url": "https://x.com/creator/status/2"},
+    ]
+    requests = 0
+
+    def extraction(route: Any, _request: Any) -> None:
+        """先回傳兩個 batch 結果，再讓目標 recovery 回傳安全錯誤。"""
+        nonlocal requests
+        requests += 1
+        if requests <= 2:
+            fulfill_json(route, initial_payloads[requests - 1])
+        else:
+            fulfill_json(route, {"code": "extraction_timeout"}, status=504)
+
+    def missing_download(route: Any, _request: Any) -> None:
+        """以遺失 token 觸發第一組的局部 recovery。"""
+        fulfill_json(route, {"code": "token_not_found"}, status=404)
+
+    page.route("**/api/extractions", extraction)
+    page.route("**/api/media/opaque-download/download", missing_download)
+    page.goto(base_url)
+    page.get_by_role("button", name="批次分析").click()
+    page.fill("#batch-post-urls", "https://x.com/creator/status/1\nhttps://x.com/creator/status/2")
+    page.get_by_role("button", name="開始批次分析").click()
+
+    groups = page.locator(".result-group")
+    expect(groups).to_have_count(2)
+    groups.nth(1).locator(".media-selection").check()
+    groups.nth(0).get_by_role("button", name="下載", exact=True).click()
+    groups.nth(0).get_by_role("button", name="重新分析此項").click()
+
+    expect(page.locator("#status")).to_contain_text("平台回應時間過長")
+    expect(groups).to_have_count(2)
+    expect(groups.nth(0).locator(".post-description")).to_have_text("Group A")
+    expect(groups.nth(1).locator(".post-description")).to_have_text("Group B")
+    assert groups.nth(1).locator(".media-selection").is_checked()
+    assert groups.nth(1).get_by_role("button", name="下載選取項目").is_enabled()
+
+
+def test_failed_group_recovery_shows_a_safe_error_in_only_the_target_group(
+    page: Page, base_url: str
+) -> None:
+    """驗證 recovery 失敗的安全錯誤只會保留在目標群組的 live status。"""
+    initial_payloads = [
+        {**SUCCESS_PAYLOAD, "description": "Group A", "post_url": "https://x.com/creator/status/1"},
+        {**SUCCESS_PAYLOAD, "description": "Group B", "post_url": "https://x.com/creator/status/2"},
+    ]
+    requests = 0
+
+    def extraction(route: Any, _request: Any) -> None:
+        """先建立兩個群組，再讓第一組 recovery 回傳安全逾時錯誤。"""
+        nonlocal requests
+        requests += 1
+        if requests <= 2:
+            fulfill_json(route, initial_payloads[requests - 1])
+        else:
+            fulfill_json(
+                route,
+                {"code": "extraction_timeout", "message": "hidden raw detail"},
+                status=504,
+            )
+
+    def missing_download(route: Any, _request: Any) -> None:
+        """以遺失下載參照觸發第一個結果群組的局部 recovery。"""
+        fulfill_json(route, {"code": "token_not_found"}, status=404)
+
+    page.route("**/api/extractions", extraction)
+    page.route("**/api/media/opaque-download/download", missing_download)
+    page.goto(base_url)
+    page.get_by_role("button", name="批次分析").click()
+    page.fill("#batch-post-urls", "https://x.com/creator/status/1\nhttps://x.com/creator/status/2")
+    page.get_by_role("button", name="開始批次分析").click()
+
+    groups = page.locator(".result-group")
+    expect(groups).to_have_count(2)
+    expect(groups.nth(0).locator(".source-link")).to_have_attribute(
+        "href", "https://x.com/creator/status/1"
+    )
+    expect(groups.nth(0).locator(".results-summary")).to_contain_text("1 個媒體項目")
+    expect(groups.nth(0).locator(".warning")).to_contain_text("1 個媒體項目無法")
+    groups.nth(0).get_by_role("button", name="下載", exact=True).click()
+    groups.nth(0).get_by_role("button", name="重新分析此項").click()
+
+    expect(groups.nth(0).locator(".group-error")).to_contain_text("平台回應時間過長")
+    expect(groups.nth(0).locator(".group-error")).not_to_contain_text("hidden raw detail")
+    expect(groups.nth(1).locator(".group-error")).to_be_hidden()
+    expect(groups.nth(1).locator(".group-error")).to_have_text("")
+    expect(groups.nth(0).locator(".group-status[data-state]")).to_have_attribute(
+        "aria-live", "polite"
+    )
+
+
+@pytest.mark.parametrize("viewport_width", [320, 375, 768])
+def test_batch_groups_have_no_horizontal_overflow_at_supported_widths(
+    page: Page, base_url: str, viewport_width: int
+) -> None:
+    """驗證批次 queue 與群組結果在指定窄螢幕寬度都不會造成水平捲動。"""
+
+    def extraction(route: Any, _request: Any) -> None:
+        """回傳帶有長描述的安全資料以覆蓋可換行的群組內容。"""
+        fulfill_json(route, {**SUCCESS_PAYLOAD, "description": "長描述 " * 80})
+
+    page.route("**/api/extractions", extraction)
+    page.set_viewport_size({"width": viewport_width, "height": 900})
+    page.goto(base_url)
+    page.get_by_role("button", name="批次分析").click()
+    page.fill("#batch-post-urls", "https://x.com/creator/status/1\nhttps://x.com/creator/status/2")
+    page.get_by_role("button", name="開始批次分析").click()
+
+    expect(page.locator(".result-group")).to_have_count(2)
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+
+
+def test_stale_preview_after_group_replacement_cannot_mutate_other_groups(
+    page: Page, base_url: str, preview_server: PreviewServer
+) -> None:
+    """驗證被替換群組的舊 preview callback 不會改動新群組或其他群組。"""
+    old_preview = "old-group-preview"
+    preview_server.blocked_tokens.add(old_preview)
+    initial_payloads = [
+        build_preview_payload([f"/api/media/{old_preview}/preview"], post_number="1"),
+        build_preview_payload(["/placeholder.svg"], post_number="2"),
+    ]
+    initial_payloads[0]["description"] = "Old Group A"
+    initial_payloads[1] = build_preview_payload(
+        ["/api/media/group-b-preview/preview"], post_number="2"
+    )
+    initial_payloads[1]["description"] = "Group B"
+    refreshed_payload = build_preview_payload(["/placeholder.svg"], post_number="1")
+    refreshed_payload["description"] = "Refreshed Group A"
+    extraction_calls = 0
+
+    def extraction(route: Any, _request: Any) -> None:
+        """依序回傳舊 A、穩定 B 與替換後 A 的結果。"""
+        nonlocal extraction_calls
+        payloads = [*initial_payloads, refreshed_payload]
+        fulfill_json(route, payloads[extraction_calls])
+        extraction_calls += 1
+
+    def preview(route: Any, request: Any) -> None:
+        """將舊 A 的 opaque preview 導向可控的延遲回應。"""
+        route_preview_to_server(route, request, preview_server)
+
+    def expired_download(route: Any, _request: Any) -> None:
+        """以過期 token 建立群組局部替換操作。"""
+        fulfill_json(route, {"code": "token_expired"}, status=410)
+
+    page.route("**/api/extractions", extraction)
+    page.route("**/api/media/**/preview**", preview)
+    page.route("**/api/media/download-1-1/download", expired_download)
+    page.goto(base_url)
+    page.get_by_role("button", name="批次分析").click()
+    page.fill("#batch-post-urls", "https://x.com/creator/status/1\nhttps://x.com/creator/status/2")
+    page.get_by_role("button", name="開始批次分析").click()
+
+    groups = page.locator(".result-group")
+    expect(groups).to_have_count(2)
+    wait_for_condition(page, lambda: preview_server.attempts_for(old_preview) == 1)
+    groups.nth(0).get_by_role("button", name="下載", exact=True).click()
+    groups.nth(0).get_by_role("button", name="重新分析此項").click()
+    expect(groups.nth(0).locator(".post-description")).to_have_text("Refreshed Group A")
+    wait_for_condition(page, lambda: preview_server.attempts_for("group-b-preview") == 1)
+    preview_server.release.set()
+    page.wait_for_timeout(150)
+
+    assert preview_server.attempts_for(old_preview) == 1
+    assert preview_server.attempts_for("group-b-preview") == 1
+    expect(groups.nth(1).locator(".post-description")).to_have_text("Group B")
+    expect(groups.nth(1).locator(".media-visual img")).to_have_count(1)
 
 
 def test_reduced_motion_and_external_asset_boundaries(page: Page, base_url: str) -> None:

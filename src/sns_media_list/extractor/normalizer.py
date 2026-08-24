@@ -177,7 +177,14 @@ def _parse_record(line: str | Mapping[str, object]) -> GalleryItem:
 def _to_normalized_media(item: GalleryItem) -> NormalizedMedia:
     """Convert one selected gallery item to an internal media record."""
     extension = item.extension or ("mp4" if item.media_type == "video" else "jpg")
-    filename = sanitize_filename(f"{item.platform}-{item.post_id}-{item.index}.{extension}")
+    filename = build_media_filename(
+        platform=item.platform,
+        author=item.author,
+        post_id=item.post_id,
+        index=item.index,
+        extension=extension,
+        is_exact_story="/stories/" in item.post_url,
+    )
     return NormalizedMedia(
         platform=item.platform,
         post_id=item.post_id,
@@ -197,6 +204,36 @@ def sanitize_filename(value: str) -> str:
     """Remove path, control, and response-header characters from a filename."""
     cleaned = re.sub(r"[\x00-\x1f\x7f\\/:\"<>|?*\r\n]+", "-", value)
     return cleaned.strip(" .") or "media.bin"
+
+
+def _safe_filename_component(value: object) -> str:
+    """將檔名元件限制為 ASCII allowlist、去除分隔符並截斷至 48 字元。"""
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "", str(value))
+    return cleaned.strip("._-")[:48]
+
+
+def build_media_filename(
+    *,
+    platform: str,
+    author: str | None,
+    post_id: str,
+    index: int,
+    extension: str,
+    is_exact_story: bool,
+) -> str:
+    """建立有界的安全媒體檔名，並保留精確 Story 的既有格式。"""
+    safe_extension = _safe_extension(extension)
+    safe_platform = _safe_filename_component(platform) or "media"
+    safe_post_id = _safe_filename_component(post_id) or "post"
+    if is_exact_story:
+        return sanitize_filename(f"{safe_platform}-{safe_post_id}-1.{safe_extension}")
+    parts = [safe_platform]
+    safe_author = _safe_filename_component(author) if author else ""
+    if safe_author:
+        parts.append(safe_author)
+    parts.extend((safe_post_id, f"{index:02d}"))
+    filename = "-".join(parts) + f".{safe_extension}"
+    return sanitize_filename(filename[:160])
 
 
 def build_media_request_headers(platform: str) -> dict[str, str]:
