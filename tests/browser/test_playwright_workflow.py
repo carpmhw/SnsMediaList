@@ -494,6 +494,54 @@ def test_submits_and_replaces_results(page: Page, base_url: str) -> None:
     ]
 
 
+def test_analysis_shows_and_clears_the_workbench_loading_state(page: Page, base_url: str) -> None:
+    """驗證分析期間顯示骨架，完成後恢復可操作的工作台。"""
+    server = ExtractionServer([SUCCESS_PAYLOAD])
+
+    def extraction(route: Any, request: Any) -> None:
+        """將分析請求導向可控制完成時間的本機 server。"""
+        route_extraction_to_server(route, request, server)
+
+    try:
+        page.route("**/api/extractions", extraction)
+        page.goto(base_url)
+        page.fill("#post-url", "https://x.com/creator/status/1")
+        page.click("#analyze-button")
+        expect(page.locator("#analysis-loading")).to_be_visible()
+        expect(page.locator(".analysis-workbench")).to_have_attribute("aria-busy", "true")
+        expect(page.locator("#analyze-button")).to_be_disabled()
+
+        server.release_first.set()
+
+        expect(page.locator("#analysis-loading")).to_be_hidden()
+        expect(page.locator(".analysis-workbench")).to_have_attribute("aria-busy", "false")
+        expect(page.locator("#analyze-button")).to_be_enabled()
+        expect(page.locator("#results")).to_be_visible()
+    finally:
+        server.close()
+
+
+def test_brand_workspace_is_split_on_desktop_and_single_column_on_mobile(
+    page: Page, base_url: str
+) -> None:
+    """驗證工作台在桌機分欄、手機收合且不產生水平溢位。"""
+    page.set_viewport_size({"width": 1280, "height": 900})
+    page.goto(base_url)
+    desktop_columns = page.locator(".workspace-hero").evaluate(
+        "element => getComputedStyle(element).gridTemplateColumns.split(' ').length"
+    )
+    assert desktop_columns == 2
+
+    page.set_viewport_size({"width": 375, "height": 800})
+    mobile_columns = page.locator(".workspace-hero").evaluate(
+        "element => getComputedStyle(element).gridTemplateColumns.split(' ').length"
+    )
+    assert mobile_columns == 1
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    page.locator("#post-url").focus()
+    assert page.evaluate("document.activeElement === document.querySelector('#post-url')")
+
+
 def test_multiple_token_previews_are_loaded_one_at_a_time(
     page: Page, base_url: str, preview_server: PreviewServer
 ) -> None:
@@ -1647,7 +1695,9 @@ def test_batch_result_groups_use_a_keyboard_navigable_scroll_snap_track(
     page.get_by_role("button", name="下一組結果").press("Enter")
     expect(page.get_by_role("status", name="結果群組位置")).to_have_text("第 2/3 組")
     expect(page.get_by_role("button", name="上一組結果")).to_be_enabled()
-    page.locator("#result-groups").evaluate("element => element.scrollTo({ left: element.scrollWidth })")
+    page.locator("#result-groups").evaluate(
+        "element => element.scrollTo({ left: element.scrollWidth })"
+    )
     expect(page.get_by_role("status", name="結果群組位置")).to_have_text("第 3/3 組")
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
 
@@ -1682,7 +1732,9 @@ def test_desktop_result_group_navigation_buttons_are_visible_and_operable(
     expect(page.get_by_role("status", name="結果群組位置")).to_have_text("第 1/3 組")
 
 
-def test_touch_scroll_updates_result_group_position_summary(touch_page: Page, base_url: str) -> None:
+def test_touch_scroll_updates_result_group_position_summary(
+    touch_page: Page, base_url: str
+) -> None:
     """驗證觸控 context 的水平滑動會更新目前結果群組摘要。"""
     calls = 0
 

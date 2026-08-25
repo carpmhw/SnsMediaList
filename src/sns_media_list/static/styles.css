@@ -709,3 +709,198 @@ button:hover:not(:disabled) {
     transition-duration: 0.01ms !important;
   }
 }
+
+:root {
+  --canvas: #090d14;
+  --surface: #101722;
+  --surface-raised: #172131;
+  --surface-soft: #0d141f;
+  --text: #edf4ff;
+  --muted: #96a4b8;
+  --accent: #79b8ff;
+  --accent-ink: #08111e;
+  --line: #2b3a50;
+  --danger: #ffb4ab;
+  --success: #93d7b1;
+  --focus: #b3d7ff;
+  --shadow: 0 24px 72px rgb(0 0 0 / 28%);
+}
+
+body {
+  background:
+    radial-gradient(circle at 80% 8%, rgb(121 184 255 / 12%), transparent 30rem),
+    var(--canvas);
+}
+
+.app-shell {
+  width: min(1280px, calc(100% - 48px));
+  padding: clamp(32px, 6vw, 80px) 0 56px;
+}
+
+.workspace-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(420px, 1.1fr);
+  gap: clamp(40px, 7vw, 112px);
+  align-items: center;
+  min-height: min(720px, calc(100dvh - 80px));
+}
+
+.brand-intro {
+  max-width: 35rem;
+}
+
+.brand-mark,
+.step-label {
+  margin: 0;
+  color: var(--accent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.brand-intro h1 {
+  max-width: 12ch;
+  margin: 18px 0;
+  font-size: clamp(2.4rem, 5vw, 4.9rem);
+  letter-spacing: -0.055em;
+  line-height: 0.98;
+}
+
+.trust-note {
+  max-width: 46ch;
+  margin: 20px 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.analysis-workbench,
+.results,
+.status {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgb(16 23 34 / 94%);
+  box-shadow: var(--shadow);
+}
+
+.analysis-workbench {
+  position: relative;
+  padding: clamp(24px, 4vw, 44px);
+}
+
+.workbench-heading {
+  margin-bottom: 24px;
+}
+
+.workbench-heading h2 {
+  margin: 10px 0 0;
+}
+
+.result-workspace {
+  margin-top: clamp(32px, 6vw, 72px);
+}
+
+.analysis-loading {
+  display: grid;
+  gap: 12px;
+  margin-top: 24px;
+  border-top: 1px solid var(--line);
+  padding-top: 24px;
+}
+
+.analysis-loading[hidden] {
+  display: none;
+}
+
+.skeleton-line {
+  display: block;
+  height: 0.8rem;
+  border-radius: 999px;
+  background: var(--surface-raised);
+}
+
+.skeleton-line--title {
+  width: 46%;
+  height: 1.1rem;
+}
+
+.skeleton-line--short {
+  width: 62%;
+}
+
+.loading-copy {
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.analysis-workbench[aria-busy="true"] #extraction-form {
+  opacity: 0.48;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline-color: var(--focus);
+}
+
+button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.analysis-mode-switch,
+.queue-status,
+.media-card {
+  border-color: var(--line);
+}
+
+textarea,
+input {
+  background: var(--surface-soft);
+}
+
+.download-action,
+.copy-filename {
+  border-color: var(--line);
+  background: var(--surface-raised);
+}
+
+.download-action:hover,
+.copy-filename:hover {
+  border-color: var(--accent);
+  background: #1b2b41;
+}
+
+@media (max-width: 767px) {
+  .app-shell {
+    width: min(100% - 24px, 560px);
+    padding-top: 28px;
+  }
+
+  .workspace-hero {
+    grid-template-columns: 1fr;
+    gap: 32px;
+    min-height: 0;
+  }
+
+  .brand-intro h1 {
+    max-width: 13ch;
+    font-size: clamp(2.2rem, 12vw, 3.5rem);
+  }
+
+  .analysis-workbench {
+    padding: 22px;
+  }
+
+  .input-row,
+  .results-heading {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .input-row > button,
+  .batch-actions button {
+    width: 100%;
+  }
+}

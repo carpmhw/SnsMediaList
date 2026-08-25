@@ -38,8 +38,8 @@ def test_home_page_contains_contact_sheet_workflow() -> None:
 
     assert response.status_code == 200
     assert '<html lang="zh-Hant">' in response.text
-    assert "將一則內容整理成清晰的下載清單。" in response.text
-    assert "分析單則內容" in response.text
+    assert "把媒體來源轉成可控的下載清單。" in response.text
+    assert "貼上內容 URL" in response.text
     assert "Instagram 貼文、Reel、單則 Story 與 X 狀態貼文" in response.text
     assert "帳號目前全部 Stories 與 Highlights 不支援" in response.text
     assert "可信部署若使用服務管理者的 Instagram 工作階段" in response.text
@@ -57,6 +57,12 @@ def test_home_page_contains_contact_sheet_workflow() -> None:
     assert 'id="results"' in response.text
     assert 'id="result-groups"' in response.text
     assert 'id="privacy-reminder"' in response.text
+    assert 'class="workspace-hero"' in response.text
+    assert 'class="brand-intro"' in response.text
+    assert 'class="analysis-workbench"' in response.text
+    assert 'id="analysis-loading"' in response.text
+    assert 'aria-busy="false"' in response.text
+    assert 'class="results result-workspace"' in response.text
     assert "只下載你有權保存的內容" in response.text
 
 
@@ -154,6 +160,12 @@ def test_static_assets_include_responsive_and_recovery_hooks() -> None:
     assert "token_not_found" in javascript.text
     assert "method: 'HEAD'" in javascript.text
     assert ".blob()" not in javascript.text
+    assert "--accent: #79b8ff" in css.text
+    assert ".workspace-hero" in css.text
+    assert ".analysis-workbench" in css.text
+    assert ".analysis-loading" in css.text
+    assert ".result-workspace" in css.text
+    assert "@media (max-width: 767px)" in css.text
 
 
 def test_static_assets_expose_safe_group_selection_download_hooks() -> None:
@@ -265,6 +277,7 @@ def test_stylesheet_has_grid_mobile_focus_and_motion_rules() -> None:
     assert ":focus-visible" in response.text
     assert "prefers-reduced-motion" in response.text
     assert "font-size: clamp(1.8rem, 5vw, 3.6rem);" in response.text
+    assert ".skeleton-line" in response.text
 
 
 def test_javascript_has_same_origin_extraction_and_recovery_hooks() -> None:
