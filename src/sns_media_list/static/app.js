@@ -18,6 +18,8 @@ const resultGroupNavigation = document.querySelector('#result-group-navigation')
 const previousResultGroupButton = document.querySelector('#previous-result-group');
 const nextResultGroupButton = document.querySelector('#next-result-group');
 const resultGroupPosition = document.querySelector('#result-group-position');
+const analysisWorkbench = document.querySelector('.analysis-workbench');
+const analysisLoading = document.querySelector('#analysis-loading');
 const LOCAL_PREVIEW_URL = '/placeholder.svg';
 const PREVIEW_RETRY_DELAY_MS = 1000;
 const BATCH_DOWNLOAD_DELAY_MS = 500;
@@ -80,6 +82,12 @@ function updateExtractionControls() {
   for (const recoveryButton of document.querySelectorAll('.group-recovery .re-analyze')) {
     recoveryButton.disabled = locked;
   }
+}
+
+/** 切換分析工作台的骨架與可存取忙碌狀態。 */
+function setAnalysisLoading(loading) {
+  analysisWorkbench.setAttribute('aria-busy', String(loading));
+  analysisLoading.hidden = !loading;
 }
 
 /** 確認 callback 仍屬於目前可更新介面的批次執行。 */
@@ -186,6 +194,7 @@ async function analyzeBatch() {
   stopBatchButton.disabled = false;
   renderBatchQueue(run);
   setStatus('正在循序分析內容...', 'loading');
+  setAnalysisLoading(true);
   try {
     for (const item of run.items) {
       if (!isCurrentBatchRun(run)) {
@@ -224,6 +233,7 @@ async function analyzeBatch() {
       setStatus('準備就緒，請選擇個別下載。', 'success');
     }
   } finally {
+    setAnalysisLoading(false);
     if (activeBatchRun === run) {
       activeBatchRun = null;
       stopBatchButton.hidden = true;
@@ -844,6 +854,7 @@ async function analyze(event, preserveResults = false) {
     clearResults();
   }
   setStatus('正在分析內容...', 'loading');
+  setAnalysisLoading(true);
   try {
     const payload = await requestExtraction(submittedUrl);
     if (!payload) {
@@ -860,6 +871,8 @@ async function analyze(event, preserveResults = false) {
     }
     const canReanalyze = error.code === 'token_expired' || error.code === 'token_not_found';
     setStatus(error.message || '目前無法分析此內容。', 'error', canReanalyze);
+  } finally {
+    setAnalysisLoading(false);
   }
 }
 
