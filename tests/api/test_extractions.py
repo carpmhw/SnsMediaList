@@ -79,8 +79,8 @@ def make_client(
     return TestClient(create_app(extraction_service=service)), extractor
 
 
-def test_extraction_returns_normalized_media_without_source_url() -> None:
-    """Verify successful extraction returns public tokens and ordered metadata."""
+def test_extraction_returns_normalized_media_without_private_values() -> None:
+    """驗證成功回應僅保留 application-owned opaque URL，不含私有值。"""
     client, _extractor = make_client([record()])
 
     response = client.post("/api/extractions", json={"url": "https://x.com/creator/status/1"})
@@ -88,9 +88,24 @@ def test_extraction_returns_normalized_media_without_source_url() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["platform"] == "x"
-    assert payload["media"][0]["filename"] == "x-1-1.jpg"
-    assert payload["media"][0]["token"]
+    assert payload["media"][0]["filename"] == "x-creator-1-01.jpg"
+    media = payload["media"][0]
+    assert "token" not in media
+    assert media["preview_url"].startswith("/api/media/")
+    assert media["download_url"].startswith("/api/media/")
     assert "source_url" not in json.dumps(payload)
+
+
+def test_extraction_omits_missing_author_from_filename() -> None:
+    """作者缺失時 API 應使用穩定的 platform-post-index fallback 檔名。"""
+    media_record = record()
+    media_record.pop("author")
+    client, _extractor = make_client([media_record])
+
+    response = client.post("/api/extractions", json={"url": "https://x.com/creator/status/1"})
+
+    assert response.status_code == 200
+    assert response.json()["media"][0]["filename"] == "x-1-01.jpg"
 
 
 def test_extraction_issues_generated_preview_when_metadata_has_no_poster() -> None:
@@ -187,7 +202,6 @@ def test_story_success_preserves_response_shape_and_opaque_media_urls(
     assert len(payload["media"]) == 1
     media = payload["media"][0]
     assert set(media) == {
-        "token",
         "media_type",
         "filename",
         "width",
@@ -214,7 +228,6 @@ def test_story_success_preserves_response_shape_and_opaque_media_urls(
         assert len(path_parts[3]) >= 32
         assert path_parts[4] == purpose
         assert story_id not in public_url.path
-    assert download_url.path == f"/api/media/{media['token']}/download"
     assert source_url not in response.text
     assert preview_source_url not in response.text
 
@@ -275,7 +288,7 @@ def test_story_sensitive_metadata_stays_out_of_response_tokens_and_logs(
 
     assert response.status_code == 200
     media = response.json()["media"][0]
-    download_token = media["token"]
+    download_token = urlsplit(media["download_url"]).path.split("/")[-2]
     preview_token = urlsplit(media["preview_url"]).path.split("/")[-2]
     assert urlsplit(media["download_url"]).path.split("/")[-2] == download_token
     download_record = token_store.get(download_token, "download")

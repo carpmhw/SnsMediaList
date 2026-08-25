@@ -851,9 +851,7 @@ async def test_download_resumes_once_after_valid_truncation(
 
     await response(make_asgi_scope(spec_version="2.4"), receive, send)
     body = b"".join(
-        message.get("body", b"")
-        for message in messages
-        if message["type"] == "http.response.body"
+        message.get("body", b"") for message in messages if message["type"] == "http.response.body"
     )
 
     assert body == b"abcdefghij"

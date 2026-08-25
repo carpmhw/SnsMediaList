@@ -94,7 +94,6 @@ class ExtractionService:
                 preview_url = f"/api/media/{preview_record.token}/preview"
             media.append(
                 MediaItem(
-                    token=download_record.token,
                     media_type=cast(MediaType, item.media_type),
                     filename=item.filename,
                     width=item.width,

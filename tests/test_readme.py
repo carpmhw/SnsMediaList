@@ -67,3 +67,20 @@ def test_readme_documents_single_story_support_and_security_boundaries() -> None
     assert story_error_row is not None
     assert "不細分" in story_error_row.group()
     assert "推斷" in story_error_row.group()
+
+
+def test_readme_documents_bounded_client_side_batch_workflow() -> None:
+    """驗證 README 清楚界定選取下載與前端批次分析的範圍。"""
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+    for required_text in (
+        "媒體多選",
+        "逐項啟動下載",
+        "多檔下載權限",
+        "智慧檔名",
+        "最多 5 個 URL",
+        "循序前端 queue",
+        "不提供 ZIP、帳號 feed 批次封存或歷史保存",
+        "不代表瀏覽器或 OS 已完成檔案保存",
+    ):
+        assert required_text in readme

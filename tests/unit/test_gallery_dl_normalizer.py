@@ -8,6 +8,7 @@ import pytest
 from sns_media_list.errors import AppError
 from sns_media_list.extractor.normalizer import (
     _validate_source_url,
+    build_media_filename,
     build_media_request_headers,
     ensure_downloadable_media,
     normalize_gallery_output,
@@ -250,4 +251,84 @@ def test_filename_removes_path_and_header_characters() -> None:
     assert (
         sanitize_filename("../x\r\nContent-Disposition: evil.jpg")
         == "-x-Content-Disposition- evil.jpg"
+    )
+
+
+def test_ordinary_media_filename_includes_safe_author_and_two_digit_index() -> None:
+    """一般貼文檔名應包含安全作者與至少兩位數的來源順序。"""
+    result = normalize_gallery_output(
+        [
+            {
+                "platform": "x",
+                "post_url": "https://x.com/example_user/status/123456789",
+                "post_id": "123456789",
+                "author": "example_user",
+                "num": 2,
+                "type": "video",
+                "url": "https://video.twimg.com/media/example.mp4",
+                "extension": "mp4",
+                "progressive": True,
+            }
+        ]
+    )
+
+    assert result.items[0].filename == "x-example_user-123456789-02.mp4"
+
+
+@pytest.mark.parametrize(
+    ("author", "post_id", "extension", "expected"),
+    [
+        ("creator", "post-1", "MP4", "x-creator-post-1-02.mp4"),
+        ("a/b\\c\r\nd", "post/id", "j\r\np*g", "x-abcd-postid-02.jpg"),
+        ("測試\x00作者", "貼文\x1fID", "jpeg", "x-ID-02.jpeg"),
+        (None, "post-1", "jpg", "x-post-1-02.jpg"),
+    ],
+)
+def test_media_filename_normalizes_untrusted_components(
+    author: str | None, post_id: str, extension: str, expected: str
+) -> None:
+    """檔名元件必須只保留安全 ASCII 字元，且空作者不留下分隔符。"""
+    assert (
+        build_media_filename(
+            platform="x",
+            author=author,
+            post_id=post_id,
+            index=2,
+            extension=extension,
+            is_exact_story=False,
+        )
+        == expected
+    )
+
+
+def test_media_filename_bounds_components_and_preserves_extension() -> None:
+    """長作者與貼文 ID 應維持 160 字元上限、順序與安全副檔名。"""
+    filename = build_media_filename(
+        platform="x" * 100,
+        author="author" * 20,
+        post_id="post" * 30,
+        index=123,
+        extension="very-long-extension!\r\n",
+        is_exact_story=False,
+    )
+
+    stem, extension = filename.rsplit(".", maxsplit=1)
+    assert len(filename) <= 160
+    assert len(stem.split("-", maxsplit=1)[0]) == 48
+    assert extension == "verylonge"
+    assert stem.endswith("-123")
+
+
+def test_exact_story_filename_ignores_author_and_keeps_existing_identity() -> None:
+    """精確 Story 不得引入 extractor 作者，必須維持既有 media ID 格式。"""
+    assert (
+        build_media_filename(
+            platform="instagram",
+            author="unexpected-author",
+            post_id="1234567890",
+            index=8,
+            extension="JPEG",
+            is_exact_story=True,
+        )
+        == "instagram-1234567890-1.jpeg"
     )

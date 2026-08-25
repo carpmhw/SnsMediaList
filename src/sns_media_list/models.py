@@ -15,7 +15,6 @@ PreviewMode = Literal["proxy", "generated"]
 class MediaItem(BaseModel):
     """Describe one downloadable media item without private source details."""
 
-    token: str
     media_type: MediaType
     filename: str
     width: int | None = Field(default=None, ge=0)

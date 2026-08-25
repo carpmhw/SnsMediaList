@@ -44,6 +44,12 @@ Compose service 使用單一 worker，以 UID 10001 的 non-root user 執行，r
 
 請使用 deployment-specific Compose override 或 environment file 覆寫設定。預設 Compose 不掛載平台 Cookie；若啟用驗證，只能使用下方 read-only file mount，且仍維持 loopback binding，除非另行配置 authenticated 或 network-ACL-restricted trusted ingress。不得將 Cookie value、credentials、extractor config 或 proxy credentials 放入 environment、command line、request body 或 log。
 
+## 批次 UI 與併發限制
+
+batch UI 不會改變 `SNS_MEDIA_MAX_EXTRACTIONS`；最多五個 URL 只會由瀏覽器循序呼叫既有單筆 extraction API，不是 server job queue，也不會建立持久工作、背景 worker 或新的 server-side batch endpoint。每一筆仍必須在前一筆 settle 後才會開始，並維持既有 extraction concurrency。
+
+選取多個媒體時，瀏覽器逐項啟動原生下載，仍受現有 download limits 與 rate limit 約束，包括 process-wide、per-client download slot 與 media rate limit。operator 不得因 UI 批次功能任意提高 concurrency；若出現 `local_rate_limited` 或 upstream rate limit，應降低 operator concurrency 並等待限制解除。瀏覽器可能要求多檔下載權限；「已開始下載」不代表瀏覽器或 OS 已完成檔案保存。
+
 ## 媒體下載 timeout 與長時間串流
 
 - `SNS_MEDIA_CONNECT_TIMEOUT_SECONDS` 預設 10 秒，限制上游連線建立與 request write 操作；連線階段不會無限等待。

@@ -55,9 +55,29 @@ def test_home_page_contains_contact_sheet_workflow() -> None:
     assert 'aria-live="polite"' in response.text
     assert 'id="analyze-button"' in response.text
     assert 'id="results"' in response.text
-    assert 'id="media-grid"' in response.text
+    assert 'id="result-groups"' in response.text
     assert 'id="privacy-reminder"' in response.text
     assert "只下載你有權保存的內容" in response.text
+
+
+def test_home_page_contains_bounded_batch_url_input() -> None:
+    """Verify the page exposes an accessible multiline input for up to five URLs."""
+    response = TestClient(create_app()).get("/")
+
+    assert response.status_code == 200
+    assert 'id="batch-post-urls"' in response.text
+    assert 'maxlength="10240"' in response.text
+    assert 'id="analyze-batch-button"' in response.text
+
+
+def test_home_page_describes_selected_downloads_without_batch_archive_claims() -> None:
+    """驗證首頁說明逐項下載限制而非 ZIP、帳號封存或落盤完成。"""
+    response = TestClient(create_app()).get("/")
+
+    assert response.status_code == 200
+    assert "選取多個媒體後逐項啟動下載" in response.text
+    assert "不提供 ZIP 或帳號批次封存" in response.text
+    assert "已開始下載不代表檔案已完成保存" in response.text
 
 
 def test_home_page_advertises_same_origin_favicon_formats() -> None:
@@ -134,6 +154,80 @@ def test_static_assets_include_responsive_and_recovery_hooks() -> None:
     assert "token_not_found" in javascript.text
     assert "method: 'HEAD'" in javascript.text
     assert ".blob()" not in javascript.text
+
+
+def test_static_assets_expose_safe_group_selection_download_hooks() -> None:
+    """Verify selected downloads retain native same-origin streaming boundaries."""
+    client = TestClient(create_app())
+    javascript = client.get("/app.js")
+
+    assert javascript.status_code == 200
+    assert "selection-toolbar" in javascript.text
+    assert "media-selection" in javascript.text
+    assert "BATCH_DOWNLOAD_DELAY_MS = 500" in javascript.text
+    assert "selectedIndices" in javascript.text
+    assert "method: 'HEAD'" in javascript.text
+    assert "anchor.remove()" in javascript.text
+    assert ".blob()" not in javascript.text
+
+
+def test_static_assets_expose_group_local_safe_status_hooks() -> None:
+    """驗證群組下載、錯誤與 recovery 狀態各自具備可存取的安全公告區域。"""
+    client = TestClient(create_app())
+    javascript = client.get("/app.js")
+    stylesheet = client.get("/styles.css")
+
+    assert javascript.status_code == 200
+    assert stylesheet.status_code == 200
+    assert "group-status" in javascript.text
+    assert "group-error" in javascript.text
+    assert "role', 'status'" in javascript.text
+    assert "aria-live', 'polite'" in javascript.text
+    assert ".group-status" in stylesheet.text
+    assert ".group-error" in stylesheet.text
+
+
+def test_static_assets_support_hour_duration_metadata() -> None:
+    """Verify media metadata contains the hour-aware duration formatter hook."""
+    javascript = TestClient(create_app()).get("/app.js")
+
+    assert javascript.status_code == 200
+    assert "padStart(2, '0')" in javascript.text
+    assert "totalHours" in javascript.text
+
+
+def test_static_assets_expose_structured_metadata_and_filename_copy() -> None:
+    """Verify cards provide structured safe metadata and a filename-only copy action."""
+    javascript = TestClient(create_app()).get("/app.js")
+
+    assert javascript.status_code == 200
+    assert "media-metadata" in javascript.text
+    assert "copy-filename" in javascript.text
+    assert "navigator.clipboard.writeText" in javascript.text
+
+
+def test_stylesheet_has_compact_responsive_metadata_layout() -> None:
+    """Verify media metadata labels and values use a responsive definition-list grid."""
+    stylesheet = TestClient(create_app()).get("/styles.css")
+
+    assert stylesheet.status_code == 200
+    assert ".media-metadata" in stylesheet.text
+    assert "grid-template-columns: max-content minmax(0, 1fr)" in stylesheet.text
+    assert ".media-metadata dt" in stylesheet.text
+    assert ".media-metadata dd" in stylesheet.text
+    assert "overflow-wrap: anywhere" in stylesheet.text
+    assert ".copy-filename" in stylesheet.text
+
+
+def test_static_assets_expose_bounded_batch_parser() -> None:
+    """Verify batch URL parsing is bounded and preserves first-seen order."""
+    javascript = TestClient(create_app()).get("/app.js")
+
+    assert javascript.status_code == 200
+    assert "MAX_BATCH_URLS = 5" in javascript.text
+    assert "function parseBatchUrls" in javascript.text
+    assert "split('\\n')" in javascript.text
+    assert "最多只能分析 5 個 URL" in javascript.text
 
 
 def test_javascript_coordinates_token_previews_without_buffering_media() -> None:
