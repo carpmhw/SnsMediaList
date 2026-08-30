@@ -2,7 +2,7 @@
 
 ## 部署
 
-需求：Docker Engine、Docker Compose v2、可解析 outbound HTTPS 目的地的 DNS，以及私人或可信任的 operator 使用環境。本服務刻意不設計為公開匿名 proxy。
+需求：Docker Engine、Docker Compose v2、可解析 outbound HTTPS 目的地的 DNS，以及私人或可信任的 operator 環境。本服務不是公開匿名 proxy。
 
 ```bash
 docker compose build --pull
@@ -11,9 +11,9 @@ docker compose ps
 curl --fail http://127.0.0.1:8000/healthz
 ```
 
-Compose service 使用單一 worker，以 UID 10001 的 non-root user 執行，root filesystem 為 read-only，且只能寫入有容量限制的 tmpfs。系統不掛載持久化 media 或 token volume。預設 host binding 為 `127.0.0.1:${SNS_MEDIA_HOST_PORT:-8000}:8000`，並啟用 `no-new-privileges`、drop all capabilities 與 bounded PID limit；若需遠端存取，必須先配置 authenticated 或 network-ACL-restricted reverse proxy。application access log 已透過 `--no-access-log` 停用；所有 reverse proxy 也必須套用同等的 filtering。
+Compose 使用單一 worker 與 UID 10001，並啟用 read-only root filesystem、bounded tmpfs、`no-new-privileges`、drop all capabilities 及 PID limit。不掛載持久 media 或 token volume，預設只綁定 `127.0.0.1:${SNS_MEDIA_HOST_PORT:-8000}:8000`，Uvicorn access log 也已停用。遠端存取前必須配置 authenticated 或 network-ACL-restricted reverse proxy。
 
-預設限制採保守設定：
+主要限制如下；請以 deployment-specific Compose override 或 environment file 覆寫：
 
 | 設定 | 預設值 |
 | --- | ---: |
@@ -42,149 +42,124 @@ Compose service 使用單一 worker，以 UID 10001 的 non-root user 執行，r
 | `SNS_MEDIA_THUMBNAIL_CACHE_BYTES` | 32000000 bytes |
 | `SNS_MEDIA_THUMBNAIL_MAX_EDGE` | 640 pixels |
 
-請使用 deployment-specific Compose override 或 environment file 覆寫設定。預設 Compose 不掛載平台 Cookie；若啟用驗證，只能使用下方 read-only file mount，且仍維持 loopback binding，除非另行配置 authenticated 或 network-ACL-restricted trusted ingress。不得將 Cookie value、credentials、extractor config 或 proxy credentials 放入 environment、command line、request body 或 log。
+## 安全不變條件
 
-## 批次 UI 與併發限制
+- 不得將 Cookie value、credentials、extractor config、proxy credentials、token、request body 或完整 upstream media URL 放入 environment、command line 或 log。
+- 平台 Cookie 只能透過下方 read-only file mount 提供；服務仍須維持 loopback binding 或受信任 ingress。
+- Application 與 reverse proxy 都不得記錄 token path；不得為排錯而略過 host、DNS、MIME、redirect 或 byte-limit check。
 
-batch UI 不會改變 `SNS_MEDIA_MAX_EXTRACTIONS`；最多五個 URL 只會由瀏覽器循序呼叫既有單筆 extraction API，不是 server job queue，也不會建立持久工作、背景 worker 或新的 server-side batch endpoint。每一筆仍必須在前一筆 settle 後才會開始，並維持既有 extraction concurrency。
+## 批次、下載與 timeout
 
-選取多個媒體時，瀏覽器逐項啟動原生下載，仍受現有 download limits 與 rate limit 約束，包括 process-wide、per-client download slot 與 media rate limit。operator 不得因 UI 批次功能任意提高 concurrency；若出現 `local_rate_limited` 或 upstream rate limit，應降低 operator concurrency 並等待限制解除。瀏覽器可能要求多檔下載權限；「已開始下載」不代表瀏覽器或 OS 已完成檔案保存。
+batch UI 不會改變 `SNS_MEDIA_MAX_EXTRACTIONS`；最多五個 URL 由瀏覽器循序呼叫單筆 API，不是 server job queue。媒體多選仍受現有 download limits 與 rate limit 約束，不得因 UI 批次功能任意提高 concurrency。
 
-## 媒體下載 timeout 與長時間串流
+| 設定 | 語意 |
+| --- | --- |
+| `SNS_MEDIA_CONNECT_TIMEOUT_SECONDS` | 上游連線建立與 request write 的期限。 |
+| `SNS_MEDIA_READ_TIMEOUT_SECONDS` | Response headers 與每次 body read 的 idle timeout；成功 read 後重新計時，不是整檔期限。 |
+| `SNS_MEDIA_MEDIA_RESPONSE_TIMEOUT_SECONDS` | CDN preview 與 generated thumbnail 的完整回應期限，不套用於 attachment download。 |
+| `SNS_MEDIA_MAX_DOWNLOAD_BYTES` | 單檔硬限制；先檢查可信 `Content-Length`，未知長度則串流累計，超限即中止。 |
 
-- `SNS_MEDIA_CONNECT_TIMEOUT_SECONDS` 預設 10 秒，限制上游連線建立與 request write 操作；連線階段不會無限等待。
-- `SNS_MEDIA_READ_TIMEOUT_SECONDS` 預設 30 秒，限制 response headers 與每一次 response body read 的 idle timeout。每次成功 read 後會重新計算 idle window；這不是整個檔案的 wall-clock deadline。
-- `SNS_MEDIA_MEDIA_RESPONSE_TIMEOUT_SECONDS` 預設 120 秒，只套用於 CDN preview 與 generated thumbnail 的 complete-response lifetime。attachment download 不繼承此完整回應期限；只要上游持續在 read idle timeout 內送出資料，下載可以超過 120 秒。
-- `SNS_MEDIA_MAX_DOWNLOAD_BYTES` 預設 500000000 bytes 仍是硬限制。合法且已知的 `Content-Length` 會在 downstream response 開始前檢查；沒有可信長度或使用 chunked transfer 時，application 持續累計實際 bytes，超過上限即中止，不會先完整緩衝媒體。
+長時間下載會持續占用 process-wide 與 per-client slot；read idle timeout、client disconnect 或取消都會關閉 upstream connection 並釋放 lease。`SNS_MEDIA_DOWNLOAD_TIMEOUT_SECONDS` 已移除，舊環境中的同名變數會被忽略，升級時應刪除。
 
-長時間 active download 會在完成、失敗或取消前持續占用一個 process-wide download slot 與對應的 per-client slot，且新嘗試仍受 media rate limit 限制。上游若超過 read idle timeout 沒有資料，下載會中止；client disconnect 或取消時，application 會關閉 upstream connection 並以 idempotent cleanup 釋放 download lease。
-
-`SNS_MEDIA_DOWNLOAD_TIMEOUT_SECONDS` 已從本版本的 Settings、application wiring 與 Compose 移除。若舊 environment file、Compose override 或部署環境仍殘留此名稱，Pydantic settings 的 `extra="ignore"` 會忽略它而不阻止啟動，但它不再有任何作用，也不會恢復舊的 fixed whole-file timeout；請在 migration 時移除該變數，避免 operator 誤以為仍可控制下載期限。
-
-服務與 UI 不以「已開始下載」宣稱瀏覽器或 OS 已完成保存檔案。需要驗證落盤時，請在 client 端檢查實際檔案，而不要以 application response 已結束作為 OS 保存成功的證明。
+瀏覽器可能要求多檔下載權限；「已開始下載」不代表瀏覽器或 OS 已完成檔案保存，必要時請在 client 端確認實際檔案。
 
 ## 平台 Cookie 驗證
 
-平台 Cookie 是 bearer credential，會把 extraction 範圍擴大到該帳號可見的所有支援單篇貼文與精確 Story。配置 Instagram Cookie 後，任何服務使用者都可能透過精確 URL 間接使用 operator Instagram 帳號的 session，讀取該帳號看見的私人、Close Friends 或其他受眾限定 Story。服務不提供 per-user authorization，因此只適合本人管理的可信網路；請使用低權限專用帳號，不要使用個人主要帳號。
+平台 Cookie 是 bearer credential。配置 Instagram Cookie 後，任何服務使用者都可能間接使用 operator Instagram 帳號的 session，讀取該帳號可見的私人、Close Friends 或受眾限定 Story。服務沒有 per-user authorization，只適合本人管理的可信網路；請使用低權限專用帳號。
 
-先將瀏覽器匯出的 Netscape `cookies.txt` 放在 host 的受限目錄，確認檔案由 container UID 10001 可讀取，且不要把 Cookie value 放在 shell command。Instagram 與 X 使用獨立 override：
+將 Netscape `cookies.txt` 放在受限目錄，確認 container UID 10001 可讀，再使用對應 override：
 
 ```bash
-SNS_MEDIA_INSTAGRAM_COOKIE_HOST_FILE=/srv/secrets/instagram.cookies.txt \
-  docker compose -f docker-compose.yaml -f docker-compose.instagram-auth.yaml config --quiet
+# Instagram
 SNS_MEDIA_INSTAGRAM_COOKIE_HOST_FILE=/srv/secrets/instagram.cookies.txt \
   docker compose -f docker-compose.yaml -f docker-compose.instagram-auth.yaml up -d --build
-```
 
-```bash
-SNS_MEDIA_X_COOKIE_HOST_FILE=/srv/secrets/x.cookies.txt \
-  docker compose -f docker-compose.yaml -f docker-compose.x-auth.yaml config --quiet
+# X
 SNS_MEDIA_X_COOKIE_HOST_FILE=/srv/secrets/x.cookies.txt \
   docker compose -f docker-compose.yaml -f docker-compose.x-auth.yaml up -d --build
 ```
 
-override 只將 host file 以 read-only 方式掛載到固定 `/run/secrets/...` path，application 每次 subprocess 使用對應平台的 path，並要求 `cookies-update=false`。Cookie 不會進入 API response、token record、log、preview 或 download request。兩個平台可分開啟用；不使用 override 即維持匿名模式。
+部署前可將 `up -d --build` 改成 `config --quiet` 驗證 Compose。Override 只掛載 read-only file，並停用 Cookie 更新；不使用 override 即為匿名模式。
 
-application 不快取 Cookie 內容；每個新啟動的 extractor process 都會重新開啟掛載路徑並立即讀取目前檔案。輪替或撤銷時，先在平台撤銷舊 session，再以新內容覆寫相同 host file 並保留 inode；若部署流程以 rename 更換 inode，必須重新建立 container，避免 bind mount 繼續指向舊檔。此後的新 extractor process 會立即使用新檔，進行中的 process 不會熱重載。
+Application 不快取 Cookie。覆寫相同 host file 並保留 inode 後，新的 extractor process 會立即重新讀取；若以 rename 更換 inode，必須重建 container。輪替時先在平台撤銷舊 session，進行中的 process 不會熱重載。
 
-已發行的短效 token 不含 Cookie，Cookie 輪替或撤銷不會主動收回 token；token 只會在 TTL 到期或 service 重新啟動時失效，如需立即失效就重新啟動 service。CDN preview 與 download request 不會攜帶 Cookie；若 CDN 需要平台 session，系統會 fail closed，而不會轉送 operator credential。
+短效 token 不含 Cookie，只會在 TTL 到期或 service 重新啟動時失效。CDN preview 與 download 不會攜帶 Cookie；若 CDN 需要 session，系統會 fail closed。同一 UID 的惡意 extractor 理論上可讀取另一個已掛載的平台 Cookie，因此目前不是 per-platform sandbox。
 
-目前兩個 override 與 application 使用同一個 container UID 10001。正常 invocation 只會把選定平台的 Cookie path 傳給 `gallery-dl`，但惡意或遭竄改的 extractor 若能自行探索同 UID 可讀檔案，仍可能讀取另一個 mounted Cookie；這是目前 threat model 的已知限制，不可視為 per-platform sandbox。若需要更強隔離，應另行設計分離 worker 或 sandbox change。
-
-要 rollback 到匿名模式，先停止使用 auth override 的 service，再只用預設 Compose 啟動：
+回復匿名模式時，先移除所有已啟用的 auth override，再啟動預設 Compose：
 
 ```bash
 docker compose -f docker-compose.yaml -f docker-compose.instagram-auth.yaml down
 docker compose -f docker-compose.yaml up -d --build
 ```
 
-若同時啟用 X，將第一個 command 的 override 替換為 `docker-compose.x-auth.yaml`；兩個平台都啟用時先移除兩個 override。Rollback 不會恢復舊 token 或 extraction state。
+若啟用 X 或同時啟用兩個平台，`down` 時須包含所有使用中的 override。Rollback 不會恢復舊 token 或 extraction state。
 
 ## 升級與 rollback
 
-1. 審查 pinned dependency 變更與 `uv.lock` diff。
+1. 審查 pinned dependency 與 `uv.lock` diff。
 2. 執行 `uv run python scripts/verify_gallery_contract.py`。
 3. 執行 `uv run python scripts/container_smoke.py`。
-4. 建置並標記 candidate image，接著執行 health check 與 owner-controlled smoke tests。
-5. 使用 `docker compose up -d --no-deps app` 部署。
+4. 建置 candidate image，完成 health check、security gate 與 owner-controlled smoke tests。
+5. 在 deployment override 將 `image:` 指向不可變 candidate tag，再執行 `docker compose up -d --no-deps app`。
 
-若需 rollback，停止目前 service，並重新部署前一個 image tag 或 checkout：
+Rollback 時，先把 deployment override 的 `image:` 恢復為前一個不可變 tag，再執行：
 
 ```bash
 docker compose stop -t 10 app
-docker compose up -d app
+docker compose up -d --no-deps app
 ```
 
-每次替換或重新啟動 container 時，token 與 extraction state 都會刻意遺失。使用者必須重新分析原始貼文。
+若以 checkout 部署，須先 checkout 前一版本並重新 build。每次替換或重新啟動 container 都會刻意清除 token 與 extraction state，使用者必須重新分析貼文。
 
 ## 預覽與縮圖
 
-預覽會優先使用 gallery-dl metadata 或明確支援的平台 CDN raster preview。若沒有可信 CDN preview，generated preview 預設停用並使用本機 `/placeholder.svg`；原始檔案下載不受影響。只有在 exact candidate image 通過 decoder vulnerability policy，或 operator 已記錄有期限的 narrow risk acceptance 後，才可設定 `SNS_MEDIA_GENERATED_PREVIEWS_ENABLED=true`，此時第一次載入預覽才會由 application 透過受限的 FFmpeg 產生 JPEG；成功結果只存於 process-local、32 MB 的 bounded cache，最長不超過 token TTL。FFmpeg 不會自行連線、讀取平台 Cookie 或寫入持久媒體檔案。
+預覽優先使用 gallery-dl metadata 或受支援的 CDN raster。沒有可信 preview 時預設顯示 `/placeholder.svg`；只有 candidate image 通過 decoder vulnerability policy，或已有期限的 narrow risk acceptance，才可設定 `SNS_MEDIA_GENERATED_PREVIEWS_ENABLED=true`。此模式按需透過受限 FFmpeg 產生 JPEG，只保存在 process-local bounded cache，最長不超過 token TTL。
 
-生成流程最多讀取 32 MB、輸出 1 MB、執行 10 秒，並限制同時一個工作。超限、不支援格式或生成失敗會顯示本機 fallback，但不影響原始檔案下載。調高上述設定前，必須重新審查 768 MB memory、1 CPU 與 64 MB `/tmp` 限制；decoder 有未修補 High/Critical finding 時不可只靠放寬設定繼續啟用。
+生成流程最多讀取 32 MB、輸出 1 MB、執行 10 秒且同時只執行一項。調高限制前須重新審查 768 MB memory、1 CPU、64 MB `/tmp` 與 decoder findings；FFmpeg 不得自行連線、讀取 Cookie 或寫入持久媒體。
 
 ## Reverse proxy logging
 
-不得記錄 token-bearing application path。application 會過濾 Uvicorn access log，但 reverse proxy 可能在 request 到達 app 前就寫入記錄。請使用 repository 內可機器檢查的 `deploy/nginx/sns-media-list.conf`；它對所有路由先套用 authentication、將 forwarded client header 覆寫為 `$remote_addr`，並在 token media location 明確使用 `access_log off`：
+不得記錄 token-bearing application path。請直接使用並檢查 repository 的 `deploy/nginx/sns-media-list.conf`，不要在本文件維護第二份設定：
 
-```nginx
-server {
-    auth_basic "SNS Media List";
-    auth_basic_user_file /etc/nginx/.htpasswd;
-    client_max_body_size 4k;
-    access_log off;
-    location ^~ /api/media/ {
-        access_log off;
-        proxy_buffering off;
-        proxy_read_timeout 300s;
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header X-Forwarded-For $remote_addr;
-        proxy_set_header Forwarded "";
-        proxy_set_header Cookie "";
-        proxy_set_header Authorization "";
-        proxy_set_header Proxy-Authorization "";
-        proxy_hide_header Set-Cookie;
-    }
-}
+```bash
+uv run python scripts/check_nginx_config.py
 ```
 
-`/api/media/` 的 effective `proxy_read_timeout` 必須不短於 application 的 `SNS_MEDIA_READ_TIMEOUT_SECONDS`（預設 30 秒；目前 application 上限為 300 秒）。範例中的 `300s` 只套用於媒體 location，足以涵蓋目前設定上限；若 application 的 idle timeout 政策改變，必須同步校準此 media location 的 proxy 值。這是 read idle boundary，不是整個檔案的完成期限；保持 `proxy_buffering off`，不要以放寬全站 timeout 或啟用 buffering 取代同步設定。
-
-請先建立 deployment-owned `.htpasswd`，再由受控 ingress 使用此設定；也可用等效的 identity-aware authentication 或 restrictive network ACL。此設定不記錄 query string、request body、Cookie、authorization header 或 upstream response header。絕對不要記錄 `POST /api/extractions` body 或完整 upstream media URL。
+部署設定必須提供 authentication 或 restrictive network ACL、全站 `access_log off`、媒體路由 `proxy_buffering off`，並清除 forwarded credentials。`/api/media/` 的 `proxy_read_timeout` 必須不短於 `SNS_MEDIA_READ_TIMEOUT_SECONDS`；這是 read idle boundary，不是整檔期限。啟用前須建立 deployment-owned `.htpasswd`。
 
 ## Trusted proxy
 
-預設情況下，request limit 使用 socket peer address，並忽略 `Forwarded` 與 `X-Forwarded-For`。只有當 service 僅能透過受控 proxy 存取時，才可設定 `SNS_MEDIA_TRUSTED_PROXY_CIDRS`。此值為 CIDR 字串的 JSON array，例如：
+預設使用 socket peer address，忽略 `Forwarded` 與 `X-Forwarded-For`。只有 service 僅能經受控 proxy 存取時，才能設定：
 
 ```yaml
 environment:
   SNS_MEDIA_TRUSTED_PROXY_CIDRS: '["10.0.0.0/8", "192.168.10.0/24"]'
 ```
 
-proxy 必須覆寫 forwarded client header，而不是附加內容。不要信任任意 Internet client 或範圍過大的 public CIDR。
+Proxy 必須覆寫 forwarded client header，不可附加內容；不要信任任意 Internet client 或過大的 public CIDR。
 
 ## 匿名平台限制
 
-僅支援單篇 Instagram `/p/`、`/reel/`、精確單則 `/stories/<username>/<numeric-media-id>/` URL 與 X status URL。Instagram Story 的匿名擷取是 best effort，未配置 Cookie 時常因 login-required、過期、刪除或不可見而回傳 `story_unavailable`。帳號範圍 Stories URL、Stories tray 與 Highlights 不支援；配置 Cookie 後也只處理精確 URL 且該帳號可見的內容。本服務不會接受平台 Cookie 或 credentials 由使用者 request 傳入。媒體必須有 direct progressive file；系統不會合併 adaptive HLS/DASH stream。
+僅支援 Instagram `/p/`、`/reel/`、精確 `/stories/<username>/<numeric-media-id>/` 與 X status URL。Story 匿名擷取是 best effort；帳號全部 Stories、Stories tray 與 Highlights 不支援。配置 Cookie 後仍只處理精確 URL 及帳號可見內容。本服務不會接受平台 Cookie 或 credentials 由 request 傳入，也不合併 HLS/DASH stream。
 
 ## 故障排除
 
-- `docker compose ps` 顯示 unhealthy：檢查 `docker compose logs --no-log-prefix app` 並查詢 `/healthz`；不要啟用 token path access log。
-- `[FATAL tini] exec uvicorn failed`：這表示正在使用舊 image 或 direct console script 的舊 venv shebang；先執行 `docker compose build --pull`，再以 `docker compose up -d --force-recreate` 啟動。候選 image 會在 `/opt/venv` 建立 production venv，並以 `scripts/container_smoke.py` 驗證 `uvicorn --version`。
-- `extraction_failed` 或 `post_unavailable`：確認 URL 是公開單篇貼文，並檢查平台是否允許匿名存取。不要加入 Cookie 或 credentials。
-- `platform_authentication_failed`（503）：只在 extractor 回報明確的 session failure diagnostic 時使用，例如 session `invalid/expired`，或 redirect 至 login、challenge、consent page。operator 應先停止 authenticated smoke，在平台撤銷舊 session 並輪替 Cookie，再由新 extractor process 驗證。
-- `story_unavailable`（404）：configured Story 遇到一般 `AuthRequired` 或 HTTP 401/403/404 時仍可能使用此結果，因系統無法可靠區分 session 有效但不可見與 Story 過期、刪除或其他 availability 問題。請先確認精確 URL 當下有效且配置帳號可見；不要只憑此結果判定 Cookie 已失效。
-- 上述兩種情況都不會進行 anonymous retry，公開 response 也不暴露 operator session 狀態細節。排查時只依穩定 code/status 與受控帳號內的驗證操作，不要把 Cookie value、URL 或 upstream diagnostic 貼到 log 或 command line。
-- `upstream_rate_limited`：降低 operator concurrency，並等待平台限制解除。
-- `local_rate_limited`：設定的 process-wide 或 per-client slot 已被占用；請依 response 的 `Retry-After` 間隔重試。
-- `token_not_found` 或 `token_expired`：service 已重新啟動或 10 分鐘 token TTL 已過；請重新分析原始貼文。
-- `capacity_exceeded`：等待 token 到期；若要提高 bounded token capacity，必須先審查 memory limit。
-- `unsafe_destination` 或 `upstream_media_invalid`：不要略過 host、DNS、MIME、redirect 或 byte-limit check；應改為審查 pinned extractor contract。
-- 預覽顯示 fallback：確認 CDN poster 是否仍可匿名存取；若進入 generated mode，檢查 input/output/time limit、FFmpeg container dependency 與 `upstream_media_invalid`，不要轉送 Cookie 或放寬 FFmpeg network protocol。
+- Service unhealthy：執行 `docker compose logs --no-log-prefix app` 並查詢 `/healthz`。
+- `[FATAL tini] exec uvicorn failed`：重建 image，再以 `docker compose up -d --force-recreate` 啟動。
+- `extraction_failed` 或 `post_unavailable`：確認 URL 受支援，並確認平台允許目前模式存取。
+- `platform_authentication_failed`（503）：僅在明確 session failure diagnostic 使用，例如 session `invalid/expired`，或 redirect 至 login、challenge、consent page；撤銷並輪替 Cookie 後再驗證。
+- `story_unavailable`（404）：configured Story 遇到 `AuthRequired` 或 HTTP 401/403/404 時仍可能回傳此結果；系統無法可靠區分 session 有效但不可見與 Story availability 問題，請確認精確 URL 與帳號可見性。
+- 上述兩種情況都不會 anonymous retry，公開 response 也不暴露 operator session 狀態細節。
+- `upstream_rate_limited`：降低 operator concurrency 並等待平台解除限制。
+- `local_rate_limited`：slot 已滿，依 `Retry-After` 重試。
+- `token_not_found` 或 `token_expired`：token 到期或 service 已重新啟動，請重新分析。
+- `capacity_exceeded`：等待 token 到期；提高容量前須審查 memory limit。
+- `unsafe_destination` 或 `upstream_media_invalid`：審查 pinned extractor contract，不要繞過安全檢查。
+- 預覽 fallback：檢查 CDN poster、generated preview 限制、FFmpeg dependency 與 `upstream_media_invalid`。
 
 ## 自動化檢查
 
-請在 repository root 執行 deployment checks：
+在 repository root 執行：
 
 ```bash
 uv run python scripts/container_smoke.py
@@ -193,15 +168,13 @@ docker compose config --quiet
 uv run python scripts/security_gate.py --image sns-media-list:candidate
 ```
 
-`security_gate.py` 會以 `uv export --frozen --no-dev` 匯出 production graph 後執行 `pip-audit`，並掃描 exact candidate image 的 Trivy JSON。任何 Python vulnerability 或有修復版本的 High/Critical finding 都會 fail；未修復 finding 必須在 `security/vulnerability-exceptions.json` 以 exact CVE/package、installed version、scan target、candidate artifact digest、owner、reason、mitigation 與 expiry 記錄，wildcard、過期或不匹配候選 image 的例外不會通過。candidate image 的 generated preview 若未通過 decoder policy，必須保持 `SNS_MEDIA_GENERATED_PREVIEWS_ENABLED=false`。
+`security_gate.py` 會稽核 production dependency graph 與 candidate image。未修復 finding 只能透過 `security/vulnerability-exceptions.json` 記錄 exact CVE/package、版本、artifact digest、owner、理由、mitigation 與 expiry；不匹配、wildcard 或過期例外都會失敗。Decoder policy 未通過時，generated preview 必須保持停用。
 
-smoke command 會建置 image、等待 health、驗證 UID 10001 與 read-only root filesystem、確認 loopback-only port、drop capabilities、`no-new-privileges`、bounded PID limit、`/tmp` 在 restart 後不保留資料、確認不存在 application media directory，並驗證 10 秒 graceful stop。
+`container_smoke.py` 會驗證 health、UID 10001、read-only root、loopback port、capabilities、`no-new-privileges`、PID limit、tmpfs、不持久保存 media，以及 10 秒 graceful stop。
 
 ## Owner-controlled manual smoke tests
 
-匿名 smoke test 只能使用 service owner 有權測試的公開貼文。若啟用平台驗證，另外使用 service owner 有權測試、且由配置帳號可見的 account-visible single posts；不要在 command line 放置 credentials 或 Cookie value：
-
-本次 repository 驗證未提供 safe ephemeral owner-controlled URLs 或 Cookies，因此下列匿名、authenticated 與 Story 案例保留為 deployment-specific non-gating manual release checks，不納入 CI 或自動 release gate。
+Live smoke 只能使用 owner-controlled 公開貼文；authenticated smoke 則使用配置帳號可見且有權測試的內容。Repository 未提供安全的 URL 或 Cookie，因此這些案例是 deployment-specific、non-gating manual release checks：
 
 ```bash
 uv run python scripts/manual_smoke.py \
@@ -213,9 +186,7 @@ uv run python scripts/manual_smoke.py \
   --x-gif 'https://x.com/owner/status/OWNER_CONTROLLED_GIF'
 ```
 
-Story smoke 必須使用 owner-controlled 的精確單則 Story URL，且執行時仍當下有效。Story 最多約 24 小時即失效，所以此案例是選用的 ephemeral check，不得成為 CI 或 release gate，也不得將 URL 寫入 repository、CI 設定或 artifact、log、shell command history；不要以 shell command 參數傳入，避免 history 與 process listing 暴露。
-
-需要執行選用 Story 案例時，在 repository 之外的 `/tmp` 建立 owner-only 暫存檔。下列 subshell 以互動式 shell builtin 讀取 URL，不會把值寫入 shell command history；URL 寫入後立即從 shell variable 移除，command line 只會帶檔案路徑。`trap` 會在正常完成或 shutdown/interruption 後執行 `rm -f`，不得保留檔案供之後重用：
+owner-controlled Story URL 必須當下有效，通常約 24 小時內失效。Story 是選用 ephemeral check，不得成為 CI 或 release gate，也不得把 URL 寫入 repository、CI、artifact、log 或 shell command history。請在 repository 之外建立 owner-only 暫存檔：
 
 ```bash
 (
@@ -227,7 +198,6 @@ Story smoke 必須使用 owner-controlled 的精確單則 Story URL，且執行�
   printf '\n'
   printf '%s\n' "$story_url" >"$story_url_file"
   unset story_url
-
   uv run python scripts/manual_smoke.py \
     --instagram-image 'https://www.instagram.com/p/OWNER_CONTROLLED_IMAGE/' \
     --instagram-reel 'https://www.instagram.com/reel/OWNER_CONTROLLED_REEL/' \
@@ -239,6 +209,6 @@ Story smoke 必須使用 owner-controlled 的精確單則 Story URL，且執行�
 )
 ```
 
-script 的所有案例都只能記錄 case label、status、item count 與 outcome，不得記錄 URL、token、Cookie 或 upstream media URL。script 會檢查每個 case 是否回傳 application-owned response、保留 media order、僅公開 opaque application URL，並提供可下載媒體。執行前必須將六個 placeholder URL 替換為真正的 owner-controlled 公開貼文；不需要 Story 時省略 `--instagram-story-file`，既有六個 required cases 保持不變。
+Script 只能記錄 case label、status、item count 與 outcome，不得記錄 URL、token、Cookie 或 upstream media URL。執行前須替換六個 placeholder；不測 Story 時省略 `--instagram-story-file`。
 
-Authenticated smoke test 應在對應 Compose override 啟用後執行，並確認 extraction、CDN raster preview、generated fallback preview 與 download 均成功。缺少 poster 的項目應只在首次載入生成一次，後續請求命中 bounded cache。下載與 generated preview 階段不得攜帶 Cookie；若 CDN 需要登入 Cookie，系統必須 fail closed 為 `upstream_media_invalid`，不可改用平台 session 轉送。Cookie 輪替後依「平台 Cookie 驗證」章節確認新 extractor process 已使用新檔，再以新的 account-visible URL 驗證。
+Authenticated smoke 應驗證 extraction、CDN raster preview、generated fallback preview 與 download。Preview 與 download 不得攜帶 Cookie；需要登入的 CDN 必須 fail closed。Cookie 輪替後應先確認新的 extractor process 已讀取新檔，再測試新的 account-visible URL。

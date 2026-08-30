@@ -84,3 +84,12 @@ def test_readme_documents_bounded_client_side_batch_workflow() -> None:
         "不代表瀏覽器或 OS 已完成檔案保存",
     ):
         assert required_text in readme
+
+
+def test_readme_uses_project_icon_and_documents_preview_default() -> None:
+    """驗證 README 使用專案圖示，且正確描述預覽的預設行為。"""
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "src/sns_media_list/static/favicon.svg" in readme
+    assert "預設使用本機 placeholder" in readme
+    assert "明確啟用" in readme
