@@ -1,8 +1,11 @@
 """Tests for privacy-aware structured logging."""
 
+import json
 import logging
 
-from sns_media_list.logging_config import PrivacyFilter, build_event
+import pytest
+
+from sns_media_list.logging_config import PrivacyFilter, build_event, configure_logging
 
 
 def test_build_event_omits_sensitive_fields() -> None:
@@ -51,3 +54,79 @@ def test_privacy_filter_removes_token_bearing_access_paths() -> None:
     assert PrivacyFilter().filter(record) is True
     assert "secret-token" not in record.getMessage()
     assert "?" not in record.getMessage()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "extraction_complete",
+        "media_download_started",
+        "media_download_completed",
+        "media_download_failed",
+        "media_download_aborted",
+        "media_download_resume_attempted",
+        "media_download_resume_succeeded",
+        "media_download_resume_failed",
+    ],
+)
+def test_default_safe_output(name, capsys) -> None:
+    """重複初始化仍只輸出一次 allowlist JSON，且不序列化敏感資料。"""
+    root = logging.getLogger()
+    before = (root.level, list(root.handlers))
+    configure_logging()
+    configure_logging()
+    logger = logging.getLogger("sns_media_list")
+    secret = "PRIVATE_SENTINEL"
+    event = build_event(
+        request_id="request-1",
+        platform="instagram",
+        outcome="failed",
+        duration_ms=2.0,
+        bytes_streamed=42,
+        media_class="video",
+        reason_code="upstream_truncation",
+        resume_attempt=1,
+    )
+    sensitive_fields = {
+        "source_url",
+        "range_url",
+        "query",
+        "token",
+        "cookie",
+        "authorization",
+        "proxy_authorization",
+        "etag",
+        "resolved_ip",
+        "transport_exception",
+    }
+    event.update(dict.fromkeys(sensitive_fields, secret))
+    try:
+        raise RuntimeError(secret)
+    except RuntimeError:
+        logger.info(name, extra={"event": event, "cookie": secret}, exc_info=True, stack_info=True)
+    logger.info(secret, extra={"event": event})
+    output = capsys.readouterr().err
+    assert secret not in output
+    assert len(output.splitlines()) == 1
+    parsed = json.loads(output)
+    assert parsed == {
+        "event": name,
+        **{k: v for k, v in event.items() if k not in sensitive_fields},
+    }
+    assert (root.level, root.handlers) == before
+    assert logger.propagate is False
+
+
+def test_formatter_failure_is_silent(monkeypatch, capsys) -> None:
+    """formatter failure 不得觸發 logging 的 raw record traceback。"""
+    configure_logging()
+    logger = logging.getLogger("sns_media_list")
+
+    def fail(_record):
+        """模擬含敏感訊息的 formatter failure。"""
+        raise RuntimeError("PRIVATE_SENTINEL")
+
+    for handler in logger.handlers:
+        monkeypatch.setattr(handler, "format", fail)
+    logger.info("media_download_failed", extra={"event": {}})
+    assert capsys.readouterr().err == ""

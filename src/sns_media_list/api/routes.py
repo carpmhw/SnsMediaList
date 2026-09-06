@@ -47,6 +47,10 @@ _DOWNLOAD_REASON_CODES = frozenset(
 )
 
 
+class StreamAborted(RuntimeError):
+    """以無敏感資訊的訊號要求 ASGI server 中止未完成傳輸。"""
+
+
 class DeadlineStreamingResponse(StreamingResponse):
     """Stream one response while bounding upstream and downstream lifetime."""
 
@@ -76,7 +80,7 @@ class DeadlineStreamingResponse(StreamingResponse):
         response_started = False
         response_completed = False
         deadline_timeout = False
-        caller_cancelled = False
+        caller_cancelled: asyncio.CancelledError | None = None
 
         async def tracked_receive() -> Message:
             """追蹤 ASGI request lifecycle 是否收到 client disconnect。"""
@@ -150,10 +154,7 @@ class DeadlineStreamingResponse(StreamingResponse):
                     raise
                 if stream_task in done:
                     _cancel_task_without_waiting(deadline_task)
-                    try:
-                        await stream_task
-                    except BaseException as error:
-                        stream_error = error
+                    await stream_task
                 else:
                     deadline_timeout = True
                     stream_task.cancel()
@@ -187,7 +188,7 @@ class DeadlineStreamingResponse(StreamingResponse):
                     stream_completed = True
         except BaseException as error:
             if isinstance(error, asyncio.CancelledError):
-                caller_cancelled = True
+                caller_cancelled = error
             stream_error = error
 
         cleanup_error: BaseException | None = None
@@ -195,7 +196,8 @@ class DeadlineStreamingResponse(StreamingResponse):
             await self._run_cleanup()
         except BaseException as error:
             if isinstance(error, asyncio.CancelledError):
-                caller_cancelled = True
+                if caller_cancelled is None:
+                    caller_cancelled = error
             cleanup_error = error
 
         if stream_error is None:
@@ -212,12 +214,15 @@ class DeadlineStreamingResponse(StreamingResponse):
             except Exception:
                 pass
 
-        if caller_cancelled:
-            raise asyncio.CancelledError
+        if caller_cancelled is not None:
+            raise caller_cancelled
         if isinstance(stream_error, ClientDisconnect):
             raise ClientDisconnect
-        if stream_error is not None and not response_started and not deadline_timeout:
+        if stream_error is not None and not response_started:
             raise stream_error
+        if stream_error is not None and response_started and not response_completed:
+            # 離開原始 except 區塊才建立訊號，避免 framework 記錄上游例外鏈。
+            raise StreamAborted("Media stream aborted.") from None
 
     async def _run_cleanup(self) -> None:
         """Run response cleanup once even when streaming never starts."""
