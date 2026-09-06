@@ -63,6 +63,40 @@ batch UI 不會改變 `SNS_MEDIA_MAX_EXTRACTIONS`；最多五個 URL 由瀏覽�
 
 瀏覽器可能要求多檔下載權限；「已開始下載」不代表瀏覽器或 OS 已完成檔案保存，必要時請在 client 端確認實際檔案。
 
+## 安全下載診斷
+
+預設 application logger 以 INFO 等級將每筆事件寫成一行 JSON 至 stderr，Docker 可直接收集，不需要額外 handler 或 debug 設定。重複初始化不會增加輸出，也不修改 root logger 或向 root propagation。Uvicorn access log 必須維持停用；**不得為排錯開啟可能包含 token path 的 application、Uvicorn 或 reverse proxy access log**。
+
+下載事件為 `media_download_started`，以及唯一的 `media_download_completed`、`media_download_failed` 或 `media_download_aborted` terminal event。X 影片符合既有條件時另有 `media_download_resume_attempted`、`media_download_resume_succeeded` 或 `media_download_resume_failed`，`resume_attempt` 固定為 1。Instagram 不增加 Range resume 或伺服器重試；瀏覽器本身可能重新發出 GET，每次 GET 都有不同 request ID。
+
+安全欄位包含 `event`、`request_id`、`platform`、`media_class`、`outcome`、`duration_ms`、`bytes_streamed`，失敗時另有 `reason_code`。既有 `extraction_complete` 事件仍可輸出 `item_count`。任意 extra、完整 URL、query、token、Cookie、Authorization、raw ETag 與原始 transport exception 均不屬於輸出內容。
+
+| Reason Code | 意義與檢查方向 |
+| --- | --- |
+| `idle_timeout` | 上游讀取或下游 send 閒置期限到期；需比對 client 與 ingress，不能僅由此判定 CDN 根因。 |
+| `size_limit` | 超過既有 byte limit；不得為重現直接放寬限制。 |
+| `client_disconnect` | Client disconnect 或取消，terminal outcome 為 `aborted`。 |
+| `upstream_truncation` | 媒體提前結束且未恢復；Instagram 不續傳。 |
+| `upstream_validation` | 狀態、MIME、媒體內容或 resume response 等驗證失敗。 |
+| `unexpected_upstream_failure` | 未落入上述分類的讀取、送出或 cleanup 錯誤；不輸出 raw exception。 |
+
+`started` 是下載流程開始，不保證 HTTP headers 已送出。`bytes_streamed` 是串流流程交付並恢復迭代後累計的媒體 bytes，不是瀏覽器落盤 bytes，也無法精確計算失敗 send 已傳出的部分資料。`completed` 只在最後 body 與 cleanup 均成功後記錄。最後 body 成功後若 cleanup 才失敗，仍記錄 failed，但不能撤回瀏覽器已收到的檔案。
+
+Headers 已開始而 body 未完成時，服務用固定的 `StreamAborted: Media stream aborted.` 訊號讓 Uvicorn 關閉連線，不補送最後 body、不移除可信 Content-Length，也不建立第二份 error response。Uvicorn 可能輸出安全 traceback；這不代表應停用所有錯誤日誌。`ASGI callable returned without completing response` 是舊版正常返回未完成回應的症狀，本身不能證明 Cookie、CDN 或 timeout 是原始 Story 失敗原因。
+
+### Operator 診斷清單
+
+本清單僅供**另經授權部署後**操作，不授權建置、推送、重啟或部署，也不表示原始 Story 已修復。
+
+1. 確認執行版本與授權範圍、access log 關閉、ingress authentication/ACL 及媒體 `proxy_buffering off`。部署重啟會使舊 token 失效，需重新解析。
+2. 在有權使用的帳號確認原 Story 仍有效且可存取。若已過期、不可見或外部服務不可用，記錄「無法重現」與安全原因，不繞過限制，也不改用 deterministic fixture 宣稱已重現原事件。
+3. 以既有 UI 重新分析並立即下載；記錄測試時間、瀏覽器版本、直連或受控 proxy、儲存確認時機，以及瀏覽器最終成功或失敗。不要匯出含 token、Cookie 或 URL 的 HAR、request dump 或截圖。
+4. 使用 `docker compose logs --no-log-prefix --since 10m app` 在受限終端查看事件；分享前只保留上述安全 JSON 欄位。以 request ID 串接 started 與唯一 terminal event，若瀏覽器重試則分開記錄每次 GET；不要分享 token-bearing request path。
+5. 成功案例在 client 核對檔名、實際大小與可讀性；失敗案例記錄 `reason_code`、`duration_ms`、`bytes_streamed` 與瀏覽器結果。只有 started 或 download event，不足以判斷落盤完成。缺少 terminal event 時另查程序終止、日誌收集或輸出故障，不假定傳輸成功。
+6. 若直連正常而 ingress 失敗，按既有安全設定比對 buffering、idle timeout 與連線中止；不要開 access log 或任意調高 timeout。只有取得原始失敗的去敏證據後，才另提上游傳輸修正。
+
+Deterministic HTTP 與 Chromium 驗證、舊行為重現及限制記錄於 `openspec/changes/diagnose-download-stream-failures/verification.md`；這些驗證不接觸 Instagram 或 operator Cookie。
+
 ## 平台 Cookie 驗證
 
 平台 Cookie 是 bearer credential。配置 Instagram Cookie 後，任何服務使用者都可能間接使用 operator Instagram 帳號的 session，讀取該帳號可見的私人、Close Friends 或受眾限定 Story。服務沒有 per-user authorization，只適合本人管理的可信網路；請使用低權限專用帳號。

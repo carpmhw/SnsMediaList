@@ -13,6 +13,7 @@ from starlette.requests import ClientDisconnect
 from sns_media_list.api.limits import Lease, RequestLimiter
 from sns_media_list.api.routes import (
     DeadlineStreamingResponse,
+    StreamAborted,
     _await_with_deadline,
     _close_response_with_timeout,
     _generate_preview,
@@ -21,6 +22,7 @@ from sns_media_list.api.routes import (
 from sns_media_list.app import create_app
 from sns_media_list.config import Settings
 from sns_media_list.errors import AppError
+from sns_media_list.logging_config import SafeEventHandler, configure_logging
 from sns_media_list.models import PrivateMediaRecord
 from sns_media_list.network.media_client import MediaResponse, MediaTruncatedError
 from sns_media_list.security.tokens import MediaTokenDraft, TokenStore
@@ -1189,7 +1191,8 @@ async def test_download_send_timeout_detaches_blackhole_and_releases_lease(
         await asyncio.wait_for(send_started.wait(), timeout=0.1)
         done, _pending = await asyncio.wait({response_task}, timeout=0.2)
         assert response_task in done
-        response_task.result()
+        with pytest.raises(StreamAborted):
+            response_task.result()
         assert send_cancelled.is_set()
         assert writer.close_calls == 1
         assert lease.release_calls == 1
@@ -1527,8 +1530,11 @@ async def test_final_body_send_failure_logs_aborted_not_completed(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_target", ["helper", "formatter", "handler"])
 async def test_logging_failure_does_not_mask_stream_error_or_duplicate_cleanup(
     monkeypatch: pytest.MonkeyPatch,
+    failure_target: str,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """logging 拋例外時應保留原始 upstream error 並只清理一次。"""
     upstream, writer = make_tracked_media_response(
@@ -1541,7 +1547,18 @@ async def test_logging_failure_does_not_mask_stream_error_or_duplicate_cleanup(
         """模擬結構化 logger 本身失敗。"""
         raise RuntimeError("private logging failure")
 
-    monkeypatch.setattr("sns_media_list.api.routes._log_download_event", raise_logging_error)
+    configure_logging()
+    if failure_target == "helper":
+        monkeypatch.setattr("sns_media_list.api.routes._log_download_event", raise_logging_error)
+    else:
+        handler = next(
+            item
+            for item in logging.getLogger("sns_media_list").handlers
+            if isinstance(item, SafeEventHandler)
+        )
+        monkeypatch.setattr(
+            handler, "format" if failure_target == "formatter" else "emit", raise_logging_error
+        )
 
     with pytest.raises(AppError) as exc_info:
         response = await _stream_media(
@@ -1556,6 +1573,7 @@ async def test_logging_failure_does_not_mask_stream_error_or_duplicate_cleanup(
     assert exc_info.value.code == "upstream_media_invalid"
     assert writer.close_calls == 1
     assert lease.release_calls == 1
+    assert "private" not in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -2629,10 +2647,11 @@ async def test_stream_preview_cleanup_is_bounded_after_deadline_and_releases_lea
             await asyncio.sleep(1.0)
 
     started = asyncio.get_running_loop().time()
-    await asyncio.wait_for(
-        response(make_asgi_scope(spec_version="2.4"), receive, send),
-        timeout=0.2,
-    )
+    with pytest.raises(StreamAborted):
+        await asyncio.wait_for(
+            response(make_asgi_scope(spec_version="2.4"), receive, send),
+            timeout=0.2,
+        )
 
     assert asyncio.get_running_loop().time() - started < 0.1
     assert lease.release_calls == 1
@@ -2669,7 +2688,7 @@ async def test_preview_prevalidation_cleanup_is_bounded_and_releases_lease() -> 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("send_timeout", [None, 1.0], ids=["unbounded-send", "bounded-send"])
-async def test_deadline_response_suppresses_stream_error_after_response_started(
+async def test_deadline_response_aborts_stream_error_after_response_started(
     send_timeout: float | None,
 ) -> None:
     """response 已開始後，body 原始錯誤不得再觸發第二個 HTTP response。"""
@@ -2706,7 +2725,8 @@ async def test_deadline_response_suppresses_stream_error_after_response_started(
         on_stream_error=on_error,
     )
 
-    await response(make_asgi_scope(spec_version="2.3"), receive, send)
+    with pytest.raises(StreamAborted):
+        await response(make_asgi_scope(spec_version="2.3"), receive, send)
 
     assert cleanup_calls == 1
     assert len(errors) == 1
@@ -3093,7 +3113,8 @@ async def test_deadline_response_suppresses_body_timeout_after_cancel() -> None:
         on_stream_error=on_error,
     )
 
-    await response(make_asgi_scope(spec_version="2.3"), receive, send)
+    with pytest.raises(StreamAborted):
+        await response(make_asgi_scope(spec_version="2.3"), receive, send)
 
     assert len(errors) == 1
     assert isinstance(errors[0], TimeoutError)
@@ -3150,7 +3171,8 @@ async def test_deadline_response_reports_failure_when_body_outlives_deadline(
     )
 
     try:
-        await response(make_asgi_scope(spec_version="2.4"), receive, send)
+        with pytest.raises(StreamAborted):
+            await response(make_asgi_scope(spec_version="2.4"), receive, send)
         await asyncio.wait_for(started.wait(), timeout=0.1)
         await asyncio.wait_for(cancelled.wait(), timeout=0.1)
         assert len(errors) == 1
