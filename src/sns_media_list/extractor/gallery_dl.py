@@ -57,16 +57,23 @@ _AUTHENTICATION_FAILURE_PATTERN = re.compile(
     r"\b(?:authenticationerror|invalid\s+login\s+credentials)\b",
     re.IGNORECASE,
 )
-_STORY_UNAVAILABLE_PATTERN = re.compile(
+_STORY_AUTHENTICATION_PATTERN = re.compile(
     r"""
     \b(?:
         authrequired
         |auth(?:entication)?\s+required
         |authenticated\s+cookies\s+needed
         |credentials\s+required
-        |insufficient\s+privileges
         |login\s+(?:page|required)
         |http\s+redirect\s+to\s+(?:a\s+)?login\s+page
+    )\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_STORY_UNAVAILABLE_PATTERN = re.compile(
+    r"""
+    \b(?:
+        insufficient\s+privileges
         |private\s+(?:story|account|content|post)
         |(?:story|account|content|post)\s+is\s+private
         |notfounderror
@@ -213,7 +220,7 @@ class GalleryDlRunner:
         )
 
     async def extract(self, target: ValidatedExtractionTarget) -> list[dict[str, object]]:
-        """Extract JSON records for a validated target and map safe errors."""
+        """擷取驗證過的目標並將錯誤映射為安全的 application error。"""
         with tempfile.TemporaryDirectory(prefix="sns-gallery-") as home:
             cookie_file = _cookie_file_for_platform(self.settings, target.platform)
             command = build_gallery_command(
@@ -235,11 +242,17 @@ class GalleryDlRunner:
                 )
             except OSError as error:
                 raise AppError(
-                    "extraction_failed", "The extractor process could not be started."
+                    "extraction_failed",
+                    "The extractor process could not be started.",
+                    failure_stage="extractor_start",
                 ) from error
             stdout, stderr = await self._communicate(process)
         if len(stdout) > self.settings.extraction_output_limit:
-            raise AppError("extraction_failed", "The extractor output exceeded its limit.")
+            raise AppError(
+                "extraction_failed",
+                "The extractor output exceeded its limit.",
+                failure_stage="extractor_output_limit",
+            )
         if process.returncode != 0:
             raise _map_process_error(
                 stderr,
@@ -256,11 +269,27 @@ class GalleryDlRunner:
         if not records:
             if parsed.literal_empty:
                 if target.kind == "story":
-                    raise AppError("story_unavailable", "This Story is unavailable.")
-                raise AppError("extraction_failed", "The extractor returned invalid output.")
+                    raise AppError(
+                        "story_unavailable",
+                        "This Story is unavailable.",
+                        failure_stage="extractor_empty_output",
+                    )
+                raise AppError(
+                    "extraction_failed",
+                    "The extractor returned invalid output.",
+                    failure_stage="extractor_empty_output",
+                )
             if parsed.saw_non_media:
-                raise AppError("no_media", "No directly downloadable media was found.")
-            raise AppError("extraction_failed", "The extractor returned invalid output.")
+                raise AppError(
+                    "no_media",
+                    "No directly downloadable media was found.",
+                    failure_stage="extractor_no_media",
+                )
+            raise AppError(
+                "extraction_failed",
+                "The extractor returned invalid output.",
+                failure_stage="extractor_invalid_output",
+            )
         return _add_post_context(records, target)
 
     async def _communicate(self, process: asyncio.subprocess.Process) -> tuple[bytes, bytes]:
@@ -308,15 +337,23 @@ class GalleryDlRunner:
         except _ExtractionOutputLimitExceeded as error:
             await _stop_extraction_process(process, tasks[2])
             raise AppError(
-                "extraction_failed", "The extractor output exceeded its limit."
+                "extraction_failed",
+                "The extractor output exceeded its limit.",
+                failure_stage="extractor_output_limit",
             ) from error
         except _ExtractionOperationTimeout as error:
             await _stop_extraction_process(process, tasks[2])
-            raise AppError("extraction_timeout", "The extraction timed out.") from error
+            raise AppError(
+                "extraction_timeout",
+                "The extraction timed out.",
+                failure_stage="extractor_timeout",
+            ) from error
         except OSError as error:
             await _stop_extraction_process(process, tasks[2])
             raise AppError(
-                "extraction_failed", "The extractor output could not be read."
+                "extraction_failed",
+                "The extractor output could not be read.",
+                failure_stage="extractor_io",
             ) from error
         except BaseException:
             await _stop_extraction_process(process, tasks[2])
@@ -332,11 +369,17 @@ class GalleryDlRunner:
             )
         except TimeoutError as error:
             await _stop_extraction_process(process)
-            raise AppError("extraction_timeout", "The extraction timed out.") from error
+            raise AppError(
+                "extraction_timeout",
+                "The extraction timed out.",
+                failure_stage="extractor_timeout",
+            ) from error
         except OSError as error:
             await _stop_extraction_process(process)
             raise AppError(
-                "extraction_failed", "The extractor output could not be read."
+                "extraction_failed",
+                "The extractor output could not be read.",
+                failure_stage="extractor_io",
             ) from error
 
 
@@ -476,7 +519,7 @@ def _consume_extraction_task_exception(task: asyncio.Future[Any]) -> None:
 
 
 def _parse_json_records(stdout: bytes) -> _ParsedGalleryOutput:
-    """Parse only the pinned non-JSONL DataJob top-level event array."""
+    """解析 pinned 非 JSONL DataJob 頂層 event array。"""
     try:
         text = stdout.decode("utf-8")
         if not text.strip():
@@ -502,7 +545,11 @@ def _parse_json_records(stdout: bytes) -> _ParsedGalleryOutput:
             tuple(media_records), tuple(error_records), False, saw_non_media
         )
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
-        raise AppError("extraction_failed", "The extractor returned invalid output.") from error
+        raise AppError(
+            "extraction_failed",
+            "The extractor returned invalid output.",
+            failure_stage="extractor_invalid_output",
+        ) from error
 
 
 def _record_from_message_tuple(
@@ -613,63 +660,143 @@ def _map_extractor_error(
     target_kind: TargetKind,
     authenticated: bool,
 ) -> AppError:
-    """Classify separate extractor error types and messages into stable errors."""
+    """將 extractor error type 與訊息分類為穩定的 application error。"""
     normalized_type = error_type.strip().casefold() if error_type is not None else None
     diagnostic = _remove_http_urls(message)
     statuses = _extract_http_statuses(diagnostic)
     if 429 in statuses:
-        return AppError("upstream_rate_limited", "The source platform is rate limiting requests.")
+        return AppError(
+            "upstream_rate_limited",
+            "The source platform is rate limiting requests.",
+            failure_stage="extractor_platform_error",
+        )
+    if normalized_type not in _KNOWN_ERROR_TYPES and _RATE_LIMIT_PHRASE_PATTERN.search(diagnostic):
+        return AppError(
+            "upstream_rate_limited",
+            "The source platform is rate limiting requests.",
+            failure_stage="extractor_platform_error",
+        )
+    if target_kind == "story":
+        return _map_story_extractor_error(
+            normalized_type,
+            diagnostic,
+            statuses=statuses,
+            authenticated=authenticated,
+        )
+
     if authenticated and normalized_type == _AUTHENTICATION_ERROR_TYPE:
         return AppError(
             "platform_authentication_failed",
             "The configured platform session is unavailable. Contact the service operator.",
+            failure_stage="extractor_platform_error",
         )
-    if target_kind == "story" and normalized_type == _NOT_FOUND_ERROR_TYPE:
-        return AppError("story_unavailable", "This Story is unavailable.")
     if normalized_type == _AUTH_REQUIRED_ERROR_TYPE:
-        if target_kind == "story":
-            return AppError("story_unavailable", "This Story is unavailable.")
         if authenticated:
             return AppError(
                 "platform_authentication_failed",
                 "The configured platform session is unavailable. Contact the service operator.",
+                failure_stage="extractor_platform_error",
             )
-        return AppError("post_unavailable", "This post is not available anonymously.")
+        return AppError(
+            "post_unavailable",
+            "This post is not available anonymously.",
+            failure_stage="extractor_platform_error",
+        )
     if not authenticated and normalized_type == _AUTHENTICATION_ERROR_TYPE:
-        if target_kind == "story":
-            return AppError("story_unavailable", "This Story is unavailable.")
-        return AppError("post_unavailable", "This post is not available anonymously.")
-    if (
-        target_kind == "story"
-        and normalized_type == _HTTP_ERROR_TYPE
-        and statuses.intersection({401, 403, 404})
-    ):
-        return AppError("story_unavailable", "This Story is unavailable.")
-    if normalized_type not in _KNOWN_ERROR_TYPES and _RATE_LIMIT_PHRASE_PATTERN.search(diagnostic):
-        return AppError("upstream_rate_limited", "The source platform is rate limiting requests.")
+        return AppError(
+            "post_unavailable",
+            "This post is not available anonymously.",
+            failure_stage="extractor_platform_error",
+        )
     explicit_authentication_failure = (
         _EXPLICIT_SESSION_FAILURE_PATTERN.search(diagnostic) is not None
         or _AUTHENTICATION_FAILURE_PATTERN.search(diagnostic) is not None
     )
-    broad_post_authentication_failure = target_kind == "post" and (
-        _BROAD_AUTHENTICATION_PATTERN.search(diagnostic) is not None
-    )
+    broad_post_authentication_failure = _BROAD_AUTHENTICATION_PATTERN.search(diagnostic) is not None
     if authenticated and (explicit_authentication_failure or broad_post_authentication_failure):
         return AppError(
             "platform_authentication_failed",
             "The configured platform session is unavailable. Contact the service operator.",
+            failure_stage="extractor_platform_error",
         )
-    if target_kind == "story" and statuses.intersection({401, 403, 404}):
-        return AppError("story_unavailable", "This Story is unavailable.")
     if not authenticated and _AUTHENTICATION_FAILURE_PATTERN.search(diagnostic) is not None:
-        if target_kind == "story":
-            return AppError("story_unavailable", "This Story is unavailable.")
-        return AppError("post_unavailable", "This post is not available anonymously.")
-    if target_kind == "story" and (_STORY_UNAVAILABLE_PATTERN.search(diagnostic) is not None):
-        return AppError("story_unavailable", "This Story is unavailable.")
+        return AppError(
+            "post_unavailable",
+            "This post is not available anonymously.",
+            failure_stage="extractor_platform_error",
+        )
     if _POST_UNAVAILABLE_PATTERN.search(diagnostic) is not None:
-        return AppError("post_unavailable", "This post is not available anonymously.")
-    return AppError("extraction_failed", "The source platform could not be extracted.")
+        return AppError(
+            "post_unavailable",
+            "This post is not available anonymously.",
+            failure_stage="extractor_platform_error",
+        )
+    return AppError(
+        "extraction_failed",
+        "The source platform could not be extracted.",
+        failure_stage="extractor_process_unclassified",
+    )
+
+
+def _map_story_extractor_error(
+    normalized_type: str | None,
+    diagnostic: str,
+    *,
+    statuses: set[int],
+    authenticated: bool,
+) -> AppError:
+    """依明確 diagnostic 證據與 Cookie 配置狀態分類單則 Story 錯誤。"""
+    if normalized_type == _NOT_FOUND_ERROR_TYPE or 404 in statuses:
+        return AppError(
+            "story_unavailable",
+            "This Story is unavailable.",
+            failure_stage="extractor_platform_error",
+        )
+
+    authentication_failure = (
+        normalized_type in {_AUTH_REQUIRED_ERROR_TYPE, _AUTHENTICATION_ERROR_TYPE}
+        or _STORY_AUTHENTICATION_PATTERN.search(diagnostic) is not None
+        or _EXPLICIT_SESSION_FAILURE_PATTERN.search(diagnostic) is not None
+        or _AUTHENTICATION_FAILURE_PATTERN.search(diagnostic) is not None
+    )
+    if authentication_failure:
+        if authenticated:
+            return AppError(
+                "platform_authentication_failed",
+                "The configured platform session is unavailable. Contact the service operator.",
+                failure_stage="extractor_platform_error",
+            )
+        return AppError(
+            "story_auth_required",
+            "This Instagram Story requires an authenticated session.",
+            failure_stage="extractor_platform_error",
+        )
+
+    if _STORY_UNAVAILABLE_PATTERN.search(diagnostic) is not None:
+        return AppError(
+            "story_unavailable",
+            "This Story is unavailable.",
+            failure_stage="extractor_platform_error",
+        )
+
+    if statuses.intersection({401, 403}):
+        if authenticated:
+            return AppError(
+                "extraction_failed",
+                "The source platform could not be extracted.",
+                failure_stage="extractor_process_unclassified",
+            )
+        return AppError(
+            "story_auth_required",
+            "This Instagram Story requires an authenticated session.",
+            failure_stage="extractor_platform_error",
+        )
+
+    return AppError(
+        "extraction_failed",
+        "The source platform could not be extracted.",
+        failure_stage="extractor_process_unclassified",
+    )
 
 
 def _remove_http_urls(message: str) -> str:

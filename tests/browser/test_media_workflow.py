@@ -290,7 +290,7 @@ def test_javascript_has_same_origin_extraction_and_recovery_hooks() -> None:
     assert "token_not_found" in response.text
     assert "平台暫時限制存取" in response.text
     assert "story_unavailable" in response.text
-    assert "此 Story 目前無法使用。" in response.text
+    assert "此 Instagram Story 已無法取得，可能已過期、刪除或無權限存取。" in response.text
     assert "X 狀態貼文" in response.text
     assert "帳號目前全部 Stories 與 Highlights 不支援" in response.text
     assert "X status" not in response.text

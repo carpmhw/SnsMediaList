@@ -5,7 +5,7 @@ import inspect
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from time import monotonic, perf_counter
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Request
 from fastapi.responses import Response, StreamingResponse
@@ -14,8 +14,8 @@ from starlette.requests import ClientDisconnect
 from starlette.types import Message, Receive, Scope, Send
 
 from ..api.limits import Lease, RequestLimiter, client_identity
-from ..errors import AppError
-from ..logging_config import build_event
+from ..errors import AppError, FailureStageValue
+from ..logging_config import EXTRACTION_REASON_CODES, build_event
 from ..models import ExtractionResponse, PrivateMediaRecord
 from ..network.media_client import (
     MediaClient,
@@ -29,6 +29,7 @@ from ..network.media_client import (
 from ..services.extraction_service import ExtractionService
 from ..services.thumbnail import ThumbnailGenerator, validate_thumbnail_media_class
 from ..services.thumbnail_cache import ThumbnailCoordinator
+from ..url_validation import platform_for_url
 
 logger = logging.getLogger("sns_media_list")
 
@@ -333,22 +334,35 @@ def build_router(
 
     @router.post("/extractions")
     async def create_extraction(request: Request, payload: ExtractionRequest) -> ExtractionResponse:
-        """Extract a public post and return its normalized media list."""
-        lease = limiter.acquire_extraction(_request_client_identity(request, trusted_proxy_cidrs))
-        async with lease:
-            started = perf_counter()
-            result = await service.extract(payload.url)
-        logger.info(
+        """擷取一個已驗證媒體目標，並回傳正規化媒體清單。"""
+        started = perf_counter()
+        try:
+            lease = limiter.acquire_extraction(
+                _request_client_identity(request, trusted_proxy_cidrs)
+            )
+            async with lease:
+                result = await service.extract(payload.url)
+        except AppError as error:
+            reason_code = (
+                error.code if error.code in EXTRACTION_REASON_CODES else "extraction_failed"
+            )
+            _safe_log_extraction_event(
+                "extraction_failed",
+                request_id=getattr(request.state, "request_id", "unknown"),
+                platform=platform_for_url(payload.url),
+                outcome="failed",
+                duration_ms=(perf_counter() - started) * 1000,
+                reason_code=reason_code,
+                failure_stage=error.failure_stage,
+            )
+            raise
+        _safe_log_extraction_event(
             "extraction_complete",
-            extra={
-                "event": build_event(
-                    request_id=getattr(request.state, "request_id", "unknown"),
-                    platform=result.platform,
-                    outcome="success",
-                    duration_ms=(perf_counter() - started) * 1000,
-                    item_count=len(result.media),
-                )
-            },
+            request_id=getattr(request.state, "request_id", "unknown"),
+            platform=result.platform,
+            outcome="success",
+            duration_ms=(perf_counter() - started) * 1000,
+            item_count=len(result.media),
         )
         return result
 
@@ -452,6 +466,44 @@ def _download_reason_code(error: BaseException) -> str:
             return "unexpected_upstream_failure"
         return "upstream_validation"
     return "unexpected_upstream_failure"
+
+
+def _safe_log_extraction_event(
+    event_name: Literal["extraction_complete", "extraction_failed"],
+    *,
+    request_id: str,
+    platform: str | None,
+    outcome: Literal["success", "failed"],
+    duration_ms: float,
+    item_count: int | None = None,
+    reason_code: str | None = None,
+    failure_stage: FailureStageValue | None = None,
+) -> None:
+    """Best-effort 輸出 allowlisted extraction event，不影響 API 結果。"""
+    if event_name == "extraction_failed":
+        if reason_code not in EXTRACTION_REASON_CODES:
+            reason_code = "extraction_failed"
+        item_count = None
+    else:
+        reason_code = None
+        failure_stage = None
+    try:
+        logger.info(
+            event_name,
+            extra={
+                "event": build_event(
+                    request_id=request_id,
+                    platform=platform,
+                    outcome=outcome,
+                    duration_ms=duration_ms,
+                    item_count=item_count,
+                    reason_code=reason_code,
+                    failure_stage=failure_stage,
+                )
+            },
+        )
+    except Exception:
+        pass
 
 
 def _log_download_event(

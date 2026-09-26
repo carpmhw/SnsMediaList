@@ -38,14 +38,15 @@ const ERROR_MESSAGES = {
   invalid_url: '請輸入 HTTPS Instagram 貼文、Reel、單則 Story 或 X 狀態貼文 URL。',
   unsupported_url: '僅支援 Instagram 貼文、Reel、單則 Story 與 X 狀態貼文 URL；帳號目前全部 Stories 與 Highlights 不支援。',
   post_unavailable: '此貼文無法使用、已刪除，或目前帳號無法讀取。',
-  story_unavailable: '此 Story 目前無法使用。',
+  story_auth_required: '此 Instagram Story 需要登入驗證，服務目前未設定 Instagram 工作階段。請聯絡服務管理者。',
+  story_unavailable: '此 Instagram Story 已無法取得，可能已過期、刪除或無權限存取。',
   no_media: '此內容沒有可直接串流的媒體。',
   extraction_limit_exceeded: '此內容的媒體數量超過服務可列出的上限。',
   request_too_large: '提交的請求太大，請只貼上一個內容 URL。',
   unsupported_media_type: '請使用未壓縮的 JSON 請求提交內容 URL。',
   local_rate_limited: '服務目前忙碌中，請稍候再試。',
   upstream_rate_limited: '平台暫時限制存取，請稍後再試。',
-  platform_authentication_failed: '平台驗證工作階段無法使用，請聯絡服務管理者。',
+  platform_authentication_failed: '平台驗證工作階段無法使用，請由服務管理者檢查或更新登入 Cookie。',
   capacity_exceeded: '暫存結果容量已滿，請稍後重新分析。',
   extraction_failed: '目前無法分析此內容。',
   extraction_timeout: '平台回應時間過長，請稍後再試。',
@@ -123,6 +124,12 @@ function renderBatchQueue(run) {
     state.className = 'queue-item-state';
     state.textContent = queueStateLabel(item.state);
     row.append(url, state);
+    if (item.errorMessage) {
+      const errorMessage = document.createElement('span');
+      errorMessage.className = 'queue-item-error';
+      errorMessage.textContent = item.errorMessage;
+      row.append(errorMessage);
+    }
     return row;
   }));
 }
@@ -217,11 +224,14 @@ async function analyzeBatch() {
         } else {
           item.state = 'error';
         }
-      } catch (_error) {
+      } catch (error) {
         if (!isCurrentBatchRun(run)) {
           return;
         }
         item.state = 'error';
+        item.errorMessage = error?.code && Object.hasOwn(ERROR_MESSAGES, error.code)
+          ? ERROR_MESSAGES[error.code]
+          : '目前無法分析此內容。';
       }
       renderBatchQueue(run);
       if (run.stopped) {
@@ -828,7 +838,7 @@ function renderResults(payload, isSingleResult = false, existingGroup = null) {
   return group;
 }
 
-/** Convert a stable API error response into a safe browser Error. */
+/** 將穩定 API error code 轉為固定安全的瀏覽器錯誤訊息。 */
 async function readApiError(response) {
   let payload = {};
   try {
@@ -837,7 +847,9 @@ async function readApiError(response) {
     payload = {};
   }
   const code = response.headers.get('x-sns-error-code') || payload.code || 'request_failed';
-  const error = new Error(ERROR_MESSAGES[code] || '無法完成請求。');
+  const error = new Error(
+    Object.hasOwn(ERROR_MESSAGES, code) ? ERROR_MESSAGES[code] : '無法完成請求。',
+  );
   error.code = code;
   return error;
 }

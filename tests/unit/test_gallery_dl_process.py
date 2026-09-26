@@ -535,8 +535,8 @@ async def test_runner_reloads_configured_cookie_file_for_each_process(
             "authenticated cookies needed to access this resource",
             False,
             STORY_URL,
-            "story_unavailable",
-            404,
+            "story_auth_required",
+            403,
             id="anonymous-story-auth-required",
         ),
         pytest.param(
@@ -544,8 +544,8 @@ async def test_runner_reloads_configured_cookie_file_for_each_process(
             "authenticated cookies needed to access this resource",
             True,
             STORY_URL,
-            "story_unavailable",
-            404,
+            "platform_authentication_failed",
+            503,
             id="configured-story-auth-required",
         ),
         pytest.param(
@@ -578,11 +578,20 @@ async def test_runner_reloads_configured_cookie_file_for_each_process(
         pytest.param(
             "HttpError",
             f"'401 Unauthorized' for '{STORY_URL}'",
+            False,
+            STORY_URL,
+            "story_auth_required",
+            403,
+            id="anonymous-story-http-401",
+        ),
+        pytest.param(
+            "HttpError",
+            f"'401 Unauthorized' for '{STORY_URL}'",
             True,
             STORY_URL,
-            "story_unavailable",
-            404,
-            id="story-http-401",
+            "extraction_failed",
+            502,
+            id="configured-story-http-401-ambiguous",
         ),
         pytest.param(
             "HttpError",
@@ -598,9 +607,18 @@ async def test_runner_reloads_configured_cookie_file_for_each_process(
             f"'403 Forbidden' for '{STORY_URL}'",
             True,
             STORY_URL,
-            "story_unavailable",
-            404,
-            id="story-http-403",
+            "extraction_failed",
+            502,
+            id="configured-story-http-403-ambiguous",
+        ),
+        pytest.param(
+            "HttpError",
+            f"'403 Forbidden' for '{STORY_URL}'",
+            False,
+            STORY_URL,
+            "story_auth_required",
+            403,
+            id="anonymous-story-http-403",
         ),
         pytest.param(
             "HttpError",
@@ -722,7 +740,7 @@ async def test_runner_maps_pinned_structured_diagnostics(
     expected_code: str,
     expected_status: int,
 ) -> None:
-    """Verify pinned structured diagnostics retain stable target-aware errors."""
+    """驗證 gallery-dl 結構化診斷維持穩定且依目標分類的錯誤。"""
     error = await assert_runner_error(
         monkeypatch,
         target_url=target_url,
@@ -742,6 +760,7 @@ async def test_runner_maps_pinned_structured_diagnostics(
     ("configured", "target_url", "expected_code"),
     [
         pytest.param(True, STORY_URL, "platform_authentication_failed", id="configured-story"),
+        pytest.param(False, STORY_URL, "story_auth_required", id="anonymous-story"),
         pytest.param(False, POST_URL, "post_unavailable", id="anonymous-post"),
     ],
 )
@@ -752,7 +771,7 @@ async def test_runner_maps_structured_authentication_error(
     target_url: str,
     expected_code: str,
 ) -> None:
-    """Verify AuthenticationError distinguishes configured and anonymous extraction."""
+    """驗證 AuthenticationError 依 Cookie 配置狀態區分錯誤。"""
     await assert_runner_error(
         monkeypatch,
         target_url=target_url,
@@ -773,6 +792,34 @@ async def test_runner_maps_structured_authentication_error(
             STORY_URL,
             "upstream_rate_limited",
             id="http-429-precedes-auth",
+        ),
+        pytest.param(
+            "AuthRequired: authenticated cookies needed",
+            False,
+            STORY_URL,
+            "story_auth_required",
+            id="anonymous-story-auth-required-stderr",
+        ),
+        pytest.param(
+            "AuthRequired: authenticated cookies needed",
+            True,
+            STORY_URL,
+            "platform_authentication_failed",
+            id="configured-story-auth-required-stderr",
+        ),
+        pytest.param(
+            f"HttpError: '401 Unauthorized' for '{STORY_URL}'",
+            True,
+            STORY_URL,
+            "extraction_failed",
+            id="configured-story-http-401-stderr",
+        ),
+        pytest.param(
+            f"HttpError: '404 Not Found' for '{STORY_URL}'",
+            True,
+            STORY_URL,
+            "story_unavailable",
+            id="configured-story-http-404-stderr",
         ),
         pytest.param(
             f"AbortExtraction: {CHALLENGE_REDIRECT}",
@@ -798,7 +845,7 @@ async def test_runner_maps_process_stderr_fallbacks(
     target_url: str,
     expected_code: str,
 ) -> None:
-    """Verify bounded stderr fallback handles rate limit, challenge, and generic errors."""
+    """驗證受限 stderr fallback 分類 rate limit、challenge 與一般錯誤。"""
     error = await assert_runner_error(
         monkeypatch,
         target_url=target_url,
@@ -813,10 +860,315 @@ async def test_runner_maps_process_stderr_fallbacks(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("message", "configured", "expected_code"),
+    [
+        pytest.param(
+            f"HttpError: '429 Too Many Requests' and AuthRequired for '{STORY_URL}'",
+            True,
+            "upstream_rate_limited",
+            id="http-429-precedes-auth-and-not-found",
+        ),
+        pytest.param(
+            f"HttpError: '404 Not Found' and login required for '{STORY_URL}'",
+            False,
+            "story_unavailable",
+            id="http-404-precedes-auth",
+        ),
+        pytest.param(
+            f"HTTP 403 for '{STORY_URL}?reason=invalid+session'",
+            True,
+            "extraction_failed",
+            id="query-auth-phrase-is-not-evidence",
+        ),
+        pytest.param(
+            f"HTTP 403 for '{STORY_URL}' expired session",
+            True,
+            "platform_authentication_failed",
+            id="explicit-session-evidence-precedes-ambiguous-status",
+        ),
+        pytest.param(
+            f"HTTP 403 for '{STORY_URL}' Story has expired",
+            True,
+            "story_unavailable",
+            id="explicit-availability-evidence",
+        ),
+        pytest.param(
+            "generic authentication subsystem failure",
+            False,
+            "extraction_failed",
+            id="generic-authentication-word-is-not-explicit-evidence",
+        ),
+    ],
+)
+async def test_story_error_classifier_uses_evidence_priority(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    message: str,
+    configured: bool,
+    expected_code: str,
+) -> None:
+    """驗證 Story 錯誤分類依優先順序使用 URL 外的明確證據。"""
+    await assert_runner_error(
+        monkeypatch,
+        target_url=STORY_URL,
+        settings=instagram_settings(tmp_path, configured),
+        message=message,
+        expected_code=expected_code,
+        process_stderr=True,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "source",
+        "error_type",
+        "message",
+        "configured",
+        "target_url",
+        "expected_code",
+        "expected_stage",
+    ),
+    [
+        pytest.param(
+            "stderr",
+            None,
+            "unrecognized extractor diagnostic",
+            False,
+            STORY_URL,
+            "extraction_failed",
+            "extractor_process_unclassified",
+            id="unknown-stderr",
+        ),
+        pytest.param(
+            "record",
+            "UnknownError",
+            "unrecognized extractor diagnostic",
+            False,
+            STORY_URL,
+            "extraction_failed",
+            "extractor_process_unclassified",
+            id="unknown-datajob-error",
+        ),
+        pytest.param(
+            "stderr",
+            None,
+            "AuthRequired: authenticated cookies needed",
+            False,
+            STORY_URL,
+            "story_auth_required",
+            "extractor_platform_error",
+            id="anonymous-story-auth-stderr",
+        ),
+        pytest.param(
+            "record",
+            "AuthRequired",
+            "authenticated cookies needed",
+            False,
+            STORY_URL,
+            "story_auth_required",
+            "extractor_platform_error",
+            id="anonymous-story-auth-record",
+        ),
+        pytest.param(
+            "stderr",
+            None,
+            "AuthenticationError: login required",
+            True,
+            STORY_URL,
+            "platform_authentication_failed",
+            "extractor_platform_error",
+            id="configured-story-auth-stderr",
+        ),
+        pytest.param(
+            "record",
+            "AuthenticationError",
+            "login required",
+            True,
+            STORY_URL,
+            "platform_authentication_failed",
+            "extractor_platform_error",
+            id="configured-story-auth-record",
+        ),
+        pytest.param(
+            "stderr",
+            None,
+            "NotFoundError",
+            False,
+            STORY_URL,
+            "story_unavailable",
+            "extractor_platform_error",
+            id="story-not-found-stderr",
+        ),
+        pytest.param(
+            "record",
+            "NotFoundError",
+            "requested Story could not be found",
+            True,
+            STORY_URL,
+            "story_unavailable",
+            "extractor_platform_error",
+            id="story-not-found-record",
+        ),
+        pytest.param(
+            "stderr",
+            None,
+            "HTTP 404 Not Found",
+            True,
+            STORY_URL,
+            "story_unavailable",
+            "extractor_platform_error",
+            id="story-404-stderr",
+        ),
+        pytest.param(
+            "record",
+            "HttpError",
+            "HTTP 404 Not Found",
+            False,
+            STORY_URL,
+            "story_unavailable",
+            "extractor_platform_error",
+            id="story-404-record",
+        ),
+        pytest.param(
+            "stderr",
+            None,
+            "HTTP 429 Too Many Requests AuthRequired",
+            True,
+            STORY_URL,
+            "upstream_rate_limited",
+            "extractor_platform_error",
+            id="rate-limit-stderr-priority",
+        ),
+        pytest.param(
+            "record",
+            "HttpError",
+            "HTTP 429 Too Many Requests AuthRequired",
+            False,
+            STORY_URL,
+            "upstream_rate_limited",
+            "extractor_platform_error",
+            id="rate-limit-record-priority",
+        ),
+        pytest.param(
+            "stderr",
+            None,
+            "Story has expired",
+            False,
+            STORY_URL,
+            "story_unavailable",
+            "extractor_platform_error",
+            id="story-availability-stderr",
+        ),
+        pytest.param(
+            "record",
+            "UnknownError",
+            "Story has expired",
+            True,
+            STORY_URL,
+            "story_unavailable",
+            "extractor_platform_error",
+            id="story-availability-record",
+        ),
+        pytest.param(
+            "stderr",
+            None,
+            "HTTP 401 Unauthorized",
+            True,
+            STORY_URL,
+            "extraction_failed",
+            "extractor_process_unclassified",
+            id="configured-401-stderr",
+        ),
+        pytest.param(
+            "record",
+            "HttpError",
+            "HTTP 403 Forbidden",
+            True,
+            STORY_URL,
+            "extraction_failed",
+            "extractor_process_unclassified",
+            id="configured-403-record",
+        ),
+        pytest.param(
+            "stderr",
+            None,
+            "AuthRequired: authenticated cookies needed",
+            False,
+            POST_URL,
+            "post_unavailable",
+            "extractor_platform_error",
+            id="post-auth-anonymous-stderr",
+        ),
+        pytest.param(
+            "record",
+            "AuthenticationError",
+            "AuthenticationError",
+            True,
+            "https://www.instagram.com/reel/ABC123/",
+            "platform_authentication_failed",
+            "extractor_platform_error",
+            id="reel-configured-auth-record",
+        ),
+        pytest.param(
+            "stderr",
+            None,
+            "AuthRequired: login required",
+            False,
+            "https://x.com/creator/status/1",
+            "post_unavailable",
+            "extractor_platform_error",
+            id="x-auth-anonymous-stderr",
+        ),
+        pytest.param(
+            "stderr",
+            None,
+            f"HTTP 403 for '{STORY_URL}?reason=invalid+session",
+            True,
+            STORY_URL,
+            "extraction_failed",
+            "extractor_process_unclassified",
+            id="url-query-is-not-evidence",
+        ),
+    ],
+)
+async def test_runner_classifies_both_error_sources_with_failure_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    source: str,
+    error_type: str | None,
+    message: str,
+    configured: bool,
+    target_url: str,
+    expected_code: str,
+    expected_stage: str,
+) -> None:
+    """驗證 stderr 與合法 DataJob error 共用 reason／stage 分類與優先序。"""
+    error = await assert_runner_error(
+        monkeypatch,
+        target_url=target_url,
+        settings=instagram_settings(tmp_path, configured),
+        message=message,
+        expected_code=expected_code,
+        error_type=error_type,
+        process_stderr=source == "stderr",
+    )
+
+    assert error.failure_stage == expected_stage
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("target_url", "expected_code"),
     [
         pytest.param(STORY_URL, "story_unavailable", id="story"),
         pytest.param(POST_URL, "extraction_failed", id="post"),
+        pytest.param(
+            "https://www.instagram.com/reel/ABC123/",
+            "extraction_failed",
+            id="reel",
+        ),
+        pytest.param("https://x.com/creator/status/1", "extraction_failed", id="x"),
     ],
 )
 async def test_runner_maps_literal_empty_data_job_by_target(
@@ -824,12 +1176,13 @@ async def test_runner_maps_literal_empty_data_job_by_target(
     target_url: str,
     expected_code: str,
 ) -> None:
-    """Verify only an exact Story treats a literal empty DataJob as unavailable."""
+    """驗證 literal 空 DataJob 依 Story 與其他目標標記 empty-output stage。"""
     target = validate_post_url(target_url)
     with pytest.raises(AppError) as exc_info:
         await extract_process_output(monkeypatch, b"[]", target, Settings())
 
     assert exc_info.value.code == expected_code
+    assert exc_info.value.failure_stage == "extractor_empty_output"
 
 
 @pytest.mark.asyncio
@@ -844,7 +1197,7 @@ async def test_runner_maps_non_media_data_job_to_no_media(
     monkeypatch: pytest.MonkeyPatch,
     event: list[object],
 ) -> None:
-    """Verify valid directory-only and queue-only DataJobs contain no media."""
+    """驗證合法 directory-only 與 queue-only DataJob 標記 no-media stage。"""
     target = validate_post_url(STORY_URL)
     with pytest.raises(AppError) as exc_info:
         await extract_process_output(
@@ -856,6 +1209,7 @@ async def test_runner_maps_non_media_data_job_to_no_media(
 
     assert exc_info.value.code == "no_media"
     assert exc_info.value.status_code == 422
+    assert exc_info.value.failure_stage == "extractor_no_media"
 
 
 @pytest.mark.asyncio
@@ -863,6 +1217,8 @@ async def test_runner_maps_non_media_data_job_to_no_media(
     "output",
     [
         pytest.param(b"", id="empty"),
+        pytest.param(b" \n\t", id="whitespace-only"),
+        pytest.param(b"\xff", id="invalid-utf8"),
         pytest.param(b"not-json", id="non-json"),
         pytest.param(
             json.dumps(
@@ -894,13 +1250,14 @@ async def test_runner_rejects_non_data_job_output(
     monkeypatch: pytest.MonkeyPatch,
     output: bytes,
 ) -> None:
-    """Verify the parser accepts only one top-level DataJob event array."""
+    """驗證 parser 僅接受一個合法的頂層 DataJob event array。"""
     target = validate_post_url(STORY_URL)
     with pytest.raises(AppError) as exc_info:
         await extract_process_output(monkeypatch, output, target, Settings())
 
     assert exc_info.value.code == "extraction_failed"
     assert exc_info.value.message == "The extractor returned invalid output."
+    assert exc_info.value.failure_stage == "extractor_invalid_output"
 
 
 @pytest.mark.asyncio
@@ -910,9 +1267,13 @@ async def test_runner_rejects_non_data_job_output(
         pytest.param([], id="empty-event"),
         pytest.param([99, "https://example.test/unknown", {}], id="unknown-code"),
         pytest.param([-1, "junk"], id="invalid-error"),
+        pytest.param([-1, {"error": 1, "message": "invalid metadata"}], id="invalid-error-type"),
+        pytest.param([-1, {"error": "UnknownError", "message": 2}], id="invalid-message-type"),
         pytest.param([2, "junk"], id="invalid-directory"),
         pytest.param([3, "https://example.test/media"], id="short-url-event"),
+        pytest.param([3, 123, {}], id="non-string-url"),
         pytest.param([6, 123, {}], id="non-string-queue-url"),
+        pytest.param([6, "https://x.com/creator/status/1", "metadata"], id="invalid-queue-data"),
         pytest.param(["3", "https://example.test/media", {}], id="non-integer-code"),
     ],
 )
@@ -920,7 +1281,7 @@ async def test_runner_rejects_malformed_data_job_events(
     monkeypatch: pytest.MonkeyPatch,
     event: list[object],
 ) -> None:
-    """Verify malformed DataJob event codes, lengths, and field types are rejected."""
+    """驗證畸形 DataJob event code、長度及欄位型別標記 invalid-output stage。"""
     target = validate_post_url(STORY_URL)
     with pytest.raises(AppError) as exc_info:
         await extract_process_output(
@@ -931,6 +1292,65 @@ async def test_runner_rejects_malformed_data_job_events(
         )
 
     assert exc_info.value.code == "extraction_failed"
+    assert exc_info.value.failure_stage == "extractor_invalid_output"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("events", "expected_code", "expected_stage"),
+    [
+        pytest.param(
+            [
+                [3, "https://cdn.example.test/story.jpg", {"type": "image"}],
+                [-1, {"error": "AuthRequired", "message": "authenticated cookies needed"}],
+            ],
+            "story_auth_required",
+            "extractor_platform_error",
+            id="media-plus-known-error",
+        ),
+        pytest.param(
+            [[2, {"category": "instagram"}], [-1, {"error": "UnknownError", "message": "unknown"}]],
+            "extraction_failed",
+            "extractor_process_unclassified",
+            id="non-media-plus-unknown-error",
+        ),
+        pytest.param(
+            [
+                [3, "https://cdn.example.test/story.jpg", {"type": "image"}],
+                [-1, {"error": "UnknownError", "message": "unknown"}],
+            ],
+            "extraction_failed",
+            "extractor_process_unclassified",
+            id="media-plus-unknown-error",
+        ),
+        pytest.param(
+            [
+                [3, "https://cdn.example.test/story.jpg", {"type": "image"}],
+                [-1, {"error": "AuthRequired", "message": 123}],
+            ],
+            "extraction_failed",
+            "extractor_invalid_output",
+            id="media-plus-malformed-error-metadata",
+        ),
+    ],
+)
+async def test_runner_maps_error_records_before_media_and_non_media_records(
+    monkeypatch: pytest.MonkeyPatch,
+    events: list[list[object]],
+    expected_code: str,
+    expected_stage: str,
+) -> None:
+    """驗證合法 error record 優先於媒體與 non-media 結果且保留精確 stage。"""
+    with pytest.raises(AppError) as exc_info:
+        await extract_process_output(
+            monkeypatch,
+            json.dumps(events).encode(),
+            validate_post_url(STORY_URL),
+            Settings(),
+        )
+
+    assert exc_info.value.code == expected_code
+    assert exc_info.value.failure_stage == expected_stage
 
 
 @pytest.mark.asyncio
@@ -1026,7 +1446,7 @@ async def test_runner_maps_nonzero_exit_to_safe_error(monkeypatch: Any) -> None:
 
 @pytest.mark.asyncio
 async def test_runner_terminates_on_timeout(monkeypatch: Any) -> None:
-    """Verify a stalled extractor is terminated and mapped to timeout."""
+    """驗證 test-double communicate 超時後終止 extractor 並標記 timeout stage。"""
     process = FakeProcess(b"", returncode=0)
 
     async def slow_communicate() -> tuple[bytes, bytes]:
@@ -1047,12 +1467,42 @@ async def test_runner_terminates_on_timeout(monkeypatch: Any) -> None:
         await runner.extract(validate_post_url("https://x.com/creator/status/1"))
 
     assert exc_info.value.code == "extraction_timeout"
+    assert exc_info.value.failure_stage == "extractor_timeout"
+    assert process.terminated is True
+
+
+@pytest.mark.asyncio
+async def test_runner_maps_test_double_communicate_io_error_to_io_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """驗證 test-double communicate I/O 失敗附帶安全 io stage。"""
+    process = FakeProcess(b"", returncode=0)
+
+    async def fail_communicate() -> tuple[bytes, bytes]:
+        """以 raw OSError 模擬 communicate fallback 的 pipe 讀取失敗。"""
+        raise OSError("PRIVATE_COMMUNICATE_FAILURE")
+
+    process.communicate = fail_communicate  # type: ignore[method-assign]
+
+    async def fake_create(*_args: Any, **_kwargs: Any) -> FakeProcess:
+        """回傳 communicate fallback 會發生 I/O 失敗的程序 double。"""
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+
+    with pytest.raises(AppError) as exc_info:
+        await GalleryDlRunner(Settings()).extract(
+            validate_post_url("https://x.com/creator/status/1")
+        )
+
+    assert exc_info.value.code == "extraction_failed"
+    assert exc_info.value.failure_stage == "extractor_io"
     assert process.terminated is True
 
 
 @pytest.mark.asyncio
 async def test_runner_rejects_oversized_output(monkeypatch: Any) -> None:
-    """Verify extractor output is bounded before parsing."""
+    """驗證 communicate 回傳後的 stdout 大小防線附帶 output-limit stage。"""
     process = FakeProcess(b"x" * 101, returncode=0)
 
     async def fake_create(*_args: Any, **_kwargs: Any) -> FakeProcess:
@@ -1066,6 +1516,7 @@ async def test_runner_rejects_oversized_output(monkeypatch: Any) -> None:
         await runner.extract(validate_post_url("https://x.com/creator/status/1"))
 
     assert exc_info.value.code == "extraction_failed"
+    assert exc_info.value.failure_stage == "extractor_output_limit"
 
 
 @pytest.mark.asyncio
@@ -1085,25 +1536,28 @@ async def test_runner_terminates_real_pipe_when_stdout_exceeds_limit(monkeypatch
         )
 
     assert exc_info.value.code == "extraction_failed"
+    assert exc_info.value.failure_stage == "extractor_output_limit"
     assert process.terminated is True
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "pipe_error",
+    ("pipe_name", "pipe_error"),
     [
-        OSError("private stdout pipe detail"),
-        TimeoutError("private stdout timeout detail"),
+        pytest.param("stdout", OSError("private stdout pipe detail"), id="stdout-os-error"),
+        pytest.param("stdout", TimeoutError("private stdout timeout detail"), id="stdout-timeout"),
+        pytest.param("stderr", OSError("private stderr pipe detail"), id="stderr-os-error"),
+        pytest.param("stderr", TimeoutError("private stderr timeout detail"), id="stderr-timeout"),
     ],
-    ids=["os-error", "raw-timeout"],
 )
 async def test_runner_maps_raw_pipe_errors_to_safe_extraction_failure(
     monkeypatch: pytest.MonkeyPatch,
+    pipe_name: str,
     pipe_error: OSError,
 ) -> None:
     """真實 pipe 的 raw 讀取例外應安全映射且完成 bounded process cleanup。"""
     process = StreamProcess(b"", b"")
-    process.stdout = RaisingStreamReader(pipe_error)
+    setattr(process, pipe_name, RaisingStreamReader(pipe_error))
 
     async def fake_create(*_args: Any, **_kwargs: Any) -> StreamProcess:
         """回傳會在 stdout read 失敗的 bounded pipe process。"""
@@ -1117,6 +1571,7 @@ async def test_runner_maps_raw_pipe_errors_to_safe_extraction_failure(
         )
 
     assert exc_info.value.code == "extraction_failed"
+    assert exc_info.value.failure_stage == "extractor_io"
     assert exc_info.value.message == "The extractor output could not be read."
     assert isinstance(exc_info.value.__cause__, OSError)
     assert str(pipe_error) not in exc_info.value.message
@@ -1127,7 +1582,7 @@ async def test_runner_maps_raw_pipe_errors_to_safe_extraction_failure(
 async def test_runner_maps_spawn_oserror_to_safe_extraction_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """create_subprocess_exec 的 raw OSError 應映射成安全 extraction_failed。"""
+    """驗證 subprocess 啟動 OSError 映射為安全錯誤及 extractor_start stage。"""
 
     async def fake_create(*_args: Any, **_kwargs: Any) -> StreamProcess:
         """模擬 gallery-dl process 無法啟動的 raw spawn 例外。"""
@@ -1141,6 +1596,7 @@ async def test_runner_maps_spawn_oserror_to_safe_extraction_failure(
         )
 
     assert exc_info.value.code == "extraction_failed"
+    assert exc_info.value.failure_stage == "extractor_start"
     assert exc_info.value.message == "The extractor process could not be started."
     assert isinstance(exc_info.value.__cause__, OSError)
     assert "private spawn detail" not in exc_info.value.message

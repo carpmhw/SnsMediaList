@@ -176,14 +176,64 @@ Proxy 必須覆寫 forwarded client header，不可附加內容；不要信任�
 
 僅支援 Instagram `/p/`、`/reel/`、精確 `/stories/<username>/<numeric-media-id>/` 與 X status URL。Story 匿名擷取是 best effort；帳號全部 Stories、Stories tray 與 Highlights 不支援。配置 Cookie 後仍只處理精確 URL 及帳號可見內容。本服務不會接受平台 Cookie 或 credentials 由 request 傳入，也不合併 HLS/DASH stream。
 
+## Instagram Story Extraction Diagnostics
+
+進入 extraction route 的擷取失敗會以唯一 `extraction_failed` structured event 寫入 application log。`reason_code` 表示穩定的應用程式錯誤語意；選用的 `failure_stage` 是 server-side 技術分類，兩者不可互相推測。Stage 只出現在失敗事件，不會加入 API body、headers、OpenAPI 或前端訊息。事件不包含完整 URL、Story ID、Cookie path／value、token、upstream URL、gallery-dl command、raw stdout／stderr 或 exception chain。Story 分類依可辨識的 diagnostic 證據；配置 Cookie 本身不表示 session 已驗證有效。
+
+檢視最近十分鐘的 application structured events：
+
+```bash
+docker compose logs --no-log-prefix --since 10m app
+```
+
+排錯時只使用上述 structured event。請保留 Uvicorn `--no-access-log`，不可為診斷啟用 access log，因為 token-bearing media path 不可寫入日誌；reverse proxy 也必須停用或遮蔽對應路徑的 access log。
+
+| `reason_code` | HTTP | 說明與處置 |
+| --- | ---: | --- |
+| `story_auth_required` | 403 | 未配置 Instagram Cookie，或匿名 Story 明確要求登入。請由管理者依[平台 Cookie 驗證](#平台-cookie-驗證)設定受限的唯讀 Cookie，不要透過 request 上傳憑證。 |
+| `platform_authentication_failed` | 503 | configured Story 回報 `AuthRequired`／`AuthenticationError`，或明確 `invalid/expired` session、login、challenge。這是 bounded 驗證診斷，不保證 Cookie 一定過期；管理者應檢查唯讀掛載、帳號狀態及授權後再輪替或撤銷 session。 |
+| `story_unavailable` | 404 | `NotFoundError`／HTTP 404 或明確 Story 過期、刪除、private／不可見證據。系統不細分實際原因；請確認精確 URL 及 operator 帳號可見性。 |
+| `upstream_rate_limited` | 429 | 平台 rate limit。降低 operator concurrency 並等待平台解除限制。 |
+| `extraction_timeout` | 504 | extractor 超過設定期限。稍後重試；不要以延長 timeout 或取消 process 限制繞過。 |
+| `extraction_failed` | 502 | 其他／無法分類的 extractor failure。configured Story 僅有 HTTP 401/403、沒有明確 session 或 availability 證據時也會保守回傳此 code；不可據此推斷 Cookie 過期或 Story 不存在。 |
+
+### Failure stage
+
+若 `AppError` 沒有 stage，日誌省略 `failure_stage`；任何無效或未識別的 stage 都會固定正規化為 `unknown`。下列九種 stage 不改變既有 `reason_code`、HTTP status 或 response：
+
+| `failure_stage` | 發生條件與排錯方向 |
+| --- | --- |
+| `extractor_start` | gallery-dl subprocess 無法啟動；檢查 candidate image 內 executable 與 runtime。 |
+| `extractor_timeout` | extractor operation deadline 到期；檢查 DNS、upstream network 與 CONNECT proxy，不直接提高 timeout。 |
+| `extractor_output_limit` | stdout 超過既有大小上限；檢查 pinned DataJob output 是否異常增大，不放寬限制。 |
+| `extractor_io` | stdout／stderr pipe 或 communicate 讀取發生 I/O failure；檢查 pipe、process 資源與 bounded cleanup。 |
+| `extractor_process_unclassified` | 非零退出的 stderr 無法分類，或零退出 stdout 含合法但未知的 DataJob error record；configured Story 僅 HTTP 401/403 也屬 ambiguous，不能推斷 Cookie 失效。 |
+| `extractor_invalid_output` | UTF-8／JSON／DataJob schema 無效，包含零 bytes 與純空白；請核對 pinned gallery-dl contract。 |
+| `extractor_empty_output` | 成功退出且輸出合法 literal `[]`；Story 維持 `story_unavailable`，Post／Reel／X 維持 `extraction_failed`，不以此推論 Cookie 狀態。 |
+| `extractor_no_media` | 輸出只有合法 directory／queue events，沒有 error 或 media record；這不代表 normalizer 過濾媒體後的 `no_media`，後者省略 stage。 |
+| `extractor_platform_error` | 命中既有明確 authentication、availability 或 rate-limit 分類；請依上方 `reason_code` 表處理。 |
+
+`[]` 是合法空陣列，與零 bytes 或空白輸出不同；後兩者是 `extractor_invalid_output`。`extractor_process_unclassified` 也可能來自**成功退出**但含未知合法 DataJob error，不代表一定是非零退出。
+
+安全事件範例如下；只分享 allowlisted 欄位，不附加 extractor 診斷：
+
+```json
+{"event":"extraction_failed","request_id":"0123456789abcdef0123456789abcdef","platform":"instagram","outcome":"failed","duration_ms":12.5,"reason_code":"extraction_failed","failure_stage":"extractor_process_unclassified"}
+```
+
+HTTP 429 優先映射 rate limit；HTTP 404 映射 Story availability；只有 HTTP 401/403 的 configured Story 屬於 ambiguous refusal。所有 extraction 嘗試只執行一次，不會 anonymous retry。`extractor_invalid_output` 請執行 `uv run python scripts/verify_gallery_contract.py`；`extractor_empty_output` 請檢查精確 Story／Post 過濾與 upstream 結果；`extractor_io` 檢查 pipe 與程序資源；`extractor_timeout` 檢查 network／CONNECT proxy，不放寬期限。只有實際安全 event 顯示 `extractor_process_unclassified` 後，才另行分析最小 diagnostic pattern；不可傾印或分享 raw stderr／stdout。
+
+驗證時一併記錄 source 與 image 身分：`git rev-parse HEAD`、`git status --short`，以及 `docker image inspect --format '{{.Id}} {{json .RepoDigests}}' <candidate-image>` 的實際 image ID／digest。Deterministic fake-extractor／container 結果與 owner-controlled live Story 重試分開記錄；fixture 通過不表示原 Story 已修復。live Story 是選用人工檢查，僅在目標仍有效且 operator 有權存取時透過既有受保護輸入流程執行。若需回復版本，沿用[既有升級與 rollback 流程](#升級與-rollback)；不以此 diagnostics 變更改動部署邊界。
+
 ## 故障排除
 
 - Service unhealthy：執行 `docker compose logs --no-log-prefix app` 並查詢 `/healthz`。
 - `[FATAL tini] exec uvicorn failed`：重建 image，再以 `docker compose up -d --force-recreate` 啟動。
 - `extraction_failed` 或 `post_unavailable`：確認 URL 受支援，並確認平台允許目前模式存取。
-- `platform_authentication_failed`（503）：僅在明確 session failure diagnostic 使用，例如 session `invalid/expired`，或 redirect 至 login、challenge、consent page；撤銷並輪替 Cookie 後再驗證。
-- `story_unavailable`（404）：configured Story 遇到 `AuthRequired` 或 HTTP 401/403/404 時仍可能回傳此結果；系統無法可靠區分 session 有效但不可見與 Story availability 問題，請確認精確 URL 與帳號可見性。
-- 上述兩種情況都不會 anonymous retry，公開 response 也不暴露 operator session 狀態細節。
+- Instagram Story 的 error code／reason code 與安全查詢方式請參閱 [Instagram Story Extraction Diagnostics](#instagram-story-extraction-diagnostics)。
+- `platform_authentication_failed` 不代表已證實 session 過期；Cookie 管理仍依平台 Cookie 驗證流程進行。
+- `story_unavailable` 不細分過期、刪除、NotFound 與不可見原因，請確認精確 URL 及帳號可見性。
+- 上述 Story classification 都不會 anonymous retry，公開 response 也不暴露 operator session 狀態細節。
 - `upstream_rate_limited`：降低 operator concurrency 並等待平台解除限制。
 - `local_rate_limited`：slot 已滿，依 `Retry-After` 重試。
 - `token_not_found` 或 `token_expired`：token 到期或 service 已重新啟動，請重新分析。

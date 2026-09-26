@@ -819,7 +819,7 @@ def test_story_submission_uses_existing_workflow(page: Page, base_url: str) -> N
 
 
 def test_story_unavailable_uses_safe_generic_message(page: Page, base_url: str) -> None:
-    """Verify unavailable Stories show safe copy without raw or inferred reasons."""
+    """驗證 Story 不可用時顯示固定安全說明，不顯示原始診斷。"""
     raw_message = "Story expired, was deleted, or is unavailable because of permissions."
 
     def extraction_error(route: Any, request: Any) -> None:
@@ -837,10 +837,33 @@ def test_story_unavailable_uses_safe_generic_message(page: Page, base_url: str) 
     page.fill("#post-url", STORY_URL)
     page.click("#analyze-button")
 
-    expect(page.locator("#status")).to_have_text("此 Story 目前無法使用。")
+    expect(page.locator("#status")).to_have_text(
+        "此 Instagram Story 已無法取得，可能已過期、刪除或無權限存取。"
+    )
     expect(page.locator("#status")).not_to_contain_text(raw_message)
-    for inferred_reason in ("過期", "刪除", "權限", "expired", "deleted", "permissions"):
-        expect(page.locator("#status")).not_to_contain_text(inferred_reason)
+
+
+def test_story_auth_required_uses_fixed_operator_guidance(page: Page, base_url: str) -> None:
+    """驗證匿名 Story 驗證需求顯示固定管理者指引，不回顯服務診斷。"""
+    raw_message = "sessionid=PRIVATE_COOKIE token=PRIVATE_TOKEN https://instagram.invalid/private"
+
+    def extraction_error(route: Any, _request: Any) -> None:
+        """回傳含合成敏感內容的 Story 驗證需求錯誤。"""
+        fulfill_json(
+            route,
+            {"code": "story_auth_required", "message": raw_message, "request_id": "test"},
+            status=403,
+        )
+
+    page.route("**/api/extractions", extraction_error)
+    page.goto(base_url)
+    page.fill("#post-url", STORY_URL)
+    page.click("#analyze-button")
+
+    expect(page.locator("#status")).to_have_text(
+        "此 Instagram Story 需要登入驗證，服務目前未設定 Instagram 工作階段。請聯絡服務管理者。"
+    )
+    expect(page.locator("#status")).not_to_contain_text(raw_message)
 
 
 def test_rate_limit_error_is_inline(page: Page, base_url: str) -> None:
@@ -864,7 +887,7 @@ def test_rate_limit_error_is_inline(page: Page, base_url: str) -> None:
 
 
 def test_platform_authentication_error_is_operator_actionable(page: Page, base_url: str) -> None:
-    """Verify platform session failures show safe operator guidance inline."""
+    """驗證共用平台 session 錯誤提供不綁定平台的管理者指引。"""
 
     def extraction_error(route: Any, _request: Any) -> None:
         """Return a bounded platform authentication failure."""
@@ -884,7 +907,7 @@ def test_platform_authentication_error_is_operator_actionable(page: Page, base_u
     page.click("#analyze-button")
 
     expect(page.locator("#status")).to_contain_text("平台驗證工作階段無法使用")
-    expect(page.locator("#status")).to_contain_text("請聯絡服務管理者")
+    expect(page.locator("#status")).to_contain_text("請由服務管理者檢查或更新登入 Cookie")
     expect(page.locator("#status")).not_to_contain_text("secret account and cookie path")
 
 
@@ -1485,6 +1508,38 @@ def test_batch_queue_continues_after_a_mapped_item_error(page: Page, base_url: s
         "https://invalid.example/post",
         "https://x.com/creator/status/3",
     ]
+
+
+def test_batch_story_auth_error_shows_only_mapped_message(page: Page, base_url: str) -> None:
+    """驗證批次 Story error 只顯示固定對應文案並繼續後續項目。"""
+    submitted: list[str] = []
+    raw_message = "sessionid=PRIVATE_COOKIE token=PRIVATE_TOKEN raw stderr"
+
+    def extraction(route: Any, request: Any) -> None:
+        """回傳 Story 驗證錯誤，再回傳一筆正常結果。"""
+        submitted.append(json.loads(request.post_data or "{}")["url"])
+        if len(submitted) == 1:
+            fulfill_json(
+                route,
+                {"code": "story_auth_required", "message": raw_message, "request_id": "test"},
+                status=403,
+            )
+        else:
+            fulfill_json(route, SUCCESS_PAYLOAD)
+
+    page.route("**/api/extractions", extraction)
+    page.goto(base_url)
+    page.get_by_role("button", name="批次分析").click()
+    page.fill("#batch-post-urls", f"{STORY_URL}\nhttps://x.com/creator/status/1")
+    page.get_by_role("button", name="開始批次分析").click()
+
+    expect(page.locator(".queue-item-error")).to_have_text(
+        "此 Instagram Story 需要登入驗證，服務目前未設定 Instagram 工作階段。請聯絡服務管理者。"
+    )
+    expect(page.locator(".queue-item[data-state='error']")).to_have_count(1)
+    expect(page.locator("#status")).to_contain_text("準備就緒")
+    assert raw_message not in page.locator("body").inner_text()
+    assert submitted == [STORY_URL, "https://x.com/creator/status/1"]
 
 
 def test_batch_item_disables_competing_extraction_actions(page: Page, base_url: str) -> None:
