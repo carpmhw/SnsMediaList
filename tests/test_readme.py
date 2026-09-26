@@ -59,11 +59,18 @@ def test_readme_documents_single_story_support_and_security_boundaries() -> None
     assert "低權限" in cookie_section
     assert "可信內網" in cookie_section
 
+    story_auth_row = re.search(
+        r"^\|\s*`story_auth_required`\s*\|\s*403\s*\|[^|\n]*\|$",
+        error_section,
+        re.MULTILINE,
+    )
     story_error_row = re.search(
         r"^\|\s*`story_unavailable`\s*\|\s*404\s*\|[^|\n]*\|$",
         error_section,
         re.MULTILINE,
     )
+    assert story_auth_row is not None
+    assert "未配置" in story_auth_row.group()
     assert story_error_row is not None
     assert "不細分" in story_error_row.group()
     assert "推斷" in story_error_row.group()

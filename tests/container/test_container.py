@@ -174,6 +174,30 @@ def test_stack_cookie_setting_matches_the_mounted_filename() -> None:
     assert "SNS_MEDIA_INSTAGRAM_COOKIE_FILE: /run/secrets/instagram-cookies.txt" not in stack
 
 
+def test_story_diagnostics_smoke_uses_external_readonly_fixtures() -> None:
+    """驗證 Story diagnostics smoke 使用唯讀 fake inputs 且不開 access log。"""
+    smoke_script = (PROJECT_ROOT / "scripts" / "container_story_diagnostics_smoke.py").read_text()
+
+    for required in (
+        'CANDIDATE_IMAGE = "sns-media-list:story-diagnostics-candidate"',
+        "read_only: true",
+        'FAKE_GALLERY_PATH = "/opt/venv/bin/gallery-dl"',
+        'COOKIE_CONTAINER_PATH = "/run/secrets/instagram-cookies.txt"',
+        '"--no-access-log"',
+        '"unknown-stderr"',
+        '"unknown-datajob"',
+        '"invalid-json"',
+        '"story_auth_required"',
+        '"platform_authentication_failed"',
+        '"extractor_process_unclassified"',
+        '"extractor_invalid_output"',
+        '"extractor_platform_error"',
+        '"failure_stage"',
+        '"down", "--remove-orphans"',
+    ):
+        assert required in smoke_script
+
+
 def test_container_smoke_script_checks_runtime_boundaries() -> None:
     """Verify the automated smoke command covers startup and isolation checks."""
     smoke_script = (PROJECT_ROOT / "scripts" / "container_smoke.py").read_text()

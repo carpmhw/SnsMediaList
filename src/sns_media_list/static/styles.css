@@ -370,6 +370,11 @@ button:hover:not(:disabled) {
   font-weight: 700;
 }
 
+.queue-item-error {
+  flex-basis: 100%;
+  color: var(--danger);
+}
+
 .queue-item[data-state="running"] {
   border-color: var(--accent);
 }

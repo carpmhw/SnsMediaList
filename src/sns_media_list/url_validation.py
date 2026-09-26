@@ -69,6 +69,25 @@ def validate_post_url(url: str) -> ValidatedExtractionTarget:
     return ValidatedExtractionTarget(platform, kind, canonical_url, target_id)
 
 
+def platform_for_url(url: str) -> str | None:
+    """只依安全 HTTPS URL 的 allowlisted host 回傳日誌平台標籤。"""
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.lower() != "https"
+        or parsed.username is not None
+        or parsed.password is not None
+        or "#" in url
+        or port not in (None, 443)
+    ):
+        return None
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    return _platform_for_host(hostname)
+
+
 def validate_platform_redirect_target(
     source_url: str, target_url: str
 ) -> ValidatedExtractionTarget:

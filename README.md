@@ -41,7 +41,7 @@ SNS Media List 是一個低併發 Web 工具，可分析支援的 Instagram 貼�
 | 帳號頁、feed、搜尋、thread 批次、ZIP、轉碼與畫質選擇 | 不支援 |
 | HLS/DASH adaptive stream 合併 | 不支援 |
 
-公開可見不代表匿名模式一定能存取。Instagram、X 或 `gallery-dl` 可能要求登入、限制訪客 token 或套用 rate limit；未配置平台 Cookie 時，本服務不支援私人貼文，精確 Story 也只會嘗試匿名擷取。
+公開可見不代表匿名模式一定能存取。Instagram、X 或 `gallery-dl` 可能要求登入、限制訪客 token 或套用 rate limit；未配置平台 Cookie 時，本服務不支援私人貼文，精確 Story 也只會嘗試匿名擷取。Instagram Story 通常需要 authenticated cookies；Cookie 部署與錯誤診斷請參閱[平台 Cookie 驗證](OPERATIONS.md#平台-cookie-驗證)及 [Story 擷取診斷](OPERATIONS.md#instagram-story-extraction-diagnostics)。
 
 圖片 Story 不會另外輸出音訊或 audio；不提供 Story 批次、ZIP 或轉碼。選取下載不提供 ZIP、帳號 feed 批次封存或歷史保存；「已開始下載」只表示檔案已交給瀏覽器，不代表瀏覽器或 OS 已完成檔案保存。
 
@@ -145,9 +145,13 @@ OPERATIONS.md         完整 operator guide
 | --- | ---: | --- |
 | `unsupported_url` | 400 | URL host、scheme 或媒體 path 不受支援 |
 | `post_unavailable` | 404 | 貼文不存在、需要登入，或匿名 extractor 無法讀取 |
-| `story_unavailable` | 404 | 精確 Story 不可用；不細分或推斷過期、刪除、登入需求或可見性原因 |
+| `story_auth_required` | 403 | 未配置 Instagram Cookie，或匿名 Story 擷取需要登入驗證；請聯絡服務管理者 |
+| `story_unavailable` | 404 | 精確 Story 不可取得；不細分或推斷已過期、刪除或不可見 |
 | `local_rate_limited` | 429 | 本機 extraction/download slot 已滿 |
-| `platform_authentication_failed` | 503 | Operator 配置的平台 session 已過期、無效或遭 challenge |
+| `upstream_rate_limited` | 429 | 平台暫時限制請求，請稍後再試 |
+| `platform_authentication_failed` | 503 | 平台 session／驗證要求無法使用；不代表已確認 Cookie 過期 |
+| `extraction_failed` | 502 | 其他擷取失敗；configured Story 僅有 HTTP 401/403 時保守歸類 |
+| `extraction_timeout` | 504 | 擷取超過既有期限，請稍後再試 |
 | `token_expired` | 410 | Token 已超過 TTL，請重新分析 |
 
 API 不會回傳 upstream media URL、Cookie、credentials、raw extractor output 或 stack trace。請勿在 issue、log 或錯誤回報中貼出 media token、Cookie 或敏感 URL。

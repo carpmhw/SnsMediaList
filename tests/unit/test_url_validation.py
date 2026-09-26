@@ -2,12 +2,42 @@
 
 import pytest
 
+from sns_media_list import url_validation
 from sns_media_list.errors import AppError
 from sns_media_list.url_validation import (
     validate_platform_redirect_target,
     validate_post_url,
     validate_redirect_chain,
 )
+
+
+@pytest.mark.parametrize(
+    ("url", "expected_platform"),
+    [
+        pytest.param("https://www.instagram.com/p/ABC123/", "instagram", id="instagram"),
+        pytest.param("https://INSTAGRAM.COM./stories/a/1/", "instagram", id="normalized-host"),
+        pytest.param("https://twitter.com/user/status/1", "x", id="twitter-alias"),
+        pytest.param("https://x.com/user/status/1", "x", id="x"),
+        pytest.param("http://www.instagram.com/p/ABC123/", None, id="non-https"),
+        pytest.param("https://user:secret@www.instagram.com/p/ABC123/", None, id="credentials"),
+        pytest.param("https://www.instagram.com:8443/p/ABC123/", None, id="bad-port"),
+        pytest.param("https://www.instagram.com./p/ABC123/#fragment", None, id="fragment"),
+        pytest.param("https://evilinstagram.com/p/ABC123/", None, id="spoofed-host"),
+        pytest.param("https://www.instagram.com:invalid/p/ABC123/", None, id="malformed-port"),
+        pytest.param("not a URL", None, id="malformed-url"),
+    ],
+)
+def test_platform_for_url_uses_only_safe_allowlisted_host(
+    url: str,
+    expected_platform: str | None,
+) -> None:
+    """驗證觀測平台只依安全 HTTPS URL 的 allowlisted host 決定。"""
+    platform_for_url = getattr(url_validation, "platform_for_url", None)
+    assert callable(platform_for_url)
+    if not callable(platform_for_url):
+        return
+
+    assert platform_for_url(url) == expected_platform
 
 
 @pytest.mark.parametrize(

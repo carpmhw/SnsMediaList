@@ -1,13 +1,16 @@
 """Tests for extraction API composition and stable error responses."""
 
+import asyncio
 import json
 import logging
 from typing import Any
 from urllib.parse import urlsplit
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from sns_media_list.api import routes
 from sns_media_list.app import create_app
 from sns_media_list.config import Settings
 from sns_media_list.errors import AppError
@@ -46,6 +49,35 @@ class StoryUnavailableExtractor:
     async def extract(self, _post_url: Any) -> list[dict[str, Any]]:
         """Raise the bounded Story error used by the API contract test."""
         raise AppError("story_unavailable", "This Story is unavailable.")
+
+
+class FixedErrorExtractor:
+    """以指定的穩定 application error 模擬擷取失敗。"""
+
+    def __init__(self, code: str, message: str, *, failure_stage: str | None = None) -> None:
+        """保存 API 契約測試要驗證的安全錯誤內容。"""
+        self.code = code
+        self.message = message
+        self.failure_stage = failure_stage
+
+    async def extract(self, _post_url: Any) -> list[dict[str, Any]]:
+        """拋出指定的 bounded error，不產生 extractor media records。"""
+        raise AppError(self.code, self.message, failure_stage=self.failure_stage)
+
+
+class BlockingExtractor:
+    """提供可取消的擷取工作以驗證 terminal event 邊界。"""
+
+    def __init__(self) -> None:
+        """建立等待事件供 API 測試同步工作啟動與取消。"""
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def extract(self, _post_url: Any) -> list[dict[str, Any]]:
+        """等待測試取消請求，避免完成擷取或輸出 success event。"""
+        self.started.set()
+        await self.release.wait()
+        return [record()]
 
 
 def record(
@@ -364,6 +396,188 @@ def test_story_sensitive_metadata_stays_out_of_response_tokens_and_logs(
     assert events
 
 
+@pytest.mark.parametrize(
+    ("code", "reason_code"),
+    [
+        pytest.param("story_auth_required", "story_auth_required", id="story-auth-required"),
+        pytest.param(
+            "platform_authentication_failed",
+            "platform_authentication_failed",
+            id="configured-session-failure",
+        ),
+        pytest.param("extraction_failed", "extraction_failed", id="ambiguous-upstream-error"),
+    ],
+)
+def test_failed_extraction_logs_one_safe_terminal_event(
+    caplog,
+    code: str,
+    reason_code: str,
+) -> None:
+    """驗證擷取 AppError 只記錄一筆安全失敗 terminal event。"""
+    caplog.set_level(logging.INFO, logger="sns_media_list")
+    token_store = TokenStore(capacity=20, ttl_seconds=600)
+    service = ExtractionService(
+        Settings(),
+        extractor=FixedErrorExtractor(code, "PRIVATE_RAW_EXTRACTOR_DIAGNOSTIC"),
+        token_store=token_store,
+    )
+    client = TestClient(create_app(extraction_service=service))
+
+    response = client.post(
+        "/api/extractions",
+        json={"url": "https://www.instagram.com/stories/example.user/1111111111111111111/"},
+    )
+
+    assert response.json()["code"] == code
+    assert token_store.size == 0
+    events = [
+        record.__dict__["event"]
+        for record in caplog.records
+        if record.name == "sns_media_list" and "event" in record.__dict__
+    ]
+    assert len(events) == 1
+    event = events[0]
+    assert event["request_id"] == response.json()["request_id"]
+    assert event["platform"] == "instagram"
+    assert event["outcome"] == "failed"
+    assert event["reason_code"] == reason_code
+    assert not client.app.state.limiter._active_extractions
+    assert "item_count" not in event
+    assert "PRIVATE_RAW_EXTRACTOR_DIAGNOSTIC" not in json.dumps(event)
+
+
+def test_unsupported_host_extraction_failure_logs_null_platform(caplog) -> None:
+    """驗證不支援 host 的 extraction failure 使用 null platform 標籤。"""
+    caplog.set_level(logging.INFO, logger="sns_media_list")
+    service = ExtractionService(
+        Settings(),
+        extractor=FakeExtractor([]),
+        token_store=TokenStore(capacity=20, ttl_seconds=600),
+    )
+    client = TestClient(create_app(extraction_service=service))
+
+    response = client.post("/api/extractions", json={"url": "https://example.invalid/p/1/"})
+
+    assert response.status_code == 400
+    event_records = [
+        record.__dict__["event"]
+        for record in caplog.records
+        if record.name == "sns_media_list" and "event" in record.__dict__
+    ]
+    assert len(event_records) == 1
+    assert event_records[0]["platform"] is None
+    assert event_records[0]["reason_code"] == "unsupported_url"
+    assert "failure_stage" not in event_records[0]
+
+
+def test_unknown_app_error_code_is_bounded_in_extraction_log(caplog) -> None:
+    """驗證未知 AppError code 降為固定日誌分類而不記錄原始診斷。"""
+    caplog.set_level(logging.INFO, logger="sns_media_list")
+    token_store = TokenStore(capacity=20, ttl_seconds=600)
+    service = ExtractionService(
+        Settings(),
+        extractor=FixedErrorExtractor("private://sessionid=PRIVATE_CODE", "PRIVATE_MESSAGE"),
+        token_store=token_store,
+    )
+    client = TestClient(create_app(extraction_service=service))
+
+    response = client.post("/api/extractions", json={"url": "https://x.com/creator/status/1"})
+
+    assert response.status_code == 500
+    events = [
+        record.__dict__["event"]
+        for record in caplog.records
+        if record.name == "sns_media_list" and "event" in record.__dict__
+    ]
+    assert len(events) == 1
+    assert events[0]["reason_code"] == "extraction_failed"
+    assert "private://sessionid=PRIVATE_CODE" not in json.dumps(events[0])
+    assert "PRIVATE_MESSAGE" not in json.dumps(events[0])
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "error_code", "expected_status"),
+    [
+        pytest.param("event_builder", None, 200, id="success-builder-failure"),
+        pytest.param("logger", None, 200, id="success-logger-failure"),
+        pytest.param("event_builder", "story_auth_required", 403, id="error-builder-failure"),
+        pytest.param("logger", "story_auth_required", 403, id="error-logger-failure"),
+    ],
+)
+def test_extraction_logging_failure_preserves_api_and_releases_lease(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+    error_code: str | None,
+    expected_status: int,
+) -> None:
+    """驗證 event 建構或 logger 故障不改變 API 結果並釋放擷取 slot。"""
+
+    def fail(*_args: Any, **_kwargs: Any) -> None:
+        """模擬不含外洩資料的 logging 依賴故障。"""
+        raise RuntimeError("PRIVATE_LOGGING_FAILURE")
+
+    if failure_stage == "event_builder":
+        monkeypatch.setattr(routes, "build_event", fail)
+    else:
+        monkeypatch.setattr(routes.logger, "info", fail)
+    extractor = (
+        FakeExtractor([record()])
+        if error_code is None
+        else FixedErrorExtractor(error_code, "A safe diagnostic.")
+    )
+    token_store = TokenStore(capacity=20, ttl_seconds=600)
+    service = ExtractionService(
+        Settings(),
+        extractor=extractor,
+        token_store=token_store,
+    )
+    application = create_app(extraction_service=service)
+    client = TestClient(application)
+
+    response = client.post(
+        "/api/extractions",
+        json={"url": "https://www.instagram.com/stories/example.user/1111111111111111111/"},
+    )
+
+    assert response.status_code == expected_status
+    assert not application.state.limiter._active_extractions
+    if error_code is not None:
+        assert response.json()["code"] == error_code
+
+
+@pytest.mark.asyncio
+async def test_cancelled_extraction_does_not_log_terminal_event(caplog) -> None:
+    """驗證 caller cancellation 不產生 extraction completion 或 failure event。"""
+    caplog.set_level(logging.INFO, logger="sns_media_list")
+    extractor = BlockingExtractor()
+    token_store = TokenStore(capacity=20, ttl_seconds=600)
+    application = create_app(
+        extraction_service=ExtractionService(
+            Settings(), extractor=extractor, token_store=token_store
+        )
+    )
+    transport = httpx.ASGITransport(app=application)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        request_task = asyncio.create_task(
+            client.post(
+                "/api/extractions",
+                json={"url": "https://www.instagram.com/stories/example.user/1111111111111111111/"},
+            )
+        )
+        await asyncio.wait_for(extractor.started.wait(), timeout=1)
+        request_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request_task
+
+    assert not application.state.limiter._active_extractions
+    assert not [
+        record
+        for record in caplog.records
+        if record.name == "sns_media_list"
+        and record.msg in {"extraction_complete", "extraction_failed"}
+    ]
+
+
 def test_extraction_omits_private_extractor_fields_from_public_response() -> None:
     """Verify credentials, cookies, headers, raw output, and stack traces cannot leak."""
     private_record = record()
@@ -432,7 +646,7 @@ def test_health_endpoint_reveals_no_cookie_configuration(tmp_path) -> None:
 
 
 def test_successful_extraction_log_contains_only_safe_event_fields(caplog) -> None:
-    """Verify runtime extraction logs omit source URLs, tokens, and descriptions."""
+    """驗證 extraction event 不記錄來源 URL、token 或描述文字。"""
     caplog.set_level(logging.INFO, logger="sns_media_list")
     client, _extractor = make_client([record()])
 
@@ -443,7 +657,9 @@ def test_successful_extraction_log_contains_only_safe_event_fields(caplog) -> No
     assert events
     event = events[-1]
     assert event["outcome"] == "success"
+    assert event["request_id"] == response.headers["X-Request-ID"]
     assert event["item_count"] == 1
+    assert len(events) == 1
     assert "source_url" not in event
     assert "description" not in event
     assert "token" not in event
@@ -502,14 +718,23 @@ def test_rejected_story_variants_do_not_invoke_extractor(url: str, expected_mess
     assert extractor.calls == 0
 
 
-def test_no_media_returns_422() -> None:
-    """Verify all-unavailable media uses the stable no-media error."""
+def test_no_media_returns_422(caplog) -> None:
+    """驗證 normalizer no_media response 保持穩定且失敗事件省略 stage。"""
+    caplog.set_level(logging.INFO, logger="sns_media_list")
     client, _extractor = make_client([record(url=None)])
 
     response = client.post("/api/extractions", json={"url": "https://x.com/creator/status/1"})
 
     assert response.status_code == 422
     assert response.json()["code"] == "no_media"
+    events = [
+        item.__dict__["event"]
+        for item in caplog.records
+        if item.name == "sns_media_list" and "event" in item.__dict__
+    ]
+    assert len(events) == 1
+    assert events[0]["reason_code"] == "no_media"
+    assert "failure_stage" not in events[0]
 
 
 def test_media_limit_returns_422_without_tokens() -> None:
@@ -572,8 +797,89 @@ def test_story_unavailable_is_safe_and_issues_no_tokens() -> None:
     assert response.status_code == 404
 
 
-def test_active_client_limit_returns_retry_after() -> None:
-    """Verify API rate limiting is immediate and includes Retry-After."""
+@pytest.mark.parametrize(
+    ("code", "expected_status"),
+    [
+        pytest.param("story_auth_required", 403, id="anonymous-auth-required"),
+        pytest.param("platform_authentication_failed", 503, id="configured-auth-failed"),
+        pytest.param("extraction_failed", 502, id="ambiguous-configured-refusal"),
+    ],
+)
+def test_story_extraction_errors_keep_safe_status_and_issue_no_tokens(
+    code: str,
+    expected_status: int,
+) -> None:
+    """驗證 Story 擷取錯誤維持穩定 response headers 且不核發 token。"""
+    token_store = TokenStore(capacity=20, ttl_seconds=600)
+    service = ExtractionService(
+        Settings(),
+        extractor=FixedErrorExtractor(code, "A safe diagnostic."),
+        token_store=token_store,
+    )
+    client = TestClient(create_app(extraction_service=service))
+
+    response = client.post(
+        "/api/extractions",
+        json={"url": "https://www.instagram.com/stories/example.user/1111111111111111111/"},
+    )
+
+    assert response.status_code == expected_status
+    assert response.json()["code"] == code
+    assert response.headers["X-SNS-Error-Code"] == code
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["Referrer-Policy"] == "no-referrer"
+    assert response.headers["X-Request-ID"] == response.json()["request_id"]
+    assert token_store.size == 0
+
+
+def test_failure_stage_is_logged_but_not_exposed_by_api_or_openapi(caplog) -> None:
+    """驗證 extractor failure stage 僅出現在唯一安全失敗事件。"""
+    caplog.set_level(logging.INFO, logger="sns_media_list")
+    token_store = TokenStore(capacity=20, ttl_seconds=600)
+    service = ExtractionService(
+        Settings(),
+        extractor=FixedErrorExtractor(
+            "extraction_failed",
+            "A safe public message.",
+            failure_stage="extractor_process_unclassified",
+        ),
+        token_store=token_store,
+    )
+    client = TestClient(create_app(extraction_service=service))
+
+    response = client.post(
+        "/api/extractions",
+        json={"url": "https://www.instagram.com/stories/example.user/1111111111111111111/"},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "extraction_failed"
+    assert response.json()["message"] == "A safe public message."
+    assert response.headers["X-SNS-Error-Code"] == "extraction_failed"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["Referrer-Policy"] == "no-referrer"
+    assert response.headers["X-Request-ID"] == response.json()["request_id"]
+    assert "failure_stage" not in response.text
+    assert "failure_stage" not in " ".join(
+        f"{key}:{value}" for key, value in response.headers.items()
+    )
+    schemas = client.app.openapi().get("components", {}).get("schemas", {})
+    assert all("failure_stage" not in schema.get("properties", {}) for schema in schemas.values())
+
+    events = [
+        item.__dict__["event"]
+        for item in caplog.records
+        if item.name == "sns_media_list" and "event" in item.__dict__
+    ]
+    assert len(events) == 1
+    assert events[0]["request_id"] == response.json()["request_id"]
+    assert events[0]["reason_code"] == "extraction_failed"
+    assert events[0]["failure_stage"] == "extractor_process_unclassified"
+
+
+def test_active_client_limit_returns_retry_after_and_logs_failure(caplog) -> None:
+    """驗證 API 併發限制立即回應、附帶 Retry-After 並只記錄一次。"""
+    caplog.set_level(logging.INFO, logger="sns_media_list")
     client, _extractor = make_client([record()])
     _lease = client.app.state.limiter.acquire_extraction("testclient")
 
@@ -582,3 +888,12 @@ def test_active_client_limit_returns_retry_after() -> None:
     assert response.status_code == 429
     assert response.headers["Retry-After"] == "1"
     assert response.json()["code"] == "local_rate_limited"
+    events = [
+        record.__dict__["event"]
+        for record in caplog.records
+        if record.name == "sns_media_list" and "event" in record.__dict__
+    ]
+    assert len(events) == 1
+    assert events[0]["reason_code"] == "local_rate_limited"
+    assert events[0]["request_id"] == response.json()["request_id"]
+    assert "failure_stage" not in events[0]

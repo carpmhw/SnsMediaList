@@ -60,9 +60,12 @@ def test_operations_guide_documents_story_scope_and_trusted_session_risk() -> No
 
 
 def test_operations_guide_documents_cookie_lifecycle_and_story_error_split() -> None:
-    """Verify Cookie lifecycle and the configured Story 404/503 distinction."""
+    """驗證 Cookie lifecycle 與 Story 錯誤診斷分類文件。"""
     guide = (PROJECT_ROOT / "OPERATIONS.md").read_text(encoding="utf-8")
     cookie_section = guide.partition("## 平台 Cookie 驗證")[2].partition("\n## ")[0]
+    diagnostics = guide.partition("## Instagram Story Extraction Diagnostics")[2].partition(
+        "\n## "
+    )[0]
     troubleshooting = guide.partition("## 故障排除")[2].partition("\n## ")[0]
 
     assert re.search(r"新.*extractor process.*(?:立即|重新)讀取", cookie_section)
@@ -72,24 +75,65 @@ def test_operations_guide_documents_cookie_lifecycle_and_story_error_split() -> 
     assert re.search(r"CDN.*(?:不會|不得).*Cookie", cookie_section)
 
     session_failure = re.search(
-        r"^- `platform_authentication_failed`[^\n]+$", troubleshooting, re.MULTILINE
+        r"^\| `platform_authentication_failed`[^\n]+$", diagnostics, re.MULTILINE
     )
-    story_unavailable = re.search(r"^- `story_unavailable`[^\n]+$", troubleshooting, re.MULTILINE)
+    story_auth_required = re.search(r"^\| `story_auth_required`[^\n]+$", diagnostics, re.MULTILINE)
+    story_unavailable = re.search(r"^\| `story_unavailable`[^\n]+$", diagnostics, re.MULTILINE)
+    ambiguous_refusal = re.search(r"^\| `extraction_failed`[^\n]+$", diagnostics, re.MULTILINE)
     assert session_failure is not None
+    assert story_auth_required is not None
     assert story_unavailable is not None
+    assert ambiguous_refusal is not None
 
     assert "503" in session_failure.group()
-    assert re.search(r"(?:只|僅).*明確.*session", session_failure.group())
-    for diagnostic in ("invalid/expired", "login", "challenge", "consent", "redirect"):
+    assert "明確" in session_failure.group()
+    for diagnostic in ("AuthRequired", "AuthenticationError", "invalid/expired", "challenge"):
         assert diagnostic in session_failure.group()
 
+    assert "403" in story_auth_required.group()
+    assert "未配置" in story_auth_required.group()
     assert "404" in story_unavailable.group()
-    assert "configured Story" in story_unavailable.group()
-    assert "AuthRequired" in story_unavailable.group()
-    assert "HTTP 401/403/404" in story_unavailable.group()
-    assert re.search(r"無法可靠區分.*session 有效但不可見.*availability", story_unavailable.group())
+    assert "過期" in story_unavailable.group()
+    assert "429" in diagnostics and "504" in diagnostics and "502" in diagnostics
+    assert "401/403" in ambiguous_refusal.group()
+    assert "系統不細分實際原因" in diagnostics
+    assert "配置 Cookie 本身不表示 session 已驗證有效" in diagnostics
+    assert "docker compose logs --no-log-prefix --since 10m app" in diagnostics
+    assert "--no-access-log" in diagnostics
+    assert "extraction_failed" in diagnostics
 
-    assert re.search(r"兩種情況.*不會.*anonymous retry", troubleshooting)
+    for stage in (
+        "extractor_start",
+        "extractor_timeout",
+        "extractor_output_limit",
+        "extractor_io",
+        "extractor_process_unclassified",
+        "extractor_invalid_output",
+        "extractor_empty_output",
+        "extractor_no_media",
+        "extractor_platform_error",
+        "unknown",
+    ):
+        assert f"`{stage}`" in diagnostics
+    for required_text in (
+        "`reason_code`",
+        "`failure_stage`",
+        "literal `[]`",
+        "零 bytes",
+        "成功退出",
+        "uv run python scripts/verify_gallery_contract.py",
+        "CONNECT proxy",
+        "raw stderr／stdout",
+        "git rev-parse HEAD",
+        "git status --short",
+        "docker image inspect --format",
+        "Deterministic fake-extractor／container",
+        "owner-controlled live Story 重試",
+        "#升級與-rollback",
+    ):
+        assert required_text in diagnostics
+
+    assert "anonymous retry" in troubleshooting
     assert re.search(r"不暴露.*session.*細節", troubleshooting)
 
 
