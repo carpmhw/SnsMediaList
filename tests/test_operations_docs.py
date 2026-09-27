@@ -98,6 +98,29 @@ def test_operations_guide_documents_cookie_lifecycle_and_story_error_split() -> 
     assert "401/403" in ambiguous_refusal.group()
     assert "系統不細分實際原因" in diagnostics
     assert "配置 Cookie 本身不表示 session 已驗證有效" in diagnostics
+    for diagnostic_field in (
+        "extractor_diagnostic_source",
+        "extractor_error_type",
+        "extractor_exit_code",
+        "extractor_http_statuses",
+    ):
+        assert f"`{diagnostic_field}`" in diagnostics
+    for error_type in (
+        "auth_required",
+        "authentication_error",
+        "authorization_error",
+        "not_found",
+        "http_error",
+        "challenge_error",
+        "extraction_error",
+        "no_extractor",
+    ):
+        assert f"`{error_type}`" in diagnostics
+    assert "Stderr 沒有結構化 type，固定為 `unknown`" in diagnostics
+    assert "最多保留最小 8 個" in diagnostics
+    assert "upstream HTTP failure" in diagnostics
+    assert "本服務回傳的 HTTP 502" in diagnostics
+    assert '"extractor_http_statuses":[403]' in diagnostics
     assert "docker compose logs --no-log-prefix --since 10m app" in diagnostics
     assert "--no-access-log" in diagnostics
     assert "extraction_failed" in diagnostics
@@ -146,6 +169,13 @@ def test_operations_guide_documents_instagram_extractor_compatibility() -> None:
     for required_text in (
         "零退出",
         "source pin",
+        "service app is not running",
+        "com.docker.compose.project",
+        "com.docker.compose.service",
+        "docker ps --filter label=com.docker.compose.service=app",
+        "docker inspect --format",
+        "docker logs --since 10m <container>",
+        "Cookie 檔案存在、同步、格式／權限檢查通過",
         "gallery-dl --version",
         "`uv run python scripts/verify_gallery_contract.py`",
         "1.32.7",

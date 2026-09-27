@@ -195,7 +195,8 @@ def test_story_diagnostics_smoke_uses_external_readonly_fixtures() -> None:
     smoke_script = (PROJECT_ROOT / "scripts" / "container_story_diagnostics_smoke.py").read_text()
 
     for required in (
-        'CANDIDATE_IMAGE = "sns-media-list:story-diagnostics-candidate"',
+        '"SNS_MEDIA_STORY_DIAGNOSTICS_IMAGE"',
+        'f"sns-media-list:story-diagnostics-{uuid.uuid4().hex[:12]}"',
         "read_only: true",
         'FAKE_GALLERY_PATH = "/opt/venv/bin/gallery-dl"',
         'COOKIE_CONTAINER_PATH = "/run/secrets/instagram-cookies.txt"',
@@ -203,12 +204,19 @@ def test_story_diagnostics_smoke_uses_external_readonly_fixtures() -> None:
         '"unknown-stderr"',
         '"unknown-datajob"',
         '"invalid-json"',
+        '"configured-http-403"',
         '"story_auth_required"',
         '"platform_authentication_failed"',
         '"extractor_process_unclassified"',
         '"extractor_invalid_output"',
         '"extractor_platform_error"',
         '"failure_stage"',
+        '"extractor_diagnostic_source"',
+        '"extractor_error_type"',
+        '"extractor_exit_code"',
+        '"extractor_http_statuses"',
+        '"message": "HTTP 403 Forbidden PRIVATE_CONTAINER_RAW_DIAGNOSTIC"',
+        "extractor_diagnostics=",
         '"down", "--remove-orphans"',
     ):
         assert required in smoke_script
@@ -233,6 +241,9 @@ def test_container_smoke_script_checks_runtime_boundaries() -> None:
         "PidsLimit",
         "restart-marker",
         '"stop", "-t", "10"',
+        "container_story_diagnostics_smoke.py",
+        "SNS_MEDIA_STORY_DIAGNOSTICS_IMAGE",
+        "repository digests",
     ):
         assert check in smoke_script
 
@@ -243,4 +254,27 @@ def test_container_smoke_uses_a_per_run_image_tag() -> None:
     smoke_script = (PROJECT_ROOT / "scripts" / "container_smoke.py").read_text()
 
     assert "image: sns-media-list:${SNS_MEDIA_IMAGE_TAG:-local}" in compose
-    assert 'environment["SNS_MEDIA_IMAGE_TAG"] = f"smoke-{os.getpid()}"' in smoke_script
+    assert 'image_tag = f"smoke-{os.getpid()}"' in smoke_script
+    assert 'environment["SNS_MEDIA_IMAGE_TAG"] = image_tag' in smoke_script
+    assert 'image_reference = f"sns-media-list:{image_tag}"' in smoke_script
+    assert '"docker",\n                "image",\n                "inspect"' in smoke_script
+    assert 'diagnostic_environment["SNS_MEDIA_STORY_DIAGNOSTICS_IMAGE"] = image_reference' in (
+        smoke_script
+    )
+
+
+def test_story_diagnostics_smoke_uses_the_same_isolated_per_run_image() -> None:
+    """確認 Story 日誌矩陣使用 container smoke 的 per-run image reference。"""
+    container_smoke = (PROJECT_ROOT / "scripts" / "container_smoke.py").read_text()
+    diagnostics_smoke = (
+        PROJECT_ROOT / "scripts" / "container_story_diagnostics_smoke.py"
+    ).read_text()
+
+    assert 'diagnostic_environment["SNS_MEDIA_STORY_DIAGNOSTICS_IMAGE"] = image_reference' in (
+        container_smoke
+    )
+    assert "supplied_image = os.environ.get(_CANDIDATE_IMAGE_ENV)" in diagnostics_smoke
+    assert "build_candidate=build_image and index == 0" in diagnostics_smoke
+    assert 'CANDIDATE_IMAGE = "sns-media-list:story-diagnostics-candidate"' not in (
+        diagnostics_smoke
+    )

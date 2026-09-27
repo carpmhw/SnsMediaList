@@ -215,10 +215,23 @@ docker compose logs --no-log-prefix --since 10m app
 
 `[]` 是合法空陣列，與零 bytes 或空白輸出不同；後兩者是 `extractor_invalid_output`。`extractor_process_unclassified` 也可能來自**成功退出**但含未知合法 DataJob error，不代表一定是非零退出。
 
-安全事件範例如下；只分享 allowlisted 欄位，不附加 extractor 診斷：
+### Extractor diagnostic 欄位
+
+失敗事件可選擇包含下列四個去識別欄位；沒有證據時省略，未知 enum 使用固定 `unknown`。舊錯誤呼叫端不會補值，也不會由 `reason_code`、`failure_stage` 或本服務 API status 推測診斷值。
+
+| 欄位 | 值域與解讀 |
+| --- | --- |
+| `extractor_diagnostic_source` | `stderr`、`datajob_error` 或 `unknown`；指出既有證據來源，不代表錯誤原因。 |
+| `extractor_error_type` | `auth_required`、`authentication_error`、`authorization_error`、`not_found`、`http_error`、`challenge_error`、`extraction_error`、`no_extractor` 或 `unknown`。Stderr 沒有結構化 type，固定為 `unknown`。 |
+| `extractor_exit_code` | 自然完成程序的精確整數 `-255..255`，包含 `0`；負值依 process return code 表示 signal，不代表平台錯誤類別。零退出 DataJob error 及零退出 invalid／empty／non-media 結果會記為 `0`。 |
+| `extractor_http_statuses` | 從移除 URL 後的 bounded 訊息中，依既有明確 HTTP／status 前綴或 reason phrase 語法取得；100..599、升冪、去重，最多保留最小 8 個，JSON 型別為 array。這是有界觀察值，不是完整請求追蹤。 |
+
+Start、timeout、output limit、I/O 與 caller cancellation 不記錄退出碼，以免將 cleanup 的 terminate／kill signal 誤當失敗原因。狀態只來自 extractor 證據；裸數字、Story ID、URL／query 與本服務 API status 都不會產生狀態值。沒有狀態不代表沒有 upstream HTTP failure。`extractor_http_statuses: [403]` 表示觀察到的平台診斷，不能與本服務回傳的 HTTP 502 混為一談，也不能證明 Cookie session 有效或失效。
+
+以下是合成事件；分享時只保留 allowlisted 欄位，不附加 raw extractor output：
 
 ```json
-{"event":"extraction_failed","request_id":"0123456789abcdef0123456789abcdef","platform":"instagram","outcome":"failed","duration_ms":12.5,"reason_code":"extraction_failed","failure_stage":"extractor_process_unclassified"}
+{"event":"extraction_failed","request_id":"0123456789abcdef0123456789abcdef","platform":"instagram","outcome":"failed","duration_ms":12.5,"reason_code":"extraction_failed","failure_stage":"extractor_process_unclassified","extractor_diagnostic_source":"datajob_error","extractor_error_type":"http_error","extractor_exit_code":0,"extractor_http_statuses":[403]}
 ```
 
 HTTP 429 優先映射 rate limit；HTTP 404 映射 Story availability；只有 HTTP 401/403 的 configured Story 屬於 ambiguous refusal。所有 extraction 嘗試只執行一次，不會 anonymous retry。`extractor_invalid_output` 請執行 `uv run python scripts/verify_gallery_contract.py`；`extractor_empty_output` 請檢查精確 Story／Post 過濾與 upstream 結果；`extractor_io` 檢查 pipe 與程序資源；`extractor_timeout` 檢查 network／CONNECT proxy，不放寬期限。`extractor_process_unclassified` 請先依[Instagram Extractor Compatibility](#instagram-extractor-compatibility)完成 source／runtime、contract、release notes 與 isolated candidate gate 排查；只有 candidate 仍 unclassified 且取得安全去識別 diagnostic 時，才評估最小 classifier pattern。不可傾印或分享 raw stderr／stdout。
@@ -231,7 +244,16 @@ HTTP 429 優先映射 rate limit；HTTP 404 映射 Story availability；只有 H
 
 Instagram extractor 相容性問題依下列順序診斷，先核對版本與 contract，再評估分類變更：
 
-1. **比對 source 與 runtime。** 記錄 `git rev-parse HEAD`、`git status --short`、source pin、`docker compose ps/images`、`docker compose exec app gallery-dl --version` 及實際 image ID／digest。`pyproject.toml` 的 source pin 不能代替運作中 container 的 runtime 證據。
+1. **比對 source 與 runtime。** 記錄 `git rev-parse HEAD`、`git status --short`、source pin、實際 Compose project／service／container、image ID／digest 與 container 內的 gallery-dl 版本。若 `docker compose` 回報 `service app is not running`，可能是目前目錄指向不同 project；先依 Compose labels 找出實際執行個體，再以明確 project、Compose 檔、service 或 container 名稱查詢，不要先重建或替換服務：
+
+   ```bash
+   docker ps --filter label=com.docker.compose.service=app --format '{{.ID}} {{.Names}} {{.Image}} {{.Label "com.docker.compose.project"}} {{.Label "com.docker.compose.service"}}'
+   docker inspect --format '{{.Id}} {{.Config.Image}} {{.Config.Labels}}' <container>
+   docker compose -p <project> -f <compose-file> exec <service> gallery-dl --version
+   docker logs --since 10m <container>
+   ```
+
+   `pyproject.toml` 的 source pin 不能代替運作中 container 的 runtime 證據。Cookie 檔案存在、同步、格式／權限檢查通過或未到輪替期限，都不能證明平台 session 已驗證有效；診斷欄位也不作此推論。
 2. **驗證安裝套件 contract。** 執行 `uv run python scripts/verify_gallery_contract.py`；它會核對已安裝 gallery-dl 版本、`--resolve-json` 和離線 DataJob producer／adapter consumer 相容性。`extractor_invalid_output` 優先檢查這一層；不可依真實平台或 Cookie 取得 fixture。
 3. **查官方 release notes。** 本次版本為 From `1.32.7` → To `1.32.13`；確認修正是否涵蓋觀察到的 Instagram 行為。`v1.32.13` release notes 列有 `fix redirect detection during user lookup`。版本更新是相容性假說的驗證，不單獨證明原 Story 已修復。
 4. **建立唯一 candidate image 並跑 gate。** 目前 Dockerfile 固定 Python 3.12 Debian Trixie digest `python:3.12-slim-trixie@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f`，FFmpeg pin 為 `7:7.1.5-0+deb13u1`。本次 Trixie candidate tag 為 `sns-media-list:candidate-gallery-dl-1.32.13-trixie`。使用獨立 candidate image tag，核對 gallery-dl／FFmpeg runtime、`/healthz`、container limits、deterministic smoke，並執行 `uv run python scripts/security_gate.py --image sns-media-list:candidate-gallery-dl-1.32.13-trixie`。Smoke image 與 candidate 必須分別記錄；container smoke 使用 per-run image tag，不得重標記共享 `sns-media-list:local` 或替換運作中的 service。Security gate 有未修復或可修復的 HIGH／CRITICAL finding 時，candidate 保持不可部署；不新增例外或由其它 image 的 smoke 結果替代。

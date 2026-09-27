@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Settings
-from ..errors import AppError
+from ..errors import (
+    AppError,
+    ExtractorDiagnosticSource,
+    ExtractorErrorType,
+    normalize_extractor_diagnostics,
+)
 from ..url_validation import TargetKind, ValidatedExtractionTarget
 
 _URL_PATTERN = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
@@ -116,6 +121,16 @@ _KNOWN_ERROR_TYPES = frozenset(
         _NOT_FOUND_ERROR_TYPE,
     }
 )
+_EXTRACTOR_DIAGNOSTIC_ERROR_TYPES: dict[str, ExtractorErrorType] = {
+    "authrequired": "auth_required",
+    "authenticationerror": "authentication_error",
+    "authorizationerror": "authorization_error",
+    "notfounderror": "not_found",
+    "httperror": "http_error",
+    "challengeerror": "challenge_error",
+    "extractionerror": "extraction_error",
+    "noextractorerror": "no_extractor",
+}
 _EXTRACTION_READ_CHUNK = 64 * 1024
 _EXTRACTION_STDERR_LIMIT = 64 * 1024
 _EXTRACTION_CLEANUP_TIMEOUT_SECONDS = 2.0
@@ -256,10 +271,15 @@ class GalleryDlRunner:
         if process.returncode != 0:
             raise _map_process_error(
                 stderr,
+                exit_code=process.returncode,
                 target_kind=target.kind,
                 authenticated=cookie_file is not None,
             )
-        parsed = _parse_json_records(stdout)
+        try:
+            parsed = _parse_json_records(stdout)
+        except AppError as error:
+            error.extractor_diagnostics = normalize_extractor_diagnostics(extractor_exit_code=0)
+            raise
         _map_json_error_records(
             list(parsed.error_records),
             target_kind=target.kind,
@@ -273,22 +293,28 @@ class GalleryDlRunner:
                         "story_unavailable",
                         "This Story is unavailable.",
                         failure_stage="extractor_empty_output",
+                        extractor_diagnostics=normalize_extractor_diagnostics(
+                            extractor_exit_code=0
+                        ),
                     )
                 raise AppError(
                     "extraction_failed",
                     "The extractor returned invalid output.",
                     failure_stage="extractor_empty_output",
+                    extractor_diagnostics=normalize_extractor_diagnostics(extractor_exit_code=0),
                 )
             if parsed.saw_non_media:
                 raise AppError(
                     "no_media",
                     "No directly downloadable media was found.",
                     failure_stage="extractor_no_media",
+                    extractor_diagnostics=normalize_extractor_diagnostics(extractor_exit_code=0),
                 )
             raise AppError(
                 "extraction_failed",
                 "The extractor returned invalid output.",
                 failure_stage="extractor_invalid_output",
+                extractor_diagnostics=normalize_extractor_diagnostics(extractor_exit_code=0),
             )
         return _add_post_context(records, target)
 
@@ -620,14 +646,17 @@ def _add_post_context(
 def _map_process_error(
     stderr: bytes,
     *,
+    exit_code: object,
     target_kind: TargetKind,
     authenticated: bool,
 ) -> AppError:
-    """Map private extractor diagnostics to a stable application error."""
+    """將 bounded stderr 映射為固定錯誤並附加安全程序證據。"""
     message = stderr.decode("utf-8", errors="replace")
     return _map_extractor_error(
         error_type=None,
         message=message,
+        diagnostic_source="stderr",
+        exit_code=exit_code,
         target_kind=target_kind,
         authenticated=authenticated,
     )
@@ -639,7 +668,7 @@ def _map_json_error_records(
     target_kind: TargetKind,
     authenticated: bool,
 ) -> list[dict[str, object]]:
-    """Map structured gallery-dl error records before normalizer processing."""
+    """先映射第一個合法 DataJob error record，再交由 normalizer 處理。"""
     for record in records:
         if "error" in record:
             raw_error_type = record.get("error")
@@ -647,6 +676,8 @@ def _map_json_error_records(
             raise _map_extractor_error(
                 error_type=raw_error_type if isinstance(raw_error_type, str) else None,
                 message=raw_message if isinstance(raw_message, str) else "",
+                diagnostic_source="datajob_error",
+                exit_code=0,
                 target_kind=target_kind,
                 authenticated=authenticated,
             )
@@ -657,10 +688,49 @@ def _map_extractor_error(
     error_type: str | None,
     message: str,
     *,
+    diagnostic_source: ExtractorDiagnosticSource,
+    exit_code: object,
     target_kind: TargetKind,
     authenticated: bool,
 ) -> AppError:
-    """將 extractor error type 與訊息分類為穩定的 application error。"""
+    """分類既有 extractor 錯誤後附加縮減過的來源 metadata。"""
+    error = _classify_extractor_error(
+        error_type,
+        message,
+        target_kind=target_kind,
+        authenticated=authenticated,
+    )
+    diagnostic_error_type: ExtractorErrorType
+    if diagnostic_source == "stderr":
+        diagnostic_error_type = "unknown"
+    else:
+        diagnostic_error_type = _normalize_extractor_diagnostic_error_type(error_type)
+    diagnostic_message = _remove_http_urls(message)
+    statuses = sorted(_extract_http_statuses(diagnostic_message))[:8]
+    error.extractor_diagnostics = normalize_extractor_diagnostics(
+        extractor_diagnostic_source=diagnostic_source,
+        extractor_error_type=diagnostic_error_type,
+        extractor_exit_code=exit_code,
+        extractor_http_statuses=statuses,
+    )
+    return error
+
+
+def _normalize_extractor_diagnostic_error_type(error_type: str | None) -> ExtractorErrorType:
+    """將 DataJob type 以精確 strip／casefold 白名單映射為固定 enum。"""
+    if type(error_type) is not str:
+        return "unknown"
+    return _EXTRACTOR_DIAGNOSTIC_ERROR_TYPES.get(error_type.strip().casefold(), "unknown")
+
+
+def _classify_extractor_error(
+    error_type: str | None,
+    message: str,
+    *,
+    target_kind: TargetKind,
+    authenticated: bool,
+) -> AppError:
+    """依既有 classifier 將 extractor type 與訊息映射為原應用程式錯誤。"""
     normalized_type = error_type.strip().casefold() if error_type is not None else None
     diagnostic = _remove_http_urls(message)
     statuses = _extract_http_statuses(diagnostic)

@@ -21,8 +21,9 @@ def run_command(
     *,
     check: bool = True,
     env: Mapping[str, str] | None = None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run one Docker command without invoking a shell."""
+    """以不經 shell 的方式執行一個有界 Docker 或 smoke 命令。"""
     return subprocess.run(
         command,
         cwd=PROJECT_ROOT,
@@ -30,6 +31,7 @@ def run_command(
         text=True,
         capture_output=True,
         env=env,
+        timeout=timeout,
     )
 
 
@@ -111,11 +113,25 @@ def main() -> int:
     compose = ["docker", "compose", "-p", project, "-f", str(COMPOSE_FILE)]
     environment = os.environ.copy()
     environment["SNS_MEDIA_HOST_PORT"] = str(find_free_port())
-    environment["SNS_MEDIA_IMAGE_TAG"] = f"smoke-{os.getpid()}"
+    image_tag = f"smoke-{os.getpid()}"
+    image_reference = f"sns-media-list:{image_tag}"
+    environment["SNS_MEDIA_IMAGE_TAG"] = image_tag
     container_id = ""
     try:
         run_command([*compose, "config", "--quiet"], env=environment)
         run_command([*compose, "build", "--pull=false"], env=environment)
+        image_identity = run_command(
+            [
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                "{{.Id}} {{json .RepoDigests}}",
+                image_reference,
+            ],
+            env=environment,
+        ).stdout.strip()
+        print(f"container smoke image ID and repository digests: {image_identity}")
         run_command([*compose, "up", "-d"], env=environment)
         container_id = run_command([*compose, "ps", "-q", "app"], env=environment).stdout.strip()
         if not container_id:
@@ -159,6 +175,17 @@ assert not Path('/app/media').exists()
         ).stdout.strip()
         if state != "exited":
             raise RuntimeError(f"graceful shutdown left container in state {state}")
+        diagnostic_environment = environment.copy()
+        diagnostic_environment["SNS_MEDIA_STORY_DIAGNOSTICS_IMAGE"] = image_reference
+        diagnostics_result = run_command(
+            [
+                sys.executable,
+                str(PROJECT_ROOT / "scripts" / "container_story_diagnostics_smoke.py"),
+            ],
+            env=diagnostic_environment,
+            timeout=1200,
+        )
+        print(diagnostics_result.stdout, end="")
         print("container smoke checks passed")
         return 0
     finally:

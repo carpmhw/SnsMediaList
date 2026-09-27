@@ -7,7 +7,11 @@ import re
 import sys
 from typing import Any, cast
 
-from .errors import FailureStageValue, normalize_failure_stage
+from .errors import (
+    FailureStageValue,
+    normalize_extractor_diagnostics,
+    normalize_failure_stage,
+)
 
 _TOKEN_PATH = re.compile(r"(/api/media/)[^/?\s]+(/(?:preview|download))")
 _REQUEST_ID = re.compile(r"(?:[0-9a-f]{32}|unknown)")
@@ -43,6 +47,12 @@ _EVENT_NAMES = frozenset(
         "media_download_resume_failed",
     }
 )
+_EXTRACTOR_DIAGNOSTIC_FIELDS = (
+    "extractor_diagnostic_source",
+    "extractor_error_type",
+    "extractor_exit_code",
+    "extractor_http_statuses",
+)
 _EVENT_FIELDS = frozenset(
     {
         "request_id",
@@ -55,6 +65,7 @@ _EVENT_FIELDS = frozenset(
         "reason_code",
         "failure_stage",
         "resume_attempt",
+        *_EXTRACTOR_DIAGNOSTIC_FIELDS,
     }
 )
 
@@ -77,6 +88,8 @@ class SafeEventFormatter(logging.Formatter):
             fields = validated_fields
         else:
             fields.pop("failure_stage", None)
+            for field_name in _EXTRACTOR_DIAGNOSTIC_FIELDS:
+                fields.pop(field_name, None)
         return json.dumps({"event": record.msg, **fields}, allow_nan=False)
 
 
@@ -133,7 +146,28 @@ def _validated_extraction_fields(
     failure_stage = normalize_failure_stage(fields.get("failure_stage"))
     if failure_stage is not None:
         result["failure_stage"] = failure_stage
+    result.update(_normalized_extractor_diagnostic_fields(fields))
     return result
+
+
+def _normalized_extractor_diagnostic_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    """以共用 metadata 規則重驗 extractor 欄位並建立 JSON 安全值。"""
+    diagnostics = normalize_extractor_diagnostics(
+        extractor_diagnostic_source=fields.get("extractor_diagnostic_source"),
+        extractor_error_type=fields.get("extractor_error_type"),
+        extractor_exit_code=fields.get("extractor_exit_code"),
+        extractor_http_statuses=fields.get("extractor_http_statuses"),
+    )
+    normalized: dict[str, Any] = {}
+    if diagnostics.extractor_diagnostic_source is not None:
+        normalized["extractor_diagnostic_source"] = diagnostics.extractor_diagnostic_source
+    if diagnostics.extractor_error_type is not None:
+        normalized["extractor_error_type"] = diagnostics.extractor_error_type
+    if diagnostics.extractor_exit_code is not None:
+        normalized["extractor_exit_code"] = diagnostics.extractor_exit_code
+    if diagnostics.extractor_http_statuses is not None:
+        normalized["extractor_http_statuses"] = list(diagnostics.extractor_http_statuses)
+    return normalized
 
 
 class SafeEventHandler(logging.Handler):
@@ -162,6 +196,10 @@ def build_event(
     reason_code: str | None = None,
     failure_stage: FailureStageValue | None = None,
     resume_attempt: int | None = None,
+    extractor_diagnostic_source: object = None,
+    extractor_error_type: object = None,
+    extractor_exit_code: object = None,
+    extractor_http_statuses: object = None,
     **_sensitive: Any,
 ) -> dict[str, Any]:
     """建立只包含核准觀測欄位的結構化事件。"""
@@ -184,6 +222,17 @@ def build_event(
         event["failure_stage"] = normalized_stage
     if resume_attempt is not None:
         event["resume_attempt"] = resume_attempt
+    if outcome == "failed" and type(reason_code) is str and reason_code in EXTRACTION_REASON_CODES:
+        event.update(
+            _normalized_extractor_diagnostic_fields(
+                {
+                    "extractor_diagnostic_source": extractor_diagnostic_source,
+                    "extractor_error_type": extractor_error_type,
+                    "extractor_exit_code": extractor_exit_code,
+                    "extractor_http_statuses": extractor_http_statuses,
+                }
+            )
+        )
     return event
 
 
