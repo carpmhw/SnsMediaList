@@ -221,9 +221,23 @@ docker compose logs --no-log-prefix --since 10m app
 {"event":"extraction_failed","request_id":"0123456789abcdef0123456789abcdef","platform":"instagram","outcome":"failed","duration_ms":12.5,"reason_code":"extraction_failed","failure_stage":"extractor_process_unclassified"}
 ```
 
-HTTP 429 優先映射 rate limit；HTTP 404 映射 Story availability；只有 HTTP 401/403 的 configured Story 屬於 ambiguous refusal。所有 extraction 嘗試只執行一次，不會 anonymous retry。`extractor_invalid_output` 請執行 `uv run python scripts/verify_gallery_contract.py`；`extractor_empty_output` 請檢查精確 Story／Post 過濾與 upstream 結果；`extractor_io` 檢查 pipe 與程序資源；`extractor_timeout` 檢查 network／CONNECT proxy，不放寬期限。只有實際安全 event 顯示 `extractor_process_unclassified` 後，才另行分析最小 diagnostic pattern；不可傾印或分享 raw stderr／stdout。
+HTTP 429 優先映射 rate limit；HTTP 404 映射 Story availability；只有 HTTP 401/403 的 configured Story 屬於 ambiguous refusal。所有 extraction 嘗試只執行一次，不會 anonymous retry。`extractor_invalid_output` 請執行 `uv run python scripts/verify_gallery_contract.py`；`extractor_empty_output` 請檢查精確 Story／Post 過濾與 upstream 結果；`extractor_io` 檢查 pipe 與程序資源；`extractor_timeout` 檢查 network／CONNECT proxy，不放寬期限。`extractor_process_unclassified` 請先依[Instagram Extractor Compatibility](#instagram-extractor-compatibility)完成 source／runtime、contract、release notes 與 isolated candidate gate 排查；只有 candidate 仍 unclassified 且取得安全去識別 diagnostic 時，才評估最小 classifier pattern。不可傾印或分享 raw stderr／stdout。
 
 驗證時一併記錄 source 與 image 身分：`git rev-parse HEAD`、`git status --short`，以及 `docker image inspect --format '{{.Id}} {{json .RepoDigests}}' <candidate-image>` 的實際 image ID／digest。Deterministic fake-extractor／container 結果與 owner-controlled live Story 重試分開記錄；fixture 通過不表示原 Story 已修復。live Story 是選用人工檢查，僅在目標仍有效且 operator 有權存取時透過既有受保護輸入流程執行。若需回復版本，沿用[既有升級與 rollback 流程](#升級與-rollback)；不以此 diagnostics 變更改動部署邊界。
+
+## Instagram Extractor Compatibility
+
+`extractor_process_unclassified` 不表示 subprocess 一定以非零狀態結束；gallery-dl 可能零退出並輸出合法但未知的 DataJob error record。不要單靠此 stage 推斷 Cookie 失效、Story 過期或 redirect 根因，也不要為了取得線索記錄 raw stdout／stderr。
+
+Instagram extractor 相容性問題依下列順序診斷，先核對版本與 contract，再評估分類變更：
+
+1. **比對 source 與 runtime。** 記錄 `git rev-parse HEAD`、`git status --short`、source pin、`docker compose ps/images`、`docker compose exec app gallery-dl --version` 及實際 image ID／digest。`pyproject.toml` 的 source pin 不能代替運作中 container 的 runtime 證據。
+2. **驗證安裝套件 contract。** 執行 `uv run python scripts/verify_gallery_contract.py`；它會核對已安裝 gallery-dl 版本、`--resolve-json` 和離線 DataJob producer／adapter consumer 相容性。`extractor_invalid_output` 優先檢查這一層；不可依真實平台或 Cookie 取得 fixture。
+3. **查官方 release notes。** 本次版本為 From `1.32.7` → To `1.32.13`；確認修正是否涵蓋觀察到的 Instagram 行為。`v1.32.13` release notes 列有 `fix redirect detection during user lookup`。版本更新是相容性假說的驗證，不單獨證明原 Story 已修復。
+4. **建立唯一 candidate image 並跑 gate。** 目前 Dockerfile 固定 Python 3.12 Debian Trixie digest `python:3.12-slim-trixie@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f`，FFmpeg pin 為 `7:7.1.5-0+deb13u1`。本次 Trixie candidate tag 為 `sns-media-list:candidate-gallery-dl-1.32.13-trixie`。使用獨立 candidate image tag，核對 gallery-dl／FFmpeg runtime、`/healthz`、container limits、deterministic smoke，並執行 `uv run python scripts/security_gate.py --image sns-media-list:candidate-gallery-dl-1.32.13-trixie`。Smoke image 與 candidate 必須分別記錄；container smoke 使用 per-run image tag，不得重標記共享 `sns-media-list:local` 或替換運作中的 service。Security gate 有未修復或可修復的 HIGH／CRITICAL finding 時，candidate 保持不可部署；不新增例外或由其它 image 的 smoke 結果替代。
+5. **最後才評估 classifier。** 只有 candidate 仍是 `extractor_process_unclassified` 且取得安全去識別 diagnostic，才修訂規格並評估 narrow classifier。不可加入 broad `redirect|home page|instagram|failed` pattern；單獨 home-page redirect 不等於 Cookie 失效。沒有安全 fixture 時保留既有九種 stage 與 classifier。
+
+owner-controlled live Story smoke 是選用檢查，不是 CI／release gate；只透過下方受保護檔案流程執行。若回復版本，使用已知的前一不可變 image reference，或只回復本 change 的 source 修改；不把可變 tag 當 rollback 證據。Baseline、candidate image ID／digest、release notes、gate 結果、未執行的 live 案例與 rollback reference 記錄於 OpenSpec change 的 `validation.md`。
 
 ## 故障排除
 

@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: sns-media-list:local
+    image: sns-media-list:${SNS_MEDIA_IMAGE_TAG:-local}
     init: true
     restart: unless-stopped
     command:

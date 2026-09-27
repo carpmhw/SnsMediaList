@@ -1,10 +1,9 @@
 FFmpeg runtime dependency
 
-This image installs the Debian Bookworm ffmpeg package at the version pinned
-by FFMPEG_VERSION in Dockerfile. FFmpeg is available from:
+本 image 安裝 Debian Trixie 的 ffmpeg package，版本由 Dockerfile 的
+FFMPEG_VERSION 精確鎖定為 `7:7.1.5-0+deb13u1`。FFmpeg 專案網址：
 
 https://ffmpeg.org/
 
-The FFmpeg package is distributed under GPL-2.0-or-later where built with
-the GPL-enabled configuration used by the Debian package. The corresponding
-Debian copyright and license texts are provided by the package metadata.
+此 Debian package 使用 GPL-enabled configuration 時，依 GPL-2.0-or-later
+散布。對應的 Debian copyright 與授權文字由 package metadata 提供。

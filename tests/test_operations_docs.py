@@ -137,6 +137,38 @@ def test_operations_guide_documents_cookie_lifecycle_and_story_error_split() -> 
     assert re.search(r"不暴露.*session.*細節", troubleshooting)
 
 
+def test_operations_guide_documents_instagram_extractor_compatibility() -> None:
+    """驗證 Instagram 相容性優先排錯、Trixie candidate 與 gate 流程。"""
+    guide = (PROJECT_ROOT / "OPERATIONS.md").read_text(encoding="utf-8")
+    assert "## Instagram Extractor Compatibility" in guide
+    compatibility = guide.partition("## Instagram Extractor Compatibility")[2].partition("\n## ")[0]
+
+    for required_text in (
+        "零退出",
+        "source pin",
+        "gallery-dl --version",
+        "`uv run python scripts/verify_gallery_contract.py`",
+        "1.32.7",
+        "1.32.13",
+        "release notes",
+        "redirect detection during user lookup",
+        "python:3.12-slim-trixie@sha256:",
+        "7:7.1.5-0+deb13u1",
+        "sns-media-list:candidate-gallery-dl-1.32.13-trixie",
+        "`uv run python scripts/security_gate.py --image",
+        "owner-controlled",
+        "classifier",
+        "rollback",
+    ):
+        assert required_text in compatibility
+
+    assert compatibility.index("gallery-dl --version") < compatibility.index(
+        "verify_gallery_contract.py"
+    )
+    assert compatibility.index("verify_gallery_contract.py") < compatibility.index("release notes")
+    assert compatibility.index("release notes") < compatibility.index("candidate image")
+
+
 def test_operations_guide_documents_ephemeral_story_smoke_safety() -> None:
     """Verify live Story smoke input and output remain ephemeral and secret-safe."""
     guide = (PROJECT_ROOT / "OPERATIONS.md").read_text(encoding="utf-8")

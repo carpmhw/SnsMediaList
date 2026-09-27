@@ -5,11 +5,12 @@ import sys
 
 
 def main() -> int:
-    """Run fixture, quality, process, and egress tests with uv."""
+    """使用 uv 執行已安裝套件、fixture、品質、process 與 egress contract。"""
     command = [
         "uv",
         "run",
         "pytest",
+        "tests/unit/test_gallery_dl_contract.py",
         "tests/unit/test_gallery_dl_normalizer.py",
         "tests/unit/test_gallery_dl_quality.py",
         "tests/unit/test_gallery_dl_process.py",

@@ -65,9 +65,9 @@ def exec_python(container_id: str, source: str) -> None:
 
 
 def verify_ffmpeg(container_id: str) -> None:
-    """Verify the runtime exposes the FFmpeg version pinned by the Dockerfile."""
+    """確認 runtime FFmpeg 版本符合 Dockerfile 精確 pin。"""
     result = run_command(["docker", "exec", container_id, "ffmpeg", "-version"])
-    if not result.stdout.startswith("ffmpeg version 5.1.9-"):
+    if not result.stdout.startswith("ffmpeg version 7.1.5-"):
         raise RuntimeError("container FFmpeg version does not match the pinned runtime")
 
 
@@ -102,7 +102,7 @@ def verify_runtime_hardening(container_id: str) -> None:
 
 
 def main() -> int:
-    """Build, start, inspect, restart, and gracefully stop the service."""
+    """使用獨立 image tag 建置、啟動、檢查、重啟並停止 smoke service。"""
     if shutil.which("docker") is None:
         print("docker is required for container smoke tests", file=sys.stderr)
         return 2
@@ -111,6 +111,7 @@ def main() -> int:
     compose = ["docker", "compose", "-p", project, "-f", str(COMPOSE_FILE)]
     environment = os.environ.copy()
     environment["SNS_MEDIA_HOST_PORT"] = str(find_free_port())
+    environment["SNS_MEDIA_IMAGE_TAG"] = f"smoke-{os.getpid()}"
     container_id = ""
     try:
         run_command([*compose, "config", "--quiet"], env=environment)
