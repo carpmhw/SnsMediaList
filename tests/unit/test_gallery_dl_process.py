@@ -12,6 +12,7 @@ from sns_media_list.config import Settings
 from sns_media_list.errors import AppError, ExtractorDiagnostics
 from sns_media_list.extractor.gallery_dl import (
     GalleryDlRunner,
+    _add_post_context,
     _cleanup_extraction_tasks,
     _stop_extraction_process,
     build_gallery_command,
@@ -29,9 +30,10 @@ CONSENT_REDIRECT = "HTTP redirect to consent page (https://www.instagram.com/con
 
 
 def test_command_disables_user_config_and_adaptive_delegation() -> None:
-    """Verify the command uses only pinned direct-progressive behavior."""
+    """確認 command 僅使用固定且受控的直接媒體擷取設定。"""
     command = build_gallery_command(
         "https://www.instagram.com/reel/ABC123/",
+        target_kind="post",
         proxy_url="http://127.0.0.1:8765",
         timeout_seconds=12,
     )
@@ -48,10 +50,24 @@ def test_command_disables_user_config_and_adaptive_delegation() -> None:
     assert "http://127.0.0.1:8765" in command
 
 
+def test_command_keeps_merged_video_mode_for_instagram_post() -> None:
+    """確認 Instagram Post 繼續使用既有 merged video mode。"""
+    command = build_gallery_command(
+        POST_URL,
+        target_kind="post",
+        proxy_url="http://127.0.0.1:8765",
+        timeout_seconds=12,
+    )
+
+    assert "extractor.instagram.videos=merged" in command
+    assert "extractor.instagram.previews=false" in command
+
+
 def test_command_passes_only_matching_instagram_cookie_path() -> None:
-    """Verify Instagram authentication uses a path-only category option."""
+    """確認 Instagram command 僅使用對應 Cookie 檔案路徑。"""
     command = build_gallery_command(
         "https://www.instagram.com/reel/ABC123/",
+        target_kind="post",
         proxy_url="http://127.0.0.1:8765",
         cookie_file="/run/secrets/instagram-cookies.txt",
     )
@@ -63,9 +79,10 @@ def test_command_passes_only_matching_instagram_cookie_path() -> None:
 
 
 def test_command_passes_only_matching_x_cookie_path() -> None:
-    """Verify X authentication uses the twitter category without Instagram options."""
+    """確認 X command 使用 twitter 類別，且不帶 Instagram 設定。"""
     command = build_gallery_command(
         "https://x.com/creator/status/1",
+        target_kind="post",
         proxy_url="http://127.0.0.1:8765",
         cookie_file="/run/secrets/x-cookies.txt",
     )
@@ -76,9 +93,10 @@ def test_command_passes_only_matching_x_cookie_path() -> None:
 
 
 def test_command_omits_cookie_options_for_anonymous_extraction() -> None:
-    """Verify an omitted platform cookie keeps the extractor anonymous."""
+    """確認未配置平台 Cookie 時 command 不含 Cookie 選項。"""
     command = build_gallery_command(
         "https://x.com/creator/status/1",
+        target_kind="post",
         proxy_url="http://127.0.0.1:8765",
     )
 
@@ -374,7 +392,7 @@ async def test_runner_uses_argument_array_and_parses_data_job_array(monkeypatch:
 async def test_runner_makes_one_cookieless_story_attempt_without_cookie_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify anonymous Story extraction launches one cookieless command."""
+    """確認匿名 Story 只執行一次無 Cookie 且不強制 merged 的 command。"""
     output = data_job_output(load_fixture_records("instagram-story-image.jsonl"))
     calls: list[tuple[Any, ...]] = []
 
@@ -391,6 +409,10 @@ async def test_runner_makes_one_cookieless_story_attempt_without_cookie_config(
 
     assert len(calls) == 1
     assert not any(".cookies=" in argument for argument in calls[0])
+    assert "extractor.instagram.videos=merged" not in calls[0]
+    assert "extractor.instagram.previews=false" in calls[0]
+    proxy_index = calls[0].index("--proxy")
+    assert calls[0][proxy_index + 1] == "http://127.0.0.1:8765"
 
 
 @pytest.mark.asyncio
@@ -398,7 +420,7 @@ async def test_runner_uses_instagram_cookie_on_only_story_attempt(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Verify authenticated Story extraction uses its cookie on the sole command."""
+    """確認 configured Story 只用對應唯讀 Cookie 且不強制 merged。"""
     cookie_file = tmp_path / "instagram.cookies.txt"
     cookie_file.write_text("session-cookie", encoding="utf-8")
     output = data_job_output(load_fixture_records("instagram-story-image.jsonl"))
@@ -416,8 +438,13 @@ async def test_runner_uses_instagram_cookie_on_only_story_attempt(
     )
 
     assert len(calls) == 1
+    assert "extractor.instagram.videos=merged" not in calls[0]
+    assert "extractor.instagram.previews=false" in calls[0]
     assert f"extractor.instagram.cookies={cookie_file}" in calls[0]
     assert "extractor.instagram.cookies-update=false" in calls[0]
+    assert not any("extractor.twitter.cookies=" in argument for argument in calls[0])
+    proxy_index = calls[0].index("--proxy")
+    assert calls[0][proxy_index + 1] == "http://127.0.0.1:8765"
 
 
 @pytest.mark.asyncio
@@ -446,6 +473,300 @@ async def test_runner_overwrites_story_records_with_validated_exact_context(
     assert [(record["platform"], record["post_url"], record["post_id"]) for record in records] == [
         (target.platform, target.canonical_url, target.target_id)
     ]
+
+
+@pytest.mark.asyncio
+async def test_story_ytdl_event_uses_same_record_video_url_without_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """確認缺少 width 的 Story pseudo URL 可由同筆直接影片來源正規化。"""
+    media_id = "2222222222222222222"
+    target = validate_post_url(f"https://www.instagram.com/stories/example.user/{media_id}/")
+    output = json.dumps(
+        [
+            [
+                3,
+                "ytdl:synthetic-story-video",
+                {
+                    "platform": "instagram",
+                    "post_url": "https://www.instagram.com/stories/untrusted.user/1/",
+                    "post_id": "untrusted-id",
+                    "num": 1,
+                    "type": "video",
+                    "video_url": "https://cdn.example/story-video.mp4",
+                    "extension": "mp4",
+                    "progressive": True,
+                },
+            ]
+        ]
+    ).encode()
+
+    records = await extract_process_output(monkeypatch, output, target, Settings())
+    result = normalize_gallery_output(records)
+
+    assert result.platform == "instagram"
+    assert result.post_url == target.canonical_url
+    assert result.post_id == media_id
+    assert len(result.items) == 1
+    assert result.items[0].media_type == "video"
+    assert result.items[0].source_url == "https://cdn.example/story-video.mp4"
+    assert result.items[0].filename == f"instagram-{media_id}-1.mp4"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("include_video_url", "video_url"),
+    [
+        pytest.param(False, None, id="missing"),
+        pytest.param(True, None, id="none"),
+        pytest.param(True, 42, id="number"),
+        pytest.param(True, ["https://cdn.example/video.mp4"], id="list"),
+        pytest.param(True, "", id="empty-string"),
+        pytest.param(True, "   ", id="whitespace-only"),
+        pytest.param(True, "http://cdn.example/video.mp4", id="http"),
+        pytest.param(True, "file:///video.mp4", id="file-scheme"),
+        pytest.param(True, "ytdl:https://cdn.example/video.mp4", id="nested-ytdl"),
+        pytest.param(True, "https://user:pass@cdn.example/video.mp4", id="credential"),
+        pytest.param(True, "https://cdn.example/video.mp4#fragment", id="fragment"),
+        pytest.param(True, "https://cdn.example/video\x1f.mp4", id="control-character"),
+        pytest.param(True, "https://cdn.example/video\x7f.mp4", id="del-character"),
+        pytest.param(True, "https://cdn.example/vídeo.mp4", id="non-ascii"),
+        pytest.param(True, "https://[", id="malformed-url"),
+    ],
+)
+async def test_story_ytdl_invalid_video_url_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    include_video_url: bool,
+    video_url: object,
+) -> None:
+    """確認缺少或不安全的 Story 直接來源不會通過既有 URL 驗證。"""
+    target = validate_post_url(STORY_URL)
+    metadata: dict[str, object] = {
+        "platform": "instagram",
+        "post_url": STORY_URL,
+        "post_id": target.target_id,
+        "num": 1,
+        "type": "video",
+        "extension": "mp4",
+        "progressive": True,
+    }
+    if include_video_url:
+        metadata["video_url"] = video_url
+    output = json.dumps([[3, "ytdl:synthetic-story-video", metadata]]).encode()
+
+    with pytest.raises(AppError) as exc_info:
+        records = await extract_process_output(monkeypatch, output, target, Settings())
+        normalize_gallery_output(records)
+
+    assert exc_info.value.code == "extraction_failed"
+
+
+def test_story_context_rewrites_only_same_record_without_mutating_input() -> None:
+    """確認 Story rewrite 僅複製並修改同一筆 record 的直接來源欄位。"""
+    target = validate_post_url(STORY_URL)
+    pseudo_url = "ytdl:synthetic-story-video"
+    video_url = "https://cdn.example/story-video.mp4"
+    record: dict[str, object] = {
+        "platform": "instagram",
+        "post_url": STORY_URL,
+        "post_id": target.target_id,
+        "num": 1,
+        "type": "video",
+        "url": pseudo_url,
+        "video_url": video_url,
+        "extension": "mp4",
+        "progressive": True,
+    }
+
+    contextualized = _add_post_context([record], target)
+
+    assert contextualized[0]["url"] == video_url
+    assert contextualized[0] is not record
+    assert record["url"] == pseudo_url
+
+
+@pytest.mark.asyncio
+async def test_story_direct_url_is_not_overwritten_by_different_video_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """確認 Story record 的直接 HTTPS URL 優先於不同的 video_url。"""
+    target = validate_post_url(STORY_URL)
+    direct_url = "https://cdn.example/original-story-video.mp4"
+    metadata = {
+        "platform": "instagram",
+        "post_url": STORY_URL,
+        "post_id": target.target_id,
+        "num": 1,
+        "type": "video",
+        "url": direct_url,
+        "video_url": "https://cdn.example/other-story-video.mp4",
+        "extension": "mp4",
+        "progressive": True,
+    }
+    output = json.dumps([[3, "ytdl:unused-event-url", metadata]]).encode()
+
+    records = await extract_process_output(monkeypatch, output, target, Settings())
+    result = normalize_gallery_output(records)
+
+    assert result.items[0].source_url == direct_url
+
+
+@pytest.mark.asyncio
+async def test_story_image_record_keeps_its_direct_image_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """確認直接圖片來源的 Story 仍正規化為原本單一圖片。"""
+    target = validate_post_url(STORY_URL)
+    image_url = "https://cdn.example/story-image.jpg"
+    output = json.dumps(
+        [
+            [
+                3,
+                image_url,
+                {
+                    "platform": "instagram",
+                    "post_url": STORY_URL,
+                    "post_id": target.target_id,
+                    "num": 1,
+                    "type": "image",
+                    "extension": "jpg",
+                    "progressive": True,
+                },
+            ]
+        ]
+    ).encode()
+
+    records = await extract_process_output(monkeypatch, output, target, Settings())
+    result = normalize_gallery_output(records)
+
+    assert len(result.items) == 1
+    assert result.items[0].media_type == "image"
+    assert result.items[0].source_url == image_url
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "target_url",
+    [
+        pytest.param(POST_URL, id="instagram-post"),
+        pytest.param("https://www.instagram.com/reel/ABC123/", id="instagram-reel"),
+        pytest.param("https://x.com/creator/status/1", id="x-post"),
+    ],
+)
+async def test_non_story_target_does_not_trust_forged_story_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    target_url: str,
+) -> None:
+    """確認 Post、Reel 與 X 不能依 extractor 偽造的 Story metadata rewrite。"""
+    target = validate_post_url(target_url)
+    output = json.dumps(
+        [
+            [
+                3,
+                "ytdl:synthetic-forged-story",
+                {
+                    "platform": "instagram",
+                    "post_url": STORY_URL,
+                    "post_id": "1111111111111111111",
+                    "num": 1,
+                    "type": "story",
+                    "video_url": "https://cdn.example/forged-story-video.mp4",
+                    "extension": "mp4",
+                    "progressive": True,
+                },
+            ]
+        ]
+    ).encode()
+
+    with pytest.raises(AppError) as exc_info:
+        records = await extract_process_output(monkeypatch, output, target, Settings())
+        normalize_gallery_output(records)
+
+    assert exc_info.value.code == "extraction_failed"
+
+
+@pytest.mark.asyncio
+async def test_story_source_is_not_borrowed_from_other_events_or_nested_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """確認 directory、queue、其他 media record 與巢狀欄位不能供應來源。"""
+    target = validate_post_url(STORY_URL)
+    events = [
+        [2, {"video_url": "https://cdn.example/directory-video.mp4"}],
+        [
+            6,
+            "https://cdn.example/queue-video.mp4",
+            {"video_url": "https://cdn.example/queue-video.mp4"},
+        ],
+        [
+            3,
+            "https://cdn.example/other-record-video.mp4",
+            {
+                "platform": "instagram",
+                "post_url": STORY_URL,
+                "post_id": target.target_id,
+                "num": 2,
+                "type": "video",
+                "video_url": "https://cdn.example/other-record-video.mp4",
+                "extension": "mp4",
+                "progressive": True,
+            },
+        ],
+        [
+            3,
+            "ytdl:synthetic-story-video",
+            {
+                "platform": "instagram",
+                "post_url": STORY_URL,
+                "post_id": target.target_id,
+                "num": 1,
+                "type": "video",
+                "metadata": {"video_url": "https://cdn.example/nested-video.mp4"},
+                "extension": "mp4",
+                "progressive": True,
+            },
+        ],
+    ]
+    output = json.dumps(events).encode()
+
+    with pytest.raises(AppError) as exc_info:
+        records = await extract_process_output(monkeypatch, output, target, Settings())
+        normalize_gallery_output(records)
+
+    assert exc_info.value.code == "extraction_failed"
+
+
+@pytest.mark.asyncio
+async def test_datajob_error_precedes_rewritable_story_media(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """確認合法 DataJob error 優先於同次輸出中可轉換的 Story 媒體。"""
+    target = validate_post_url(STORY_URL)
+    events = [
+        [
+            3,
+            "ytdl:synthetic-story-video",
+            {
+                "platform": "instagram",
+                "post_url": STORY_URL,
+                "post_id": target.target_id,
+                "num": 1,
+                "type": "video",
+                "video_url": "https://cdn.example/story-video.mp4",
+                "extension": "mp4",
+                "progressive": True,
+            },
+        ],
+        [-1, {"error": "UnknownError", "message": "synthetic extractor failure"}],
+    ]
+
+    with pytest.raises(AppError) as exc_info:
+        await extract_process_output(monkeypatch, json.dumps(events).encode(), target, Settings())
+
+    assert exc_info.value.code == "extraction_failed"
+    assert exc_info.value.failure_stage == "extractor_process_unclassified"
+    assert exc_info.value.extractor_diagnostics is not None
+    assert exc_info.value.extractor_diagnostics.extractor_diagnostic_source == "datajob_error"
 
 
 @pytest.mark.asyncio

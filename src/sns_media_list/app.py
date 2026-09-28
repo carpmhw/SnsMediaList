@@ -31,6 +31,7 @@ _EXTRACTION_HOSTS = frozenset(
         "www.instagram.com",
         "i.instagram.com",
         "graph.instagram.com",
+        "static.cdninstagram.com",  # Story GraphQL doc_id 所需的靜態 JavaScript。
         "x.com",
         "www.x.com",
         "api.x.com",

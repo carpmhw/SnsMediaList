@@ -140,9 +140,24 @@ def evaluate_trivy(
 
 
 def _trivy_vulnerabilities(result: Mapping[str, Any]) -> list[Any] | None:
-    """依 Trivy result 類型解析 Vulnerabilities，並只放寬 Python 缺欄位情況。"""
+    """解析 Trivy vulnerabilities；省略時只接受 Python 或完整 OS package inventory。"""
     if "Vulnerabilities" not in result:
         if result.get("Class") == "lang-pkgs" and result.get("Type") == "python-pkg":
+            return []
+        packages = result.get("Packages")
+        if (
+            result.get("Class") == "os-pkgs"
+            and isinstance(packages, list)
+            and packages
+            and all(
+                isinstance(package, Mapping)
+                and isinstance(package.get("Name"), str)
+                and bool(package["Name"].strip())
+                and isinstance(package.get("Version"), str)
+                and bool(package["Version"].strip())
+                for package in packages
+            )
+        ):
             return []
         return None
     vulnerabilities = result["Vulnerabilities"]
@@ -407,7 +422,7 @@ def collect_pip_audit() -> Any:
 
 
 def collect_trivy(image: str) -> Any:
-    """Scan the exact candidate image with Trivy at High/Critical severity."""
+    """以 pinned Trivy 掃描候選 image 並要求完整套件清單。"""
     if shutil.which("trivy"):
         command = ["trivy"]
     else:
@@ -425,6 +440,7 @@ def collect_trivy(image: str) -> Any:
             "--quiet",
             "--format",
             "json",
+            "--list-all-pkgs",
             "--severity",
             "HIGH,CRITICAL",
             image,

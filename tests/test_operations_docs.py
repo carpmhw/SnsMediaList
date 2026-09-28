@@ -207,6 +207,28 @@ def test_operations_guide_documents_instagram_extractor_compatibility() -> None:
         assert required_text in checks
 
 
+def test_operations_guide_documents_limited_story_video_compatibility() -> None:
+    """驗證 Story video mode 與同筆來源轉換不擴大既有安全邊界。"""
+    guide = (PROJECT_ROOT / "OPERATIONS.md").read_text(encoding="utf-8")
+    compatibility = guide.partition("## Instagram Extractor Compatibility")[2].partition("\n## ")[0]
+
+    for required_text in (
+        "pinned `gallery-dl` 1.32.14",
+        "不強制 `extractor.instagram.videos=merged`",
+        "Instagram Post／Reel 繼續使用 merged",
+        "同一 URL media record 的 top-level 非空 `video_url`",
+        "`ytdl:` pseudo URL",
+        "不是安全授權",
+        "HTTPS URL 形狀檢查",
+        "DNS A／AAAA",
+        "fail closed",
+        "不 unwrap `ytdl:`",
+        "不新增 generic downloader 或 retry",
+        "不表示所有 `KeyError: 'width'` 或 HTTP 403 都由相同原因造成",
+    ):
+        assert required_text in compatibility
+
+
 def test_operations_guide_documents_ephemeral_story_smoke_safety() -> None:
     """Verify live Story smoke input and output remain ephemeral and secret-safe."""
     guide = (PROJECT_ROOT / "OPERATIONS.md").read_text(encoding="utf-8")

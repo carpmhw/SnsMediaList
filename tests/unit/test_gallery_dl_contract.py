@@ -29,7 +29,7 @@ from sns_media_list.url_validation import validate_post_url
 class ContractExtractor(Extractor):
     """以固定合成事件驗證實際 gallery-dl DataJob 的輸出格式。"""
 
-    pattern = r"^contract://media$"
+    pattern = r"^contract://(?:media|story)$"
     category = "contract"
     subcategory = "fixture"
     root = "https://contract.invalid"
@@ -37,23 +37,38 @@ class ContractExtractor(Extractor):
     def __init__(self, match: re.Match[str]) -> None:
         """初始化不含網路或帳號狀態的合成 extractor。"""
         super().__init__(match)
-        self.emit_error = True
+        self.story_mode = match.group(0) == "contract://story"
+        self.emit_error = not self.story_mode
 
     def items(self) -> Iterator[tuple[int, str, dict[str, object]]]:
         """產生 directory、media、queue 與受控 error event。"""
         yield gallery_job.Message.Directory, "", {"title": "synthetic post"}
-        yield (
-            gallery_job.Message.Url,
-            "https://cdn.example/image.jpg",
-            {
-                "type": "image",
-                "num": 1,
-                "filename": "synthetic-image",
-                "extension": "jpg",
-                "width": 640,
-                "height": 480,
-            },
-        )
+        if self.story_mode:
+            yield (
+                gallery_job.Message.Url,
+                "ytdl:contract-story-video",
+                {
+                    "type": "video",
+                    "num": 1,
+                    "filename": "contract-story-video",
+                    "extension": "mp4",
+                    "video_url": "https://cdn.example/story-video.mp4",
+                    "progressive": True,
+                },
+            )
+        else:
+            yield (
+                gallery_job.Message.Url,
+                "https://cdn.example/image.jpg",
+                {
+                    "type": "image",
+                    "num": 1,
+                    "filename": "synthetic-image",
+                    "extension": "jpg",
+                    "width": 640,
+                    "height": 480,
+                },
+            )
         yield gallery_job.Message.Queue, "contract://unhandled", {"title": "synthetic queue"}
         if self.emit_error:
             raise ValueError("synthetic offline error")
@@ -73,7 +88,9 @@ def _project_gallery_dl_pin() -> str:
     return pins[0]
 
 
-def _data_job_output(monkeypatch: pytest.MonkeyPatch) -> bytes:
+def _data_job_output(
+    monkeypatch: pytest.MonkeyPatch, extractor_url: str = "contract://media"
+) -> bytes:
     """以受控 extractor 執行已安裝套件並擷取單一 JSON event array。"""
     from gallery_dl.extractor import common as gallery_common
 
@@ -87,7 +104,7 @@ def _data_job_output(monkeypatch: pytest.MonkeyPatch) -> bytes:
         raise AssertionError(f"DataJob attempted an unexpected {method} request to {url}")
 
     monkeypatch.setattr(gallery_common.requests.Session, "request", deny_network_request)
-    extractor = ContractExtractor.from_url("contract://media")
+    extractor = ContractExtractor.from_url(extractor_url)
     assert extractor is not None
     output = io.StringIO()
     data_job = gallery_job.DataJob(extractor, file=output, resolve=True)
@@ -172,3 +189,28 @@ def test_installed_data_job_events_round_trip_through_adapter(
             authenticated=False,
         )
     assert exc_info.value.code == "extraction_failed"
+
+
+def test_installed_story_pseudo_url_round_trips_through_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """確認已安裝 DataJob 的 Story pseudo URL 可由同筆 video_url 正規化。"""
+    output = _data_job_output(monkeypatch, "contract://story")
+    events = json.loads(output)
+    assert isinstance(events, list)
+    assert [event[0] for event in events] == [2, 3, 6]
+    assert events[1][1] == "ytdl:contract-story-video"
+    assert events[1][2]["video_url"] == "https://cdn.example/story-video.mp4"
+    assert "width" not in events[1][2]
+
+    parsed = _parse_json_records(output)
+    target = validate_post_url("https://www.instagram.com/stories/contract.user/123456789/")
+    records = _add_post_context(list(parsed.media_records), target)
+    normalized = normalize_gallery_output(records)
+
+    assert normalized.platform == "instagram"
+    assert normalized.post_id == "123456789"
+    assert len(normalized.items) == 1
+    assert normalized.items[0].media_type == "video"
+    assert normalized.items[0].source_url == "https://cdn.example/story-video.mp4"
+    assert normalized.items[0].filename == "instagram-123456789-1.mp4"

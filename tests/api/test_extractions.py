@@ -15,6 +15,7 @@ from sns_media_list.api import routes
 from sns_media_list.app import create_app
 from sns_media_list.config import Settings
 from sns_media_list.errors import AppError, ExtractorDiagnostics
+from sns_media_list.extractor.gallery_dl import GalleryDlRunner
 from sns_media_list.logging_config import SafeEventFormatter
 from sns_media_list.security.tokens import TokenStore
 from sns_media_list.services.extraction_service import ExtractionService
@@ -32,6 +33,53 @@ class FakeExtractor:
         """Return configured records and count invocations."""
         self.calls += 1
         return self.records
+
+
+class SyntheticGalleryProcess:
+    """提供合成 gallery-dl stdout 的 subprocess 替身。"""
+
+    def __init__(self, stdout: bytes, returncode: int = 0) -> None:
+        """保存合成 stdout 與程序結束狀態。"""
+        self.stdout = stdout
+        self.stderr = b""
+        self.returncode = returncode
+        self.terminated = False
+        self.killed = False
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        """回傳測試指定的 DataJob 輸出與空 stderr。"""
+        return self.stdout, b""
+
+    def terminate(self) -> None:
+        """記錄測試期間的 graceful termination。"""
+        self.terminated = True
+        self.returncode = -15
+
+    def kill(self) -> None:
+        """記錄測試期間的強制 termination。"""
+        self.killed = True
+        self.returncode = -9
+
+    async def wait(self) -> int:
+        """回傳合成程序的結束狀態。"""
+        return self.returncode
+
+
+def install_synthetic_gallery_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+    output: bytes,
+) -> list[tuple[Any, ...]]:
+    """將合成 DataJob stdout 接入真實 GalleryDlRunner 並回傳 command。"""
+    calls: list[tuple[Any, ...]] = []
+    process = SyntheticGalleryProcess(output)
+
+    async def fake_create(*args: Any, **_kwargs: Any) -> SyntheticGalleryProcess:
+        """擷取 command arguments 並回傳合成 extractor process。"""
+        calls.append(args)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+    return calls
 
 
 class AuthenticationFailureExtractor:
@@ -277,6 +325,199 @@ def test_story_success_preserves_response_shape_and_opaque_media_urls(
         assert story_id not in public_url.path
     assert source_url not in response.text
     assert preview_source_url not in response.text
+
+
+def test_story_pseudo_url_api_uses_same_record_video_source_and_private_token(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    """驗證實際 runner 將 Story direct video source 私存並只回傳 opaque URL。"""
+    story_id = "4444444444444444444"
+    story_url = f"https://www.instagram.com/stories/example.user/{story_id}/"
+    pseudo_url = "ytdl:api-contract-story-video"
+    source_url = "https://cdn.example/story-video.mp4?source=cdn-url-sentinel"
+    raw_metadata = "raw-story-metadata-sentinel"
+    cookie_sentinel = "synthetic-cookie-sentinel"
+    cookie_file = tmp_path / "synthetic-instagram-cookies.txt"
+    cookie_file.write_text(cookie_sentinel, encoding="utf-8")
+    output = json.dumps(
+        [
+            [
+                3,
+                pseudo_url,
+                {
+                    "platform": "x",
+                    "post_url": "https://x.com/untrusted/status/1",
+                    "post_id": "untrusted-id",
+                    "num": 1,
+                    "type": "video",
+                    "video_url": source_url,
+                    "extension": "mp4",
+                    "progressive": True,
+                    "raw": {"metadata": raw_metadata},
+                    "cookies": {"sessionid": cookie_sentinel},
+                    "cookie_file": str(cookie_file),
+                },
+            ]
+        ]
+    ).encode()
+    calls = install_synthetic_gallery_subprocess(monkeypatch, output)
+    token_store = TokenStore(capacity=20, ttl_seconds=600)
+    settings = Settings(instagram_cookie_file=str(cookie_file))
+    service = ExtractionService(
+        settings,
+        extractor=GalleryDlRunner(settings),
+        token_store=token_store,
+    )
+    client = TestClient(create_app(extraction_service=service))
+    caplog.set_level(logging.INFO, logger="sns_media_list")
+
+    response = client.post("/api/extractions", json={"url": story_url})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["platform"] == "instagram"
+    assert payload["post_url"] == story_url
+    assert len(payload["media"]) == 1
+    media = payload["media"][0]
+    assert media["media_type"] == "video"
+    assert media["filename"] == f"instagram-{story_id}-1.mp4"
+    assert media["preview_url"] == "/placeholder.svg"
+    assert media["download_url"].startswith("/api/media/")
+    assert source_url not in response.text
+    assert pseudo_url not in response.text
+    assert raw_metadata not in response.text
+    assert cookie_sentinel not in response.text
+    assert len(calls) == 1
+    assert "extractor.instagram.videos=merged" not in calls[0]
+    assert f"extractor.instagram.cookies={cookie_file}" in calls[0]
+    assert "extractor.instagram.cookies-update=false" in calls[0]
+
+    download_token = urlsplit(media["download_url"]).path.split("/")[-2]
+    private_record = token_store.get(download_token, "download")
+    assert private_record.source_url == source_url
+    assert private_record.platform == "instagram"
+    assert private_record.media_class == "video"
+    assert private_record.filename == f"instagram-{story_id}-1.mp4"
+    assert private_record.request_headers == {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36"
+        ),
+        "Referer": "https://www.instagram.com/",
+    }
+    log_text = json.dumps([record.__dict__ for record in caplog.records], default=str)
+    for private_value in (source_url, pseudo_url, raw_metadata, cookie_sentinel, str(cookie_file)):
+        assert private_value not in log_text
+
+
+@pytest.mark.parametrize(
+    ("include_video_url", "video_url"),
+    [
+        pytest.param(False, None, id="missing-source"),
+        pytest.param(True, "http://cdn.example/unsafe-story.mp4", id="unsafe-source"),
+    ],
+)
+def test_story_missing_or_unsafe_pseudo_source_issues_no_token_or_private_output(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+    include_video_url: bool,
+    video_url: str | None,
+) -> None:
+    """驗證 missing 或 unsafe Story source 在 token reserve 前 fail closed。"""
+    story_id = "5555555555555555555"
+    story_url = f"https://www.instagram.com/stories/example.user/{story_id}/"
+    pseudo_url = "ytdl:api-failure-pseudo-sentinel"
+    raw_metadata = "raw-failure-metadata-sentinel"
+    cookie_sentinel = "failure-cookie-sentinel"
+    cookie_file = tmp_path / "synthetic-instagram-cookies.txt"
+    cookie_file.write_text(cookie_sentinel, encoding="utf-8")
+    metadata: dict[str, object] = {
+        "platform": "instagram",
+        "post_url": story_url,
+        "post_id": story_id,
+        "num": 1,
+        "type": "video",
+        "extension": "mp4",
+        "progressive": True,
+        "raw": {"metadata": raw_metadata},
+        "cookies": {"sessionid": cookie_sentinel},
+    }
+    if include_video_url:
+        metadata["video_url"] = video_url
+    output = json.dumps([[3, pseudo_url, metadata]]).encode()
+    install_synthetic_gallery_subprocess(monkeypatch, output)
+    token_store = TokenStore(capacity=20, ttl_seconds=600)
+    settings = Settings(instagram_cookie_file=str(cookie_file))
+    service = ExtractionService(
+        settings,
+        extractor=GalleryDlRunner(settings),
+        token_store=token_store,
+    )
+    client = TestClient(create_app(extraction_service=service))
+    caplog.set_level(logging.INFO, logger="sns_media_list")
+
+    response = client.post("/api/extractions", json={"url": story_url})
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "extraction_failed"
+    assert token_store.size == 0
+    for private_value in (pseudo_url, raw_metadata, cookie_sentinel, video_url or ""):
+        if private_value:
+            assert private_value not in response.text
+    log_text = json.dumps([record.__dict__ for record in caplog.records], default=str)
+    for private_value in (
+        pseudo_url,
+        raw_metadata,
+        cookie_sentinel,
+        str(cookie_file),
+        video_url or "",
+    ):
+        if private_value:
+            assert private_value not in log_text
+
+
+def test_story_width_keyerror_keeps_generic_fallback_without_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    """驗證合成 KeyError width 延用一般 extraction_failed 與私有診斷契約。"""
+    story_id = "6666666666666666666"
+    story_url = f"https://www.instagram.com/stories/example.user/{story_id}/"
+    cookie_file = tmp_path / "synthetic-instagram-cookies.txt"
+    cookie_file.write_text("width-keyerror-cookie-sentinel", encoding="utf-8")
+    output = json.dumps([[-1, {"error": "KeyError", "message": "'width'"}]]).encode()
+    install_synthetic_gallery_subprocess(monkeypatch, output)
+    token_store = TokenStore(capacity=20, ttl_seconds=600)
+    settings = Settings(instagram_cookie_file=str(cookie_file))
+    service = ExtractionService(
+        settings,
+        extractor=GalleryDlRunner(settings),
+        token_store=token_store,
+    )
+    client = TestClient(create_app(extraction_service=service))
+    caplog.set_level(logging.INFO, logger="sns_media_list")
+
+    response = client.post("/api/extractions", json={"url": story_url})
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "extraction_failed"
+    assert token_store.size == 0
+    assert "failure_stage" not in response.text
+    assert "extractor_diagnostics" not in response.text
+    assert "'width'" not in response.text
+    events = [
+        record.__dict__["event"]
+        for record in caplog.records
+        if record.name == "sns_media_list" and "event" in record.__dict__
+    ]
+    assert len(events) == 1
+    assert events[0]["failure_stage"] == "extractor_process_unclassified"
+    assert events[0]["extractor_diagnostic_source"] == "datajob_error"
+    assert events[0]["extractor_error_type"] == "unknown"
+    assert events[0]["extractor_exit_code"] == 0
 
 
 def test_story_sensitive_metadata_stays_out_of_response_tokens_and_logs(

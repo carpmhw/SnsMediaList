@@ -1,9 +1,9 @@
 FFmpeg runtime dependency
 
-本 image 安裝 Debian Trixie 的 ffmpeg package，版本由 Dockerfile 的
-FFMPEG_VERSION 精確鎖定為 `7:7.1.5-0+deb13u1`。FFmpeg 專案網址：
+本 image 安裝 Alpine 3.24 community repository 的 ffmpeg APK，版本由
+Dockerfile 的 FFMPEG_VERSION 精確鎖定為 `8.1.2-r0`。APK metadata 列出的授權為
+`GPL-2.0-or-later AND LGPL-2.1-or-later`。FFmpeg 專案網址：
 
 https://ffmpeg.org/
 
-此 Debian package 使用 GPL-enabled configuration 時，依 GPL-2.0-or-later
-散布。對應的 Debian copyright 與授權文字由 package metadata 提供。
+對應的 Alpine package 授權資訊由 APK metadata 提供。
