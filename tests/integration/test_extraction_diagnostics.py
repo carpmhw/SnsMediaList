@@ -13,7 +13,14 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).parents[2]
 STORY_URL = "https://www.instagram.com/stories/example.user/1234567890/"
-_STORY_MEDIA_IDS = ("1234567890", "1234567891", "1234567892", "1234567893")
+_STORY_MEDIA_IDS = (
+    "1234567890",
+    "1234567891",
+    "1234567892",
+    "1234567893",
+    "1234567894",
+    "1234567895",
+)
 SENSITIVE_SENTINELS = (
     *(
         f"https://www.instagram.com/stories/example.user/{media_id}/"
@@ -56,6 +63,19 @@ if media_id == "1234567892":
     sys.exit(0)
 if media_id == "1234567893":
     sys.stdout.write("PRIVATE_INVALID_JSON")
+    sys.exit(0)
+if media_id == "1234567894":
+    sys.stdout.write(json.dumps([[-1, {
+        "error": "HttpError",
+        "message": "HTTP 403 Forbidden PRIVATE_RAW_DIAGNOSTIC",
+    }]]))
+    sys.exit(0)
+if media_id == "1234567895":
+    sys.stdout.write(json.dumps([[-1, {
+        "error": "HttpError",
+        "message": "'500 Internal Server Error' for '" + sys.argv[-1]
+                   + "?token=FAKE_TOKEN_SENTINEL' PRIVATE_RAW_DIAGNOSTIC",
+    }]]))
     sys.exit(0)
 sys.stderr.write(
     "AuthRequired: authenticated cookies needed; "
@@ -143,7 +163,14 @@ def _stop_uvicorn(process: subprocess.Popen[str]) -> str:
 
 
 @pytest.mark.parametrize(
-    ("media_id", "configured_cookie", "expected_status", "expected_reason", "expected_stage"),
+    (
+        "media_id",
+        "configured_cookie",
+        "expected_status",
+        "expected_reason",
+        "expected_stage",
+        "expected_diagnostics",
+    ),
     [
         pytest.param(
             "1234567890",
@@ -151,6 +178,11 @@ def _stop_uvicorn(process: subprocess.Popen[str]) -> str:
             403,
             "story_auth_required",
             "extractor_platform_error",
+            {
+                "extractor_diagnostic_source": "stderr",
+                "extractor_error_type": "unknown",
+                "extractor_exit_code": 1,
+            },
             id="anonymous-auth-required",
         ),
         pytest.param(
@@ -159,6 +191,11 @@ def _stop_uvicorn(process: subprocess.Popen[str]) -> str:
             503,
             "platform_authentication_failed",
             "extractor_platform_error",
+            {
+                "extractor_diagnostic_source": "stderr",
+                "extractor_error_type": "unknown",
+                "extractor_exit_code": 1,
+            },
             id="configured-auth-required",
         ),
         pytest.param(
@@ -167,6 +204,11 @@ def _stop_uvicorn(process: subprocess.Popen[str]) -> str:
             502,
             "extraction_failed",
             "extractor_process_unclassified",
+            {
+                "extractor_diagnostic_source": "stderr",
+                "extractor_error_type": "unknown",
+                "extractor_exit_code": 1,
+            },
             id="unknown-nonzero-stderr",
         ),
         pytest.param(
@@ -175,6 +217,11 @@ def _stop_uvicorn(process: subprocess.Popen[str]) -> str:
             502,
             "extraction_failed",
             "extractor_process_unclassified",
+            {
+                "extractor_diagnostic_source": "datajob_error",
+                "extractor_error_type": "unknown",
+                "extractor_exit_code": 0,
+            },
             id="unknown-datajob-error",
         ),
         pytest.param(
@@ -183,7 +230,36 @@ def _stop_uvicorn(process: subprocess.Popen[str]) -> str:
             502,
             "extraction_failed",
             "extractor_invalid_output",
+            {"extractor_exit_code": 0},
             id="invalid-json",
+        ),
+        pytest.param(
+            "1234567894",
+            True,
+            502,
+            "extraction_failed",
+            "extractor_process_unclassified",
+            {
+                "extractor_diagnostic_source": "datajob_error",
+                "extractor_error_type": "http_error",
+                "extractor_exit_code": 0,
+                "extractor_http_statuses": [403],
+            },
+            id="configured-story-http-403",
+        ),
+        pytest.param(
+            "1234567895",
+            True,
+            502,
+            "extraction_failed",
+            "extractor_process_unclassified",
+            {
+                "extractor_diagnostic_source": "datajob_error",
+                "extractor_error_type": "http_error",
+                "extractor_exit_code": 0,
+                "extractor_http_statuses": [500],
+            },
+            id="configured-story-http-500-reason-phrase",
         ),
     ],
 )
@@ -194,6 +270,7 @@ def test_default_uvicorn_process_logs_one_bounded_story_failure(
     expected_status: int,
     expected_reason: str,
     expected_stage: str,
+    expected_diagnostics: dict[str, object],
 ) -> None:
     """驗證預設 Uvicorn 將不同 runner failure 映射成唯一安全 JSON event。"""
     cookie_file: Path | None = None
@@ -215,7 +292,15 @@ def test_default_uvicorn_process_logs_one_bounded_story_failure(
     assert response.status_code == expected_status
     assert response.json()["code"] == expected_reason
     assert response.headers["X-SNS-Error-Code"] == expected_reason
-    assert "failure_stage" not in response.text
+    for field_name in (
+        "failure_stage",
+        "extractor_diagnostics",
+        "extractor_diagnostic_source",
+        "extractor_error_type",
+        "extractor_exit_code",
+        "extractor_http_statuses",
+    ):
+        assert field_name not in response.text
     event_lines = [line for line in output.splitlines() if line.startswith("{")]
     events = [json.loads(line) for line in event_lines]
     assert [event["event"] for event in events] == ["extraction_failed"]
@@ -224,6 +309,15 @@ def test_default_uvicorn_process_logs_one_bounded_story_failure(
     assert events[0]["outcome"] == "failed"
     assert events[0]["reason_code"] == expected_reason
     assert events[0]["failure_stage"] == expected_stage
+    for field_name, expected_value in expected_diagnostics.items():
+        assert events[0][field_name] == expected_value
+    for field_name in {
+        "extractor_diagnostic_source",
+        "extractor_error_type",
+        "extractor_exit_code",
+        "extractor_http_statuses",
+    } - expected_diagnostics.keys():
+        assert field_name not in events[0]
     assert events[0]["duration_ms"] >= 0
     for sentinel in SENSITIVE_SENTINELS:
         assert sentinel not in output

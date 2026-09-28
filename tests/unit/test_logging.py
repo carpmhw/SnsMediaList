@@ -116,6 +116,79 @@ def test_build_event_normalizes_failure_stage_and_drops_sensitive_sentinels(
         assert sentinel not in serialized
 
 
+@pytest.mark.parametrize(
+    ("diagnostic_fields", "expected_fields"),
+    [
+        pytest.param(
+            {
+                "extractor_diagnostic_source": "stderr",
+                "extractor_error_type": "unknown",
+                "extractor_exit_code": 0,
+                "extractor_http_statuses": [403, 401, 403],
+            },
+            {
+                "extractor_diagnostic_source": "stderr",
+                "extractor_error_type": "unknown",
+                "extractor_exit_code": 0,
+                "extractor_http_statuses": [401, 403],
+            },
+            id="valid-values",
+        ),
+        pytest.param(
+            {
+                "extractor_diagnostic_source": "PRIVATE_URL_COOKIE_TOKEN",
+                "extractor_error_type": "PRIVATE_RAW_TYPE",
+            },
+            {
+                "extractor_diagnostic_source": "unknown",
+                "extractor_error_type": "unknown",
+            },
+            id="untrusted-enums",
+        ),
+        pytest.param(
+            {"extractor_exit_code": True, "extractor_http_statuses": [403, "PRIVATE_STATUS"]},
+            {},
+            id="invalid-optional-values",
+        ),
+        pytest.param(
+            {"extractor_exit_code": -9, "extractor_http_statuses": iter([429])},
+            {"extractor_exit_code": -9},
+            id="bounded-negative-exit-and-custom-iterator",
+        ),
+    ],
+)
+def test_build_event_normalizes_extractor_diagnostic_value_matrix(
+    diagnostic_fields: dict[str, object],
+    expected_fields: dict[str, object],
+) -> None:
+    """驗證 builder 正規化 optional 診斷欄位且不丟棄合法失敗事件。"""
+    event = build_event(
+        request_id="a" * 32,
+        platform="instagram",
+        outcome="failed",
+        duration_ms=1,
+        reason_code="extraction_failed",
+        failure_stage="extractor_process_unclassified",
+        **diagnostic_fields,
+    )
+
+    assert event["reason_code"] == "extraction_failed"
+    assert event["failure_stage"] == "extractor_process_unclassified"
+    for field_name, expected_value in expected_fields.items():
+        assert event[field_name] == expected_value
+    for field_name in {
+        "extractor_diagnostic_source",
+        "extractor_error_type",
+        "extractor_exit_code",
+        "extractor_http_statuses",
+    } - expected_fields.keys():
+        assert field_name not in event
+    serialized = json.dumps(event)
+    assert "PRIVATE_URL_COOKIE_TOKEN" not in serialized
+    assert "PRIVATE_RAW_TYPE" not in serialized
+    assert "PRIVATE_STATUS" not in serialized
+
+
 def test_build_event_omits_failure_stage_for_success() -> None:
     """驗證成功 extraction event 不包含 failure stage。"""
     event = build_event(
@@ -125,9 +198,19 @@ def test_build_event_omits_failure_stage_for_success() -> None:
         duration_ms=1,
         item_count=1,
         failure_stage="extractor_io",
+        extractor_diagnostic_source="stderr",
+        extractor_error_type="unknown",
+        extractor_exit_code=0,
+        extractor_http_statuses=[403],
     )
 
     assert "failure_stage" not in event
+    assert not {
+        "extractor_diagnostic_source",
+        "extractor_error_type",
+        "extractor_exit_code",
+        "extractor_http_statuses",
+    }.intersection(event)
 
 
 def test_privacy_filter_removes_token_bearing_access_paths() -> None:
@@ -188,6 +271,10 @@ def test_default_safe_output(name, capsys) -> None:
         "etag",
         "resolved_ip",
         "transport_exception",
+        "extractor_diagnostic_source",
+        "extractor_error_type",
+        "extractor_exit_code",
+        "extractor_http_statuses",
     }
     event.update(dict.fromkeys(sensitive_fields, secret))
     try:
@@ -255,6 +342,85 @@ def test_extraction_events_emit_only_allowlisted_fields(
     assert formatted
     assert json.loads(formatted) == {"event": event_name, **event}
     assert "PRIVATE_" not in formatted
+
+
+@pytest.mark.parametrize(
+    ("diagnostic_fields", "expected_fields"),
+    [
+        pytest.param(
+            {
+                "extractor_diagnostic_source": "datajob_error",
+                "extractor_error_type": "http_error",
+                "extractor_exit_code": 0,
+                "extractor_http_statuses": [403, 401, 403],
+            },
+            {
+                "extractor_diagnostic_source": "datajob_error",
+                "extractor_error_type": "http_error",
+                "extractor_exit_code": 0,
+                "extractor_http_statuses": [401, 403],
+            },
+            id="valid-values",
+        ),
+        pytest.param(
+            {
+                "extractor_diagnostic_source": "PRIVATE_COOKIE_URL_TOKEN",
+                "extractor_error_type": object(),
+                "extractor_exit_code": False,
+                "extractor_http_statuses": iter([403]),
+            },
+            {
+                "extractor_diagnostic_source": "unknown",
+                "extractor_error_type": "unknown",
+            },
+            id="invalid-values-preserve-event",
+        ),
+    ],
+)
+def test_formatter_revalidates_direct_record_diagnostic_value_matrix(
+    diagnostic_fields: dict[str, object],
+    expected_fields: dict[str, object],
+) -> None:
+    """驗證直接 LogRecord 的 optional 診斷欄位也逐欄重驗。"""
+    private_sentinel = "PRIVATE_RAW_MESSAGE_ARGS_EXCEPTION"
+    try:
+        raise RuntimeError(private_sentinel)
+    except RuntimeError:
+        exc_info = sys.exc_info()
+    record = logging.LogRecord(
+        name="sns_media_list",
+        level=logging.ERROR,
+        pathname="test",
+        lineno=1,
+        msg=private_sentinel,
+        args=(private_sentinel,),
+        exc_info=exc_info,
+    )
+    record.msg = "extraction_failed"
+    record.event = {
+        "request_id": "a" * 32,
+        "platform": "instagram",
+        "outcome": "failed",
+        "duration_ms": 1,
+        "reason_code": "extraction_failed",
+        **diagnostic_fields,
+    }
+
+    formatted = SafeEventFormatter().format(record)
+
+    assert formatted
+    event = json.loads(formatted)
+    for field_name, expected_value in expected_fields.items():
+        assert event[field_name] == expected_value
+    for field_name in {
+        "extractor_diagnostic_source",
+        "extractor_error_type",
+        "extractor_exit_code",
+        "extractor_http_statuses",
+    } - expected_fields.keys():
+        assert field_name not in event
+    assert private_sentinel not in formatted
+    assert "PRIVATE_COOKIE_URL_TOKEN" not in formatted
 
 
 @pytest.mark.parametrize(
@@ -441,7 +607,13 @@ def test_formatter_removes_failure_stage_from_success_and_download_events(
         args=(),
         exc_info=None,
     )
-    event: dict[str, object] = {"failure_stage": failure_stage}
+    event: dict[str, object] = {
+        "failure_stage": failure_stage,
+        "extractor_diagnostic_source": "stderr",
+        "extractor_error_type": "unknown",
+        "extractor_exit_code": 0,
+        "extractor_http_statuses": [403],
+    }
     if event_name == "extraction_complete":
         event.update(
             {
@@ -458,6 +630,12 @@ def test_formatter_removes_failure_stage_from_success_and_download_events(
 
     assert formatted
     assert "failure_stage" not in json.loads(formatted)
+    assert not {
+        "extractor_diagnostic_source",
+        "extractor_error_type",
+        "extractor_exit_code",
+        "extractor_http_statuses",
+    }.intersection(json.loads(formatted))
     assert _UNSAFE_FAILURE_STAGE not in formatted
 
 

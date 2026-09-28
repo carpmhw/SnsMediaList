@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from sns_media_list.config import Settings
-from sns_media_list.errors import AppError
+from sns_media_list.errors import AppError, ExtractorDiagnostics
 from sns_media_list.extractor.gallery_dl import (
     GalleryDlRunner,
     _cleanup_extraction_tasks,
@@ -150,6 +150,7 @@ class StreamProcess:
         self.terminated = False
         self.killed = False
         self._exited = asyncio.Event()
+        self.wait_started = asyncio.Event()
 
     async def communicate(self) -> tuple[bytes, bytes]:
         """若 production path 使用 communicate，立即讓 regression test 失敗。"""
@@ -169,6 +170,7 @@ class StreamProcess:
 
     async def wait(self) -> int:
         """等待 process 被停止並回傳 exit code。"""
+        self.wait_started.set()
         await self._exited.wait()
         return self.returncode or 0
 
@@ -1158,6 +1160,261 @@ async def test_runner_classifies_both_error_sources_with_failure_stage(
 
 
 @pytest.mark.asyncio
+async def test_nonzero_stderr_records_bounded_diagnostic_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """驗證 stderr 診斷只輸出固定欄位、實際退出碼與明確狀態。"""
+    stderr = (
+        b"unclassified response COOKIE_SENTINEL HTTP 403 Forbidden "
+        b"https://example.test/private?token=URL_SENTINEL"
+    )
+    process = FakeProcess(b"", stderr, returncode=7)
+
+    async def fake_create(*_args: Any, **_kwargs: Any) -> FakeProcess:
+        """回傳帶有合成敏感 stderr 與實際非零退出碼的程序替身。"""
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+    with pytest.raises(AppError) as exc_info:
+        await GalleryDlRunner(Settings()).extract(validate_post_url(POST_URL))
+
+    error = exc_info.value
+    assert error.code == "extraction_failed"
+    assert error.failure_stage == "extractor_process_unclassified"
+    assert error.extractor_diagnostics is not None
+    assert error.extractor_diagnostics == ExtractorDiagnostics(
+        extractor_diagnostic_source="stderr",
+        extractor_error_type="unknown",
+        extractor_exit_code=7,
+        extractor_http_statuses=[403],
+    )
+    assert "COOKIE_SENTINEL" not in repr(error.extractor_diagnostics)
+    assert "URL_SENTINEL" not in repr(error.extractor_diagnostics)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw_error_type", "diagnostic_type", "expected_code"),
+    [
+        pytest.param("  AUTHREQUIRED  ", "auth_required", "post_unavailable", id="auth-required"),
+        pytest.param("AuthenticationError", "authentication_error", "post_unavailable"),
+        pytest.param("AuthorizationError", "authorization_error", "extraction_failed"),
+        pytest.param("NotFoundError", "not_found", "extraction_failed"),
+        pytest.param("HttpError", "http_error", "extraction_failed"),
+        pytest.param("ChallengeError", "challenge_error", "extraction_failed"),
+        pytest.param("ExtractionError", "extraction_error", "extraction_failed"),
+        pytest.param("NoExtractorError", "no_extractor", "extraction_failed"),
+    ],
+)
+async def test_datajob_error_records_use_exact_diagnostic_type_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_error_type: str,
+    diagnostic_type: str,
+    expected_code: str,
+) -> None:
+    """驗證 DataJob 錯誤類別依精確 strip／casefold allowlist 正規化。"""
+    error = await assert_runner_error(
+        monkeypatch,
+        target_url=POST_URL,
+        settings=Settings(),
+        message="unclassified diagnostic",
+        error_type=raw_error_type,
+        expected_code=expected_code,
+    )
+
+    assert error.extractor_diagnostics is not None
+    assert error.extractor_diagnostics.extractor_diagnostic_source == "datajob_error"
+    assert error.extractor_diagnostics.extractor_error_type == diagnostic_type
+    assert error.extractor_diagnostics.extractor_exit_code == 0
+    assert error.extractor_diagnostics.extractor_http_statuses is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw_error_type",
+    ["UnknownError", "AuthRequiredExtra", "PrefixAuthRequired", "HttpErrorExtra"],
+)
+async def test_datajob_similar_error_type_names_use_unknown_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_error_type: str,
+) -> None:
+    """驗證未知或相似 prefix 類別不會被 substring 推測。"""
+    error = await assert_runner_error(
+        monkeypatch,
+        target_url=POST_URL,
+        settings=Settings(),
+        message="unclassified diagnostic",
+        error_type=raw_error_type,
+        expected_code="extraction_failed",
+    )
+
+    assert error.failure_stage == "extractor_process_unclassified"
+    assert error.extractor_diagnostics is not None
+    assert error.extractor_diagnostics.extractor_diagnostic_source == "datajob_error"
+    assert error.extractor_diagnostics.extractor_error_type == "unknown"
+    assert error.extractor_diagnostics.extractor_exit_code == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "expected_status", "expected_code"),
+    [
+        pytest.param("HTTP 401 Unauthorized", (401,), "extraction_failed", id="401"),
+        pytest.param("status: 403 Forbidden", (403,), "extraction_failed", id="403"),
+        pytest.param("HTTP/2 404 Not Found", (404,), "story_unavailable", id="404"),
+        pytest.param("HTTP 429 Too Many Requests", (429,), "upstream_rate_limited", id="429"),
+    ],
+)
+async def test_datajob_diagnostics_records_explicit_http_statuses(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    message: str,
+    expected_status: tuple[int, ...],
+    expected_code: str,
+) -> None:
+    """驗證四種明確上游 HTTP 狀態留在診斷欄位並維持既有分類。"""
+    error = await assert_runner_error(
+        monkeypatch,
+        target_url=STORY_URL,
+        settings=instagram_settings(tmp_path, configured=True),
+        message=message,
+        error_type="HttpError",
+        expected_code=expected_code,
+    )
+
+    assert error.extractor_diagnostics is not None
+    assert error.extractor_diagnostics.extractor_http_statuses == expected_status
+    assert error.extractor_diagnostics.extractor_exit_code == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["datajob_error", "stderr"])
+@pytest.mark.parametrize(
+    ("message", "expected_status"),
+    [
+        ("'500 Internal Server Error' for 'https://example.test/private?token=SECRET'", (500,)),
+        ("'502 Bad Gateway' for 'https://example.test/private?token=SECRET'", (502,)),
+        ("'503 Service Unavailable' for 'https://example.test/private?token=SECRET'", (503,)),
+        ("'504 Gateway Timeout' for 'https://example.test/private?token=SECRET'", (504,)),
+        ("'500 internal server error' for 'https://example.test/private?token=SECRET'", (500,)),
+        ("503 Service Unavailable; 500 Internal Server Error; 503 Service Unavailable", (500, 503)),
+    ],
+)
+async def test_runner_records_server_error_reason_phrases(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    source: str,
+    message: str,
+    expected_status: tuple[int, ...],
+) -> None:
+    """驗證兩種錯誤來源辨識明確 5xx 片語，保留公開分類且不洩漏原文。"""
+    error = await assert_runner_error(
+        monkeypatch,
+        target_url=STORY_URL,
+        settings=instagram_settings(tmp_path, configured=True),
+        message=message,
+        error_type="HttpError",
+        expected_code="extraction_failed",
+        process_stderr=source == "stderr",
+    )
+
+    assert error.status_code == 502
+    assert error.failure_stage == "extractor_process_unclassified"
+    assert error.extractor_diagnostics is not None
+    assert error.extractor_diagnostics.extractor_diagnostic_source == source
+    assert error.extractor_diagnostics.extractor_http_statuses == expected_status
+    assert "SECRET" not in repr(error.extractor_diagnostics)
+    assert "example.test" not in repr(error.extractor_diagnostics)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        "403",
+        "500",
+        "Story ID 123500123",
+        "500 Bad Gateway",
+        "1500 Internal Server Error",
+        "500 Internal Server Errorish",
+        "only inside https://example.test/path?query=HTTP%20403%20Forbidden",
+        "only inside https://example.test/path?query=500%20Internal%20Server%20Error",
+        "only inside https://example.test/500/Internal/Server/Error",
+    ],
+)
+async def test_datajob_diagnostics_ignores_bare_and_url_only_statuses(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    message: str,
+) -> None:
+    """驗證裸數字與已移除 URL 內的狀態樣式不形成證據。"""
+    error = await assert_runner_error(
+        monkeypatch,
+        target_url=STORY_URL,
+        settings=instagram_settings(tmp_path, configured=True),
+        message=message,
+        error_type="HttpError",
+        expected_code="extraction_failed",
+    )
+
+    assert error.extractor_diagnostics is not None
+    assert error.extractor_diagnostics.extractor_http_statuses is None
+
+
+@pytest.mark.asyncio
+async def test_http_status_diagnostics_are_bounded_without_changing_reason_priority(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """驗證診斷最多保留八個狀態但分類仍查看完整 bounded 訊息。"""
+    message = " ".join(
+        [
+            *(f"HTTP {status}" for status in range(401, 409)),
+            "HTTP 429 Too Many Requests",
+            "500 Internal Server Error",
+            "503 Service Unavailable",
+            "HTTP 401",
+        ]
+    )
+    error = await assert_runner_error(
+        monkeypatch,
+        target_url=STORY_URL,
+        settings=instagram_settings(tmp_path, configured=True),
+        message=message,
+        error_type="HttpError",
+        expected_code="upstream_rate_limited",
+    )
+
+    assert error.failure_stage == "extractor_platform_error"
+    assert error.extractor_diagnostics is not None
+    assert error.extractor_diagnostics.extractor_http_statuses == tuple(range(401, 409))
+
+
+@pytest.mark.asyncio
+async def test_multiple_datajob_errors_use_only_the_first_error_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """驗證後續 DataJob error 不會覆寫第一筆的分類或狀態證據。"""
+    events = [
+        [-1, {"error": "HttpError", "message": "HTTP 403 Forbidden"}],
+        [-1, {"error": "HttpError", "message": "HTTP 429 Too Many Requests"}],
+    ]
+    with pytest.raises(AppError) as exc_info:
+        await extract_process_output(
+            monkeypatch,
+            json.dumps(events).encode(),
+            validate_post_url(POST_URL),
+            Settings(),
+        )
+
+    error = exc_info.value
+    assert error.code == "extraction_failed"
+    assert error.extractor_diagnostics is not None
+    assert error.extractor_diagnostics.extractor_error_type == "http_error"
+    assert error.extractor_diagnostics.extractor_http_statuses == (403,)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("target_url", "expected_code"),
     [
@@ -1183,6 +1440,7 @@ async def test_runner_maps_literal_empty_data_job_by_target(
 
     assert exc_info.value.code == expected_code
     assert exc_info.value.failure_stage == "extractor_empty_output"
+    assert exc_info.value.extractor_diagnostics == ExtractorDiagnostics(extractor_exit_code=0)
 
 
 @pytest.mark.asyncio
@@ -1210,6 +1468,7 @@ async def test_runner_maps_non_media_data_job_to_no_media(
     assert exc_info.value.code == "no_media"
     assert exc_info.value.status_code == 422
     assert exc_info.value.failure_stage == "extractor_no_media"
+    assert exc_info.value.extractor_diagnostics == ExtractorDiagnostics(extractor_exit_code=0)
 
 
 @pytest.mark.asyncio
@@ -1258,6 +1517,7 @@ async def test_runner_rejects_non_data_job_output(
     assert exc_info.value.code == "extraction_failed"
     assert exc_info.value.message == "The extractor returned invalid output."
     assert exc_info.value.failure_stage == "extractor_invalid_output"
+    assert exc_info.value.extractor_diagnostics == ExtractorDiagnostics(extractor_exit_code=0)
 
 
 @pytest.mark.asyncio
@@ -1468,6 +1728,7 @@ async def test_runner_terminates_on_timeout(monkeypatch: Any) -> None:
 
     assert exc_info.value.code == "extraction_timeout"
     assert exc_info.value.failure_stage == "extractor_timeout"
+    assert exc_info.value.extractor_diagnostics is None
     assert process.terminated is True
 
 
@@ -1497,6 +1758,7 @@ async def test_runner_maps_test_double_communicate_io_error_to_io_stage(
 
     assert exc_info.value.code == "extraction_failed"
     assert exc_info.value.failure_stage == "extractor_io"
+    assert exc_info.value.extractor_diagnostics is None
     assert process.terminated is True
 
 
@@ -1517,6 +1779,7 @@ async def test_runner_rejects_oversized_output(monkeypatch: Any) -> None:
 
     assert exc_info.value.code == "extraction_failed"
     assert exc_info.value.failure_stage == "extractor_output_limit"
+    assert exc_info.value.extractor_diagnostics is None
 
 
 @pytest.mark.asyncio
@@ -1537,6 +1800,7 @@ async def test_runner_terminates_real_pipe_when_stdout_exceeds_limit(monkeypatch
 
     assert exc_info.value.code == "extraction_failed"
     assert exc_info.value.failure_stage == "extractor_output_limit"
+    assert exc_info.value.extractor_diagnostics is None
     assert process.terminated is True
 
 
@@ -1572,6 +1836,7 @@ async def test_runner_maps_raw_pipe_errors_to_safe_extraction_failure(
 
     assert exc_info.value.code == "extraction_failed"
     assert exc_info.value.failure_stage == "extractor_io"
+    assert exc_info.value.extractor_diagnostics is None
     assert exc_info.value.message == "The extractor output could not be read."
     assert isinstance(exc_info.value.__cause__, OSError)
     assert str(pipe_error) not in exc_info.value.message
@@ -1597,6 +1862,7 @@ async def test_runner_maps_spawn_oserror_to_safe_extraction_failure(
 
     assert exc_info.value.code == "extraction_failed"
     assert exc_info.value.failure_stage == "extractor_start"
+    assert exc_info.value.extractor_diagnostics is None
     assert exc_info.value.message == "The extractor process could not be started."
     assert isinstance(exc_info.value.__cause__, OSError)
     assert "private spawn detail" not in exc_info.value.message
@@ -1691,3 +1957,29 @@ async def test_stop_extraction_process_kills_after_repeated_cancellation() -> No
         if not process.wait_finished.is_set():
             await asyncio.wait_for(process.wait_finished.wait(), timeout=0.1)
         loop.set_exception_handler(previous_handler)
+
+
+@pytest.mark.asyncio
+async def test_runner_cancellation_is_propagated_without_cleanup_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """驗證 caller cancellation 清理 process 後仍原樣傳遞而不生成診斷錯誤。"""
+    process = StreamProcess(b"", b"")
+
+    async def fake_create(*_args: Any, **_kwargs: Any) -> StreamProcess:
+        """回傳可觀察 wait 與 terminate cleanup 的程序替身。"""
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+    extraction = asyncio.create_task(
+        GalleryDlRunner(Settings()).extract(validate_post_url(POST_URL))
+    )
+    await asyncio.wait_for(process.wait_started.wait(), timeout=0.1)
+    extraction.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await extraction
+
+    assert process.terminated is True
+    assert process.killed is False
+    assert process.returncode == -15

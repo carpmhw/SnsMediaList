@@ -188,13 +188,14 @@ def test_adaptive_only_item_is_counted_unavailable() -> None:
 
 
 def test_all_unavailable_media_returns_no_media() -> None:
-    """Verify an extraction with no direct media has a stable error."""
+    """驗證正規化後沒有直接媒體時維持既有安全錯誤。"""
     result = normalize_gallery_output(fixture_lines("instagram-adaptive-only.jsonl"))
 
     with pytest.raises(AppError) as exc_info:
         ensure_downloadable_media(result)
 
     assert exc_info.value.code == "no_media"
+    assert exc_info.value.extractor_diagnostics is None
 
 
 def test_more_than_twenty_downloadable_items_is_rejected() -> None:

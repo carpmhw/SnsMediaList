@@ -14,7 +14,7 @@ from starlette.requests import ClientDisconnect
 from starlette.types import Message, Receive, Scope, Send
 
 from ..api.limits import Lease, RequestLimiter, client_identity
-from ..errors import AppError, FailureStageValue
+from ..errors import AppError, ExtractorDiagnostics, FailureStageValue
 from ..logging_config import EXTRACTION_REASON_CODES, build_event
 from ..models import ExtractionResponse, PrivateMediaRecord
 from ..network.media_client import (
@@ -354,6 +354,7 @@ def build_router(
                 duration_ms=(perf_counter() - started) * 1000,
                 reason_code=reason_code,
                 failure_stage=error.failure_stage,
+                extractor_diagnostics=error.extractor_diagnostics,
             )
             raise
         _safe_log_extraction_event(
@@ -478,15 +479,20 @@ def _safe_log_extraction_event(
     item_count: int | None = None,
     reason_code: str | None = None,
     failure_stage: FailureStageValue | None = None,
+    extractor_diagnostics: ExtractorDiagnostics | None = None,
 ) -> None:
-    """Best-effort 輸出 allowlisted extraction event，不影響 API 結果。"""
+    """盡力輸出 allowlisted extraction event，不影響 API 結果。"""
     if event_name == "extraction_failed":
         if reason_code not in EXTRACTION_REASON_CODES:
             reason_code = "extraction_failed"
         item_count = None
+        safe_diagnostics = (
+            extractor_diagnostics if type(extractor_diagnostics) is ExtractorDiagnostics else None
+        )
     else:
         reason_code = None
         failure_stage = None
+        safe_diagnostics = None
     try:
         logger.info(
             event_name,
@@ -499,6 +505,26 @@ def _safe_log_extraction_event(
                     item_count=item_count,
                     reason_code=reason_code,
                     failure_stage=failure_stage,
+                    extractor_diagnostic_source=(
+                        safe_diagnostics.extractor_diagnostic_source
+                        if safe_diagnostics is not None
+                        else None
+                    ),
+                    extractor_error_type=(
+                        safe_diagnostics.extractor_error_type
+                        if safe_diagnostics is not None
+                        else None
+                    ),
+                    extractor_exit_code=(
+                        safe_diagnostics.extractor_exit_code
+                        if safe_diagnostics is not None
+                        else None
+                    ),
+                    extractor_http_statuses=(
+                        safe_diagnostics.extractor_http_statuses
+                        if safe_diagnostics is not None
+                        else None
+                    ),
                 )
             },
         )

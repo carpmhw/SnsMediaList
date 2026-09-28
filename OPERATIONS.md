@@ -1,5 +1,9 @@
 # SNS Media List 操作指南
 
+所有指令在 repository root 執行。版本與映像 pin 以 `pyproject.toml`、`uv.lock`、`Dockerfile` 為準；功能範圍及開發入口見 [README](README.md)。
+
+[部署](#部署) · [Cookie](#平台-cookie-驗證) · [升級／回復](#升級與-rollback) · [下載診斷](#安全下載診斷) · [Story 診斷](#instagram-story-extraction-diagnostics) · [人工驗證](#owner-controlled-manual-smoke-tests)
+
 ## 部署
 
 需求：Docker Engine、Docker Compose v2、可解析 outbound HTTPS 目的地的 DNS，以及私人或可信任的 operator 環境。本服務不是公開匿名 proxy。
@@ -11,9 +15,13 @@ docker compose ps
 curl --fail http://127.0.0.1:8000/healthz
 ```
 
-Compose 使用單一 worker 與 UID 10001，並啟用 read-only root filesystem、bounded tmpfs、`no-new-privileges`、drop all capabilities 及 PID limit。不掛載持久 media 或 token volume，預設只綁定 `127.0.0.1:${SNS_MEDIA_HOST_PORT:-8000}:8000`，Uvicorn access log 也已停用。遠端存取前必須配置 authenticated 或 network-ACL-restricted reverse proxy。
+Compose 使用單一 worker、UID/GID 10001、read-only root filesystem、bounded tmpfs、`no-new-privileges`、drop all capabilities 與 PID limit。不掛載持久 media／token volume；預設綁定 `127.0.0.1:${SNS_MEDIA_HOST_PORT:-8000}:8000`，並停用 Uvicorn access log。遠端存取須配置驗證或 network ACL。
 
-主要限制如下；請以 deployment-specific Compose override 或 environment file 覆寫：
+既有部署先依 [Compose labels 確認實際服務](#instagram-extractor-compatibility)；後續指令沿用相同 `-p <project>`、`-f` 檔案與 Cookie overlays，避免啟動第二個 project。
+
+### 設定
+
+以下為預設值；完整欄位及合法範圍見 `src/sns_media_list/config.py`。Compose 中明列的 `environment` 請用 deployment override 覆寫，單改 shell／`.env` 不會取代這些固定值；`SNS_MEDIA_HOST_PORT`、`SNS_MEDIA_IMAGE_TAG` 等 `${…}` 插值才由 shell／`.env` 提供。
 
 | 設定 | 預設值 |
 | --- | ---: |
@@ -46,7 +54,7 @@ Compose 使用單一 worker 與 UID 10001，並啟用 read-only root filesystem�
 
 - 不得將 Cookie value、credentials、extractor config、proxy credentials、token、request body 或完整 upstream media URL 放入 environment、command line 或 log。
 - 平台 Cookie 只能透過下方 read-only file mount 提供；服務仍須維持 loopback binding 或受信任 ingress。
-- Application 與 reverse proxy 都不得記錄 token path；不得為排錯而略過 host、DNS、MIME、redirect 或 byte-limit check。
+- 維持 Uvicorn `--no-access-log`；application 與 reverse proxy 都不得記錄 token path 或 raw extractor output，也不得為排錯略過 host、DNS、MIME、redirect 或 byte-limit check。
 
 ## 批次、下載與 timeout
 
@@ -65,11 +73,11 @@ batch UI 不會改變 `SNS_MEDIA_MAX_EXTRACTIONS`；最多五個 URL 由瀏覽�
 
 ## 安全下載診斷
 
-預設 application logger 以 INFO 等級將每筆事件寫成一行 JSON 至 stderr，Docker 可直接收集，不需要額外 handler 或 debug 設定。重複初始化不會增加輸出，也不修改 root logger 或向 root propagation。Uvicorn access log 必須維持停用；**不得為排錯開啟可能包含 token path 的 application、Uvicorn 或 reverse proxy access log**。
+Application logger 預設以 INFO 將每筆事件寫成一行 JSON 至 stderr，Docker 可直接收集；不需開啟 debug 或 access log。沿用[擷取診斷的日誌查詢](#instagram-story-extraction-diagnostics)，以 `request_id` 串接事件。
 
 下載事件為 `media_download_started`，以及唯一的 `media_download_completed`、`media_download_failed` 或 `media_download_aborted` terminal event。X 影片符合既有條件時另有 `media_download_resume_attempted`、`media_download_resume_succeeded` 或 `media_download_resume_failed`，`resume_attempt` 固定為 1。Instagram 不增加 Range resume 或伺服器重試；瀏覽器本身可能重新發出 GET，每次 GET 都有不同 request ID。
 
-安全欄位包含 `event`、`request_id`、`platform`、`media_class`、`outcome`、`duration_ms`、`bytes_streamed`，失敗時另有 `reason_code`。既有 `extraction_complete` 事件仍可輸出 `item_count`。任意 extra、完整 URL、query、token、Cookie、Authorization、raw ETag 與原始 transport exception 均不屬於輸出內容。
+分享時只保留事件的安全欄位：`event`、`request_id`、`platform`、`media_class`、`outcome`、`duration_ms`、`bytes_streamed`、`reason_code`。不附 URL、token、Cookie、headers、raw ETag 或原始 exception。
 
 | Reason Code | 意義與檢查方向 |
 | --- | --- |
@@ -80,26 +88,20 @@ batch UI 不會改變 `SNS_MEDIA_MAX_EXTRACTIONS`；最多五個 URL 由瀏覽�
 | `upstream_validation` | 狀態、MIME、媒體內容或 resume response 等驗證失敗。 |
 | `unexpected_upstream_failure` | 未落入上述分類的讀取、送出或 cleanup 錯誤；不輸出 raw exception。 |
 
-`started` 是下載流程開始，不保證 HTTP headers 已送出。`bytes_streamed` 是串流流程交付並恢復迭代後累計的媒體 bytes，不是瀏覽器落盤 bytes，也無法精確計算失敗 send 已傳出的部分資料。`completed` 只在最後 body 與 cleanup 均成功後記錄。最後 body 成功後若 cleanup 才失敗，仍記錄 failed，但不能撤回瀏覽器已收到的檔案。
+`started` 不保證 headers 已送出；`bytes_streamed` 不是瀏覽器落盤 bytes。`completed` 僅在最後 body 與 cleanup 均成功後記錄；cleanup 失敗仍記為 failed，但不能撤回已送出的資料。
 
-Headers 已開始而 body 未完成時，服務用固定的 `StreamAborted: Media stream aborted.` 訊號讓 Uvicorn 關閉連線，不補送最後 body、不移除可信 Content-Length，也不建立第二份 error response。Uvicorn 可能輸出安全 traceback；這不代表應停用所有錯誤日誌。`ASGI callable returned without completing response` 是舊版正常返回未完成回應的症狀，本身不能證明 Cookie、CDN 或 timeout 是原始 Story 失敗原因。
+Headers 已送出但 body 未完成時，`StreamAborted: Media stream aborted.` 會中止連線，不補送成功結尾或第二份 error response。這類安全 traceback 表示傳輸中止，根因仍須看 terminal event。
 
 ### Operator 診斷清單
 
-本清單僅供**另經授權部署後**操作，不授權建置、推送、重啟或部署，也不表示原始 Story 已修復。
-
-1. 確認執行版本與授權範圍、access log 關閉、ingress authentication/ACL 及媒體 `proxy_buffering off`。部署重啟會使舊 token 失效，需重新解析。
-2. 在有權使用的帳號確認原 Story 仍有效且可存取。若已過期、不可見或外部服務不可用，記錄「無法重現」與安全原因，不繞過限制，也不改用 deterministic fixture 宣稱已重現原事件。
-3. 以既有 UI 重新分析並立即下載；記錄測試時間、瀏覽器版本、直連或受控 proxy、儲存確認時機，以及瀏覽器最終成功或失敗。不要匯出含 token、Cookie 或 URL 的 HAR、request dump 或截圖。
-4. 使用 `docker compose logs --no-log-prefix --since 10m app` 在受限終端查看事件；分享前只保留上述安全 JSON 欄位。以 request ID 串接 started 與唯一 terminal event，若瀏覽器重試則分開記錄每次 GET；不要分享 token-bearing request path。
-5. 成功案例在 client 核對檔名、實際大小與可讀性；失敗案例記錄 `reason_code`、`duration_ms`、`bytes_streamed` 與瀏覽器結果。只有 started 或 download event，不足以判斷落盤完成。缺少 terminal event 時另查程序終止、日誌收集或輸出故障，不假定傳輸成功。
-6. 若直連正常而 ingress 失敗，按既有安全設定比對 buffering、idle timeout 與連線中止；不要開 access log 或任意調高 timeout。只有取得原始失敗的去敏證據後，才另提上游傳輸修正。
-
-Deterministic HTTP 與 Chromium 驗證、舊行為重現及限制記錄於 `openspec/changes/diagnose-download-stream-failures/verification.md`；這些驗證不接觸 Instagram 或 operator Cookie。
+1. 確認執行版本、帳號可見性及內容仍有效，再由 UI 重新分析並下載；部署重啟後舊 token 已失效。
+2. 記錄測試時間、瀏覽器版本、直連／proxy 與安全事件；瀏覽器重試的每次 GET 分別核對。不要匯出含敏感資料的 HAR 或 request dump。
+3. 成功時核對本機檔名、大小與可讀性；失敗時比對 `reason_code` 與瀏覽器結果。缺少 terminal event 時查程序終止或日誌收集，不假定成功。
+4. 若直連正常而 ingress 失敗，檢查 `proxy_buffering off`、idle timeout 與連線中止；內容失效則記錄「無法重現」。
 
 ## 平台 Cookie 驗證
 
-平台 Cookie 是 bearer credential。配置 Instagram Cookie 後，任何服務使用者都可能間接使用 operator Instagram 帳號的 session，讀取該帳號可見的私人、Close Friends 或受眾限定 Story。服務沒有 per-user authorization，只適合本人管理的可信網路；請使用低權限專用帳號。
+平台 Cookie 是 bearer credential。任何服務使用者都可能間接使用 operator Instagram 帳號，讀取其可見的私人、Close Friends 或受眾限定 Story；服務沒有 per-user authorization，只適合可信網路與低權限專用帳號。
 
 將 Netscape `cookies.txt` 放在受限目錄，確認 container UID 10001 可讀，再使用對應 override：
 
@@ -115,41 +117,26 @@ SNS_MEDIA_X_COOKIE_HOST_FILE=/srv/secrets/x.cookies.txt \
 
 部署前可將 `up -d --build` 改成 `config --quiet` 驗證 Compose。Override 只掛載 read-only file，並停用 Cookie 更新；不使用 override 即為匿名模式。
 
-Application 不快取 Cookie。覆寫相同 host file 並保留 inode 後，新的 extractor process 會立即重新讀取；若以 rename 更換 inode，必須重建 container。輪替時先在平台撤銷舊 session，進行中的 process 不會熱重載。
+輪替時撤銷舊 session。Application 不快取 Cookie：保留 inode 覆寫 host file 後，新的 extractor process 會重新讀取；若用 rename 更換 inode，以原部署設定重新建立 container，確保掛載新檔。進行中的 process 不會熱重載。
 
-短效 token 不含 Cookie，只會在 TTL 到期或 service 重新啟動時失效。CDN preview 與 download 不會攜帶 Cookie；若 CDN 需要 session，系統會 fail closed。同一 UID 的惡意 extractor 理論上可讀取另一個已掛載的平台 Cookie，因此目前不是 per-platform sandbox。
+短效 token 不含 Cookie；Cookie 輪替不會自動撤銷已發出的 token，須等待 TTL 到期或重新啟動 service。CDN preview／download 不會攜帶 Cookie，需要 session 的 CDN 會 fail closed；兩平台共用 UID，並非 per-platform sandbox。
 
-回復匿名模式時，先移除所有已啟用的 auth override，再啟動預設 Compose：
-
-```bash
-docker compose -f docker-compose.yaml -f docker-compose.instagram-auth.yaml down
-docker compose -f docker-compose.yaml up -d --build
-```
-
-若啟用 X 或同時啟用兩個平台，`down` 時須包含所有使用中的 override。Rollback 不會恢復舊 token 或 extraction state。
+回復匿名模式：以原 project 和全部使用中的 overlays 執行 `docker compose down`，再以相同 project、不含 auth overlays 的設定啟動；同時撤銷平台 session。舊 token 與記憶體狀態不會恢復。
 
 ## 升級與 rollback
 
-1. 審查 pinned dependency 與 `uv.lock` diff。
-2. 執行 `uv run python scripts/verify_gallery_contract.py`。
-3. 執行 `uv run python scripts/container_smoke.py`。
-4. 建置 candidate image，完成 health check、security gate 與 owner-controlled smoke tests。
-5. 在 deployment override 將 `image:` 指向不可變 candidate tag，再執行 `docker compose up -d --no-deps app`。
+1. 核對 source、lockfile 與目前 image 身分，保存可回復的 image ID／digest；可變 tag 不是不可變版本。
+2. 依[自動化檢查](#自動化檢查)執行 contract 與隔離 smoke。使用唯一 tag 建置 candidate image，對該 candidate 核對 gallery-dl／FFmpeg runtime、`/healthz`、container limits 及 security gate；另一個 smoke image 通過不能代替 candidate 驗證。
+3. Gate 通過後，在 deployment override 將 `image:` 指向已驗證的不可變映像 reference，再以原 project 與完整 overlays 執行 `docker compose up -d --no-deps app`。Live 平台檢查依[人工驗證](#owner-controlled-manual-smoke-tests)，不作為 CI／release gate。
+4. Rollback：將 `image:` 恢復為先前的不可變 reference，再執行相同啟動命令。若需從 source 重建，須連同 lockfile 與映像 pin 核對，不能假設重建等同原 image。
 
-Rollback 時，先把 deployment override 的 `image:` 恢復為前一個不可變 tag，再執行：
-
-```bash
-docker compose stop -t 10 app
-docker compose up -d --no-deps app
-```
-
-若以 checkout 部署，須先 checkout 前一版本並重新 build。每次替換或重新啟動 container 都會刻意清除 token 與 extraction state，使用者必須重新分析貼文。
+每次替換或重新啟動 container 都會清除記憶體 token／狀態，使用者須重新分析貼文。部署紀錄保存 source、image ID／digest、gate 結果與 rollback reference，不把單次版本紀錄寫入通用指南。
 
 ## 預覽與縮圖
 
-預覽優先使用 gallery-dl metadata 或受支援的 CDN raster。沒有可信 preview 時預設顯示 `/placeholder.svg`；只有 candidate image 通過 decoder vulnerability policy，或已有期限的 narrow risk acceptance，才可設定 `SNS_MEDIA_GENERATED_PREVIEWS_ENABLED=true`。此模式按需透過受限 FFmpeg 產生 JPEG，只保存在 process-local bounded cache，最長不超過 token TTL。
+優先使用可信 CDN raster，缺少時顯示 `/placeholder.svg`。Generated preview 預設關閉；candidate 通過 decoder vulnerability policy 或具有效的 narrow risk acceptance 後，才可設定 `SNS_MEDIA_GENERATED_PREVIEWS_ENABLED=true`。
 
-生成流程最多讀取 32 MB、輸出 1 MB、執行 10 秒且同時只執行一項。調高限制前須重新審查 768 MB memory、1 CPU、64 MB `/tmp` 與 decoder findings；FFmpeg 不得自行連線、讀取 Cookie 或寫入持久媒體。
+啟用後以受限 FFmpeg 按需產生 JPEG，只存於 process-local bounded cache，最長不超過 token TTL。輸入上限 32 MB、輸出 1 MB、時間 10 秒、併發 1；FFmpeg 不得自行連線、讀取 Cookie 或寫入持久媒體。
 
 ## Reverse proxy logging
 
@@ -178,7 +165,7 @@ Proxy 必須覆寫 forwarded client header，不可附加內容；不要信任�
 
 ## Instagram Story Extraction Diagnostics
 
-進入 extraction route 的擷取失敗會以唯一 `extraction_failed` structured event 寫入 application log。`reason_code` 表示穩定的應用程式錯誤語意；選用的 `failure_stage` 是 server-side 技術分類，兩者不可互相推測。Stage 只出現在失敗事件，不會加入 API body、headers、OpenAPI 或前端訊息。事件不包含完整 URL、Story ID、Cookie path／value、token、upstream URL、gallery-dl command、raw stdout／stderr 或 exception chain。Story 分類依可辨識的 diagnostic 證據；配置 Cookie 本身不表示 session 已驗證有效。
+進入 extraction route 的失敗以唯一 `extraction_failed` 事件記錄。`reason_code` 對應公開錯誤，`failure_stage` 與下列 diagnostic 欄位僅供 server-side 排錯，不加入 API body、headers、OpenAPI 或前端。配置 Cookie 本身不表示 session 已驗證有效。
 
 檢視最近十分鐘的 application structured events：
 
@@ -186,101 +173,131 @@ Proxy 必須覆寫 forwarded client header，不可附加內容；不要信任�
 docker compose logs --no-log-prefix --since 10m app
 ```
 
-排錯時只使用上述 structured event。請保留 Uvicorn `--no-access-log`，不可為診斷啟用 access log，因為 token-bearing media path 不可寫入日誌；reverse proxy 也必須停用或遮蔽對應路徑的 access log。
+排錯只分享安全 structured event，保留 `--no-access-log`；不傾印 raw stderr／stdout、Story URL、Cookie 或 exception chain。
 
 | `reason_code` | HTTP | 說明與處置 |
 | --- | ---: | --- |
-| `story_auth_required` | 403 | 未配置 Instagram Cookie，或匿名 Story 明確要求登入。請由管理者依[平台 Cookie 驗證](#平台-cookie-驗證)設定受限的唯讀 Cookie，不要透過 request 上傳憑證。 |
-| `platform_authentication_failed` | 503 | configured Story 回報 `AuthRequired`／`AuthenticationError`，或明確 `invalid/expired` session、login、challenge。這是 bounded 驗證診斷，不保證 Cookie 一定過期；管理者應檢查唯讀掛載、帳號狀態及授權後再輪替或撤銷 session。 |
-| `story_unavailable` | 404 | `NotFoundError`／HTTP 404 或明確 Story 過期、刪除、private／不可見證據。系統不細分實際原因；請確認精確 URL 及 operator 帳號可見性。 |
-| `upstream_rate_limited` | 429 | 平台 rate limit。降低 operator concurrency 並等待平台解除限制。 |
-| `extraction_timeout` | 504 | extractor 超過設定期限。稍後重試；不要以延長 timeout 或取消 process 限制繞過。 |
-| `extraction_failed` | 502 | 其他／無法分類的 extractor failure。configured Story 僅有 HTTP 401/403、沒有明確 session 或 availability 證據時也會保守回傳此 code；不可據此推斷 Cookie 過期或 Story 不存在。 |
+| `story_auth_required` | 403 | 未配置 Cookie 的 Story 要求登入或回報 HTTP 401/403；依[Cookie 設定](#平台-cookie-驗證)提供唯讀 session。 |
+| `platform_authentication_failed` | 503 | configured Story 回報 `AuthRequired`／`AuthenticationError` 或明確 `invalid/expired` session、login、challenge；檢查掛載及帳號狀態，不保證 Cookie 已過期。 |
+| `story_unavailable` | 404 | `NotFoundError`／HTTP 404 或過期、刪除、private／不可見證據；系統不細分實際原因，請核對精確 URL 與帳號可見性。 |
+| `upstream_rate_limited` | 429 | 降低請求頻率並等待平台解除限制。 |
+| `extraction_timeout` | 504 | extractor 超過期限；查 network／CONNECT proxy，不直接提高 timeout。 |
+| `extraction_failed` | 502 | 無法細分的失敗，包含僅有 5xx 或 configured Story 僅有 HTTP 401/403；不能據此判定 Cookie 或 Story 狀態。 |
 
 ### Failure stage
 
-若 `AppError` 沒有 stage，日誌省略 `failure_stage`；任何無效或未識別的 stage 都會固定正規化為 `unknown`。下列九種 stage 不改變既有 `reason_code`、HTTP status 或 response：
+Stage 不改變公開錯誤；未提供時省略，無效值正規化為 `unknown`。
 
 | `failure_stage` | 發生條件與排錯方向 |
 | --- | --- |
-| `extractor_start` | gallery-dl subprocess 無法啟動；檢查 candidate image 內 executable 與 runtime。 |
-| `extractor_timeout` | extractor operation deadline 到期；檢查 DNS、upstream network 與 CONNECT proxy，不直接提高 timeout。 |
-| `extractor_output_limit` | stdout 超過既有大小上限；檢查 pinned DataJob output 是否異常增大，不放寬限制。 |
-| `extractor_io` | stdout／stderr pipe 或 communicate 讀取發生 I/O failure；檢查 pipe、process 資源與 bounded cleanup。 |
-| `extractor_process_unclassified` | 非零退出的 stderr 無法分類，或零退出 stdout 含合法但未知的 DataJob error record；configured Story 僅 HTTP 401/403 也屬 ambiguous，不能推斷 Cookie 失效。 |
-| `extractor_invalid_output` | UTF-8／JSON／DataJob schema 無效，包含零 bytes 與純空白；請核對 pinned gallery-dl contract。 |
-| `extractor_empty_output` | 成功退出且輸出合法 literal `[]`；Story 維持 `story_unavailable`，Post／Reel／X 維持 `extraction_failed`，不以此推論 Cookie 狀態。 |
-| `extractor_no_media` | 輸出只有合法 directory／queue events，沒有 error 或 media record；這不代表 normalizer 過濾媒體後的 `no_media`，後者省略 stage。 |
-| `extractor_platform_error` | 命中既有明確 authentication、availability 或 rate-limit 分類；請依上方 `reason_code` 表處理。 |
+| `extractor_start` | 程序無法啟動；查 executable 與 runtime。 |
+| `extractor_timeout` | 總期限到期；查 DNS、network 與 CONNECT proxy。 |
+| `extractor_output_limit` | stdout 超限；查 DataJob 大小，不放寬限制。 |
+| `extractor_io` | Pipe／communicate I/O failure；查程序資源與 cleanup。 |
+| `extractor_process_unclassified` | Stderr 或 DataJob error 無法細分；可包含零退出的 `HttpError`，依[相容性流程](#instagram-extractor-compatibility)排查。 |
+| `extractor_invalid_output` | UTF-8／JSON／schema 無效，含零 bytes／純空白；執行 `uv run python scripts/verify_gallery_contract.py`。 |
+| `extractor_empty_output` | 成功退出且為 literal `[]`；Story 回傳 `story_unavailable`，其他目標回傳 `extraction_failed`。 |
+| `extractor_no_media` | 只有 directory／queue events；與 normalizer 過濾後、不帶 stage 的 `no_media` 不同。 |
+| `extractor_platform_error` | 已命中驗證、可見性或限流分類；依上表處理。 |
 
-`[]` 是合法空陣列，與零 bytes 或空白輸出不同；後兩者是 `extractor_invalid_output`。`extractor_process_unclassified` 也可能來自**成功退出**但含未知合法 DataJob error，不代表一定是非零退出。
+### Extractor diagnostic 欄位
 
-安全事件範例如下；只分享 allowlisted 欄位，不附加 extractor 診斷：
+以下欄位只來自實際 extractor 證據；缺少時省略，未知 enum 為 `unknown`。非零退出取 stderr；零退出取第一筆合法 DataJob error，不混入後續 error 或 stderr。
+
+| 欄位 | 值域與解讀 |
+| --- | --- |
+| `extractor_diagnostic_source` | `stderr`、`datajob_error` 或 `unknown`，表示證據來源。 |
+| `extractor_error_type` | `auth_required`、`authentication_error`、`authorization_error`、`not_found`、`http_error`、`challenge_error`、`extraction_error`、`no_extractor` 或 `unknown`。Stderr 沒有結構化 type，固定為 `unknown`。 |
+| `extractor_exit_code` | 自然完成程序的整數 `-255..255`；`0` 不代表擷取成功，負值表示 signal。零退出 invalid／empty／non-media 結果只附此欄位。 |
+| `extractor_http_statuses` | 移除 URL 後從明確 HTTP／status 前綴或下列原因片語取得；100..599、升冪、去重，最多保留最小 8 個，JSON 為 array。 |
+
+- Start、timeout、output limit、I/O、取消不記錄退出碼，避免誤用 cleanup 的 terminate／kill signal。
+- 無前綴仍可辨識：`401 Unauthorized`、`403 Forbidden`、`404 Not Found`、`429 Too Many Requests`、`500 Internal Server Error`、`502 Bad Gateway`、`503 Service Unavailable`、`504 Gateway Timeout`；不區分大小寫，數字與片語須配對。
+- 裸數字、Story ID、URL／query 不形成狀態證據；沒有狀態不代表沒有 upstream HTTP failure。上游 500 不等於本服務回傳的 HTTP 502，也不能證明 Cookie 狀態。
+- HTTP 429 優先映射限流、HTTP 404 映射 Story availability；僅有 5xx 保留一般失敗分類，不推測平台內部原因。
+
+合成事件範例：
 
 ```json
-{"event":"extraction_failed","request_id":"0123456789abcdef0123456789abcdef","platform":"instagram","outcome":"failed","duration_ms":12.5,"reason_code":"extraction_failed","failure_stage":"extractor_process_unclassified"}
+{"event":"extraction_failed","request_id":"0123456789abcdef0123456789abcdef","platform":"instagram","outcome":"failed","duration_ms":12.5,"reason_code":"extraction_failed","failure_stage":"extractor_process_unclassified","extractor_diagnostic_source":"datajob_error","extractor_error_type":"http_error","extractor_exit_code":0,"extractor_http_statuses":[500]}
 ```
 
-HTTP 429 優先映射 rate limit；HTTP 404 映射 Story availability；只有 HTTP 401/403 的 configured Story 屬於 ambiguous refusal。所有 extraction 嘗試只執行一次，不會 anonymous retry。`extractor_invalid_output` 請執行 `uv run python scripts/verify_gallery_contract.py`；`extractor_empty_output` 請檢查精確 Story／Post 過濾與 upstream 結果；`extractor_io` 檢查 pipe 與程序資源；`extractor_timeout` 檢查 network／CONNECT proxy，不放寬期限。只有實際安全 event 顯示 `extractor_process_unclassified` 後，才另行分析最小 diagnostic pattern；不可傾印或分享 raw stderr／stdout。
+## Instagram Extractor Compatibility
 
-驗證時一併記錄 source 與 image 身分：`git rev-parse HEAD`、`git status --short`，以及 `docker image inspect --format '{{.Id}} {{json .RepoDigests}}' <candidate-image>` 的實際 image ID／digest。Deterministic fake-extractor／container 結果與 owner-controlled live Story 重試分開記錄；fixture 通過不表示原 Story 已修復。live Story 是選用人工檢查，僅在目標仍有效且 operator 有權存取時透過既有受保護輸入流程執行。若需回復版本，沿用[既有升級與 rollback 流程](#升級與-rollback)；不以此 diagnostics 變更改動部署邊界。
+零退出的 DataJob error 仍可能是擷取失敗。依序排查，不先重建運作中的服務：
+
+1. **核對 source pin 與 runtime。** 版本以 `pyproject.toml`／`uv.lock`、映像 pin 以 `Dockerfile` 為準。遇到 `service app is not running`，先用 Compose labels 找到真正的 project／service，再查容器與映像身分；以下 `<…>` 須換成實際值：
+
+   ```bash
+   docker ps --filter label=com.docker.compose.service=app --format '{{.ID}} {{.Names}} {{.Image}} {{.Label "com.docker.compose.project"}} {{.Label "com.docker.compose.service"}}'
+   git rev-parse HEAD
+   git status --short
+   docker inspect --format '{{.Id}} {{.Image}} {{.Config.Image}}' '<container>'
+   docker image inspect --format '{{.Id}} {{json .RepoDigests}}' '<image-id>'
+   docker exec '<container>' gallery-dl --version
+   docker logs --since 10m '<container>'
+   ```
+
+2. **驗證 contract。** 執行 `uv run python scripts/verify_gallery_contract.py`，核對已安裝套件、`--resolve-json`、離線 DataJob 格式及 adapter；不使用真實 Cookie 作 fixture。
+3. **查官方 release notes。** 比對觀察到的行為與候選版本修正，再決定是否升級，不以版本更新本身宣稱修復。
+4. **驗證 candidate image。** 依[升級與 rollback](#升級與-rollback)及[自動化檢查](#自動化檢查)完成隔離驗證與 gate。
+5. **最後才改 classifier。** 有安全診斷與合成 fixture 才評估窄範圍規則；不以泛用 `redirect`／`failed` 字串推論驗證失敗。
+
+Cookie 檔案存在、同步、格式／權限檢查通過、瀏覽器可見或一般貼文成功，都不能證明 Story API 的 session 有效。Deterministic fake-extractor／container 結果與 owner-controlled live Story 重試分開記錄；合成測試通過不代表原事件已修復。
 
 ## 故障排除
 
-- Service unhealthy：執行 `docker compose logs --no-log-prefix app` 並查詢 `/healthz`。
-- `[FATAL tini] exec uvicorn failed`：重建 image，再以 `docker compose up -d --force-recreate` 啟動。
-- `extraction_failed` 或 `post_unavailable`：確認 URL 受支援，並確認平台允許目前模式存取。
-- Instagram Story 的 error code／reason code 與安全查詢方式請參閱 [Instagram Story Extraction Diagnostics](#instagram-story-extraction-diagnostics)。
-- `platform_authentication_failed` 不代表已證實 session 過期；Cookie 管理仍依平台 Cookie 驗證流程進行。
-- `story_unavailable` 不細分過期、刪除、NotFound 與不可見原因，請確認精確 URL 及帳號可見性。
-- 上述 Story classification 都不會 anonymous retry，公開 response 也不暴露 operator session 狀態細節。
-- `upstream_rate_limited`：降低 operator concurrency 並等待平台解除限制。
-- `local_rate_limited`：slot 已滿，依 `Retry-After` 重試。
-- `token_not_found` 或 `token_expired`：token 到期或 service 已重新啟動，請重新分析。
-- `capacity_exceeded`：等待 token 到期；提高容量前須審查 memory limit。
-- `unsafe_destination` 或 `upstream_media_invalid`：審查 pinned extractor contract，不要繞過安全檢查。
-- 預覽 fallback：檢查 CDN poster、generated preview 限制、FFmpeg dependency 與 `upstream_media_invalid`。
+| 症狀 | 處置 |
+| --- | --- |
+| Service unhealthy／程序無法啟動 | 查實際容器日誌、`/healthz` 與 executable；先核對 image 身分再決定重建。 |
+| 擷取失敗／`post_unavailable` | 核對 URL 與平台可見性；Story 依[診斷表](#instagram-story-extraction-diagnostics)。 |
+| `local_rate_limited` | 依 `Retry-After` 等待 slot／限流窗口；勿直接提高併發。 |
+| `token_not_found`／`token_expired` | 重新分析；token 可能到期或隨程序重啟清除。 |
+| `capacity_exceeded` | 等待 token 到期；提高容量前審查 memory limit。 |
+| `unsafe_destination`／`upstream_media_invalid` | 查 contract、目的地與媒體驗證，不繞過安全檢查。 |
+| 預覽 fallback | 查 CDN poster、generated preview 設定及 FFmpeg；見[預覽與縮圖](#預覽與縮圖)。 |
+
+每次 extraction 只嘗試一次，不會 anonymous retry；公開 response 不暴露 operator session 細節。
 
 ## 自動化檢查
 
-在 repository root 執行：
+依變更範圍執行；`<candidate-image>` 替換為已建置的唯一 candidate tag 或 image ID：
 
 ```bash
+uv run python scripts/verify_gallery_contract.py
+docker compose config --quiet
 uv run python scripts/container_smoke.py
 uv run python scripts/check_nginx_config.py
-docker compose config --quiet
-uv run python scripts/security_gate.py --image sns-media-list:candidate
+uv run python scripts/security_gate.py --image '<candidate-image>'
 ```
 
-`security_gate.py` 會稽核 production dependency graph 與 candidate image。未修復 finding 只能透過 `security/vulnerability-exceptions.json` 記錄 exact CVE/package、版本、artifact digest、owner、理由、mitigation 與 expiry；不匹配、wildcard 或過期例外都會失敗。Decoder policy 未通過時，generated preview 必須保持停用。
+- `verify_gallery_contract.py` 為離線套件／adapter 驗證，不代表真實平台可用。
+- `container_smoke.py` 需要 Docker daemon，使用獨立 project、動態 port、每次專用 image tag，驗證 health、執行限制、tmpfs、10 秒 graceful stop，並以假 Cookie／fake extractor 驗證 Story 日誌。不重標記共享映像或替換既有服務。
+- `check_nginx_config.py` 使用本機 Nginx 或固定 digest 的 Docker 映像驗證語法。
+- `security_gate.py` 稽核 production dependencies 與指定 candidate；HIGH／CRITICAL finding 依 gate policy 阻擋。例外只接受 `security/vulnerability-exceptions.json` 中精確 CVE/package、版本、artifact digest、owner、理由、mitigation、expiry；不匹配、wildcard 或過期均失敗。Decoder policy 未通過時 generated preview 保持停用。
 
-`container_smoke.py` 會驗證 health、UID 10001、read-only root、loopback port、capabilities、`no-new-privileges`、PID limit、tmpfs、不持久保存 media，以及 10 秒 graceful stop。
+程式品質與各層測試入口見 [AGENTS.md](AGENTS.md#7-測試與驗證)。
 
 ## Owner-controlled manual smoke tests
 
-Live smoke 只能使用 owner-controlled 公開貼文；authenticated smoke 則使用配置帳號可見且有權測試的內容。Repository 未提供安全的 URL 或 Cookie，因此這些案例是 deployment-specific、non-gating manual release checks：
+只使用 owner-controlled 公開貼文，或配置帳號可見且有權測試的內容；這是部署特定人工檢查，不是 CI／release gate。工具要求六種一般貼文案例；Story 為選用。
 
-```bash
-uv run python scripts/manual_smoke.py \
-  --instagram-image 'https://www.instagram.com/p/OWNER_CONTROLLED_IMAGE/' \
-  --instagram-reel 'https://www.instagram.com/reel/OWNER_CONTROLLED_REEL/' \
-  --instagram-mixed 'https://www.instagram.com/p/OWNER_CONTROLLED_MIXED/' \
-  --x-image 'https://x.com/owner/status/OWNER_CONTROLLED_IMAGE' \
-  --x-video 'https://x.com/owner/status/OWNER_CONTROLLED_VIDEO' \
-  --x-gif 'https://x.com/owner/status/OWNER_CONTROLLED_GIF'
-```
-
-owner-controlled Story URL 必須當下有效，通常約 24 小時內失效。Story 是選用 ephemeral check，不得成為 CI 或 release gate，也不得把 URL 寫入 repository、CI、artifact、log 或 shell command history。請在 repository 之外建立 owner-only 暫存檔：
+owner-controlled Story URL 須當下有效，通常約 24 小時內失效。不得寫入 repository、CI、artifact、log 或 shell command history。下例使用 Bash，先替換六個一般貼文 placeholder；Story 由隱藏輸入取得，在 repository 之外建立 owner-only 暫存檔並自動清除，直接 Enter 可略過：
 
 ```bash
 (
-  story_url_file="$(mktemp /tmp/sns-media-list-story.XXXXXX)"
-  chmod 600 "$story_url_file"
-  trap 'rm -f -- "$story_url_file"' EXIT
-  trap 'exit 130' HUP INT TERM
-  IFS= read -r -s -p 'Owner-controlled exact Story URL: ' story_url
+  set +x
+  story_args=()
+  IFS= read -r -s -p '選用精確 Story URL（Enter 略過）：' story_url || exit 1
   printf '\n'
-  printf '%s\n' "$story_url" >"$story_url_file"
+  if [ -n "$story_url" ]; then
+    story_url_file="$(mktemp /tmp/sns-media-list-story.XXXXXX)" || exit 1
+    trap 'rm -f -- "$story_url_file"' EXIT
+    trap 'exit 130' HUP INT TERM
+    chmod 600 "$story_url_file" || exit 1
+    printf '%s\n' "$story_url" >"$story_url_file" || exit 1
+    story_args=(--instagram-story-file "$story_url_file")
+  fi
   unset story_url
   uv run python scripts/manual_smoke.py \
     --instagram-image 'https://www.instagram.com/p/OWNER_CONTROLLED_IMAGE/' \
@@ -289,10 +306,10 @@ owner-controlled Story URL 必須當下有效，通常約 24 小時內失效。S
     --x-image 'https://x.com/owner/status/OWNER_CONTROLLED_IMAGE' \
     --x-video 'https://x.com/owner/status/OWNER_CONTROLLED_VIDEO' \
     --x-gif 'https://x.com/owner/status/OWNER_CONTROLLED_GIF' \
-    --instagram-story-file "$story_url_file"
+    "${story_args[@]}"
 )
 ```
 
-Script 只能記錄 case label、status、item count 與 outcome，不得記錄 URL、token、Cookie 或 upstream media URL。執行前須替換六個 placeholder；不測 Story 時省略 `--instagram-story-file`。
+工具預設驗證 extraction 與下載首個 byte；加 `--verify-previews` 可檢查 raster preview，預設 placeholder 不符合此檢查。這不等於整檔下載驗證，完整保存仍須依[下載診斷](#安全下載診斷)核對。非預設服務位址用 `--base-url` 指定。
 
-Authenticated smoke 應驗證 extraction、CDN raster preview、generated fallback preview 與 download。Preview 與 download 不得攜帶 Cookie；需要登入的 CDN 必須 fail closed。Cookie 輪替後應先確認新的 extractor process 已讀取新檔，再測試新的 account-visible URL。
+輸出只保留 case label、status、item count 與 outcome，不得記錄 URL、token、Cookie 或 upstream media URL。Cookie 輪替後先確認新的 extractor process 已讀取新檔，再做人工檢查；preview／download 仍不得攜帶 Cookie。

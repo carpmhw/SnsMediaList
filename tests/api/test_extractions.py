@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -13,7 +14,8 @@ from fastapi.testclient import TestClient
 from sns_media_list.api import routes
 from sns_media_list.app import create_app
 from sns_media_list.config import Settings
-from sns_media_list.errors import AppError
+from sns_media_list.errors import AppError, ExtractorDiagnostics
+from sns_media_list.logging_config import SafeEventFormatter
 from sns_media_list.security.tokens import TokenStore
 from sns_media_list.services.extraction_service import ExtractionService
 
@@ -54,15 +56,28 @@ class StoryUnavailableExtractor:
 class FixedErrorExtractor:
     """以指定的穩定 application error 模擬擷取失敗。"""
 
-    def __init__(self, code: str, message: str, *, failure_stage: str | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        failure_stage: str | None = None,
+        extractor_diagnostics: ExtractorDiagnostics | None = None,
+    ) -> None:
         """保存 API 契約測試要驗證的安全錯誤內容。"""
         self.code = code
         self.message = message
         self.failure_stage = failure_stage
+        self.extractor_diagnostics = extractor_diagnostics
 
     async def extract(self, _post_url: Any) -> list[dict[str, Any]]:
         """拋出指定的 bounded error，不產生 extractor media records。"""
-        raise AppError(self.code, self.message, failure_stage=self.failure_stage)
+        raise AppError(
+            self.code,
+            self.message,
+            failure_stage=self.failure_stage,
+            extractor_diagnostics=self.extractor_diagnostics,
+        )
 
 
 class BlockingExtractor:
@@ -446,6 +461,71 @@ def test_failed_extraction_logs_one_safe_terminal_event(
     assert "PRIVATE_RAW_EXTRACTOR_DIAGNOSTIC" not in json.dumps(event)
 
 
+def test_extractor_diagnostics_are_logged_but_never_exposed_by_api(
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    """驗證 configured Story 的上游 403 只進唯一安全事件，不進公開契約。"""
+    caplog.set_level(logging.INFO, logger="sns_media_list")
+    cookie_file = tmp_path / "synthetic-instagram-cookies.txt"
+    cookie_file.write_text("synthetic-cookie", encoding="utf-8")
+    diagnostics = ExtractorDiagnostics(
+        extractor_diagnostic_source="datajob_error",
+        extractor_error_type="http_error",
+        extractor_exit_code=0,
+        extractor_http_statuses=[403],
+    )
+    token_store = TokenStore(capacity=20, ttl_seconds=600)
+    service = ExtractionService(
+        Settings(instagram_cookie_file=str(cookie_file)),
+        extractor=FixedErrorExtractor(
+            "extraction_failed",
+            "The source platform could not be extracted.",
+            failure_stage="extractor_process_unclassified",
+            extractor_diagnostics=diagnostics,
+        ),
+        token_store=token_store,
+    )
+    client = TestClient(create_app(extraction_service=service))
+
+    response = client.post(
+        "/api/extractions",
+        json={"url": "https://www.instagram.com/stories/example.user/1111111111111111111/"},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "extraction_failed"
+    assert token_store.size == 0
+    events = [
+        record.__dict__["event"]
+        for record in caplog.records
+        if record.name == "sns_media_list" and record.msg == "extraction_failed"
+    ]
+    assert len(events) == 1
+    event = events[0]
+    assert event["request_id"] == response.json()["request_id"]
+    assert event["failure_stage"] == "extractor_process_unclassified"
+    assert event["extractor_diagnostic_source"] == "datajob_error"
+    assert event["extractor_error_type"] == "http_error"
+    assert event["extractor_exit_code"] == 0
+    assert event["extractor_http_statuses"] == [403]
+
+    private_field_names = (
+        "failure_stage",
+        "extractor_diagnostics",
+        "extractor_diagnostic_source",
+        "extractor_error_type",
+        "extractor_exit_code",
+        "extractor_http_statuses",
+    )
+    response_payload = json.dumps(response.json())
+    openapi_payload = json.dumps(client.get("/openapi.json").json())
+    for field_name in private_field_names:
+        assert field_name not in response_payload
+        assert all(field_name not in name.lower() for name in response.headers)
+        assert field_name not in openapi_payload
+
+
 def test_unsupported_host_extraction_failure_logs_null_platform(caplog) -> None:
     """驗證不支援 host 的 extraction failure 使用 null platform 標籤。"""
     caplog.set_level(logging.INFO, logger="sns_media_list")
@@ -500,8 +580,12 @@ def test_unknown_app_error_code_is_bounded_in_extraction_log(caplog) -> None:
     [
         pytest.param("event_builder", None, 200, id="success-builder-failure"),
         pytest.param("logger", None, 200, id="success-logger-failure"),
+        pytest.param("formatter", None, 200, id="success-formatter-failure"),
+        pytest.param("output", None, 200, id="success-output-failure"),
         pytest.param("event_builder", "story_auth_required", 403, id="error-builder-failure"),
         pytest.param("logger", "story_auth_required", 403, id="error-logger-failure"),
+        pytest.param("formatter", "story_auth_required", 403, id="error-formatter-failure"),
+        pytest.param("output", "story_auth_required", 403, id="error-output-failure"),
     ],
 )
 def test_extraction_logging_failure_preserves_api_and_releases_lease(
@@ -511,6 +595,7 @@ def test_extraction_logging_failure_preserves_api_and_releases_lease(
     expected_status: int,
 ) -> None:
     """驗證 event 建構或 logger 故障不改變 API 結果並釋放擷取 slot。"""
+    log_attempts: list[None] = []
 
     def fail(*_args: Any, **_kwargs: Any) -> None:
         """模擬不含外洩資料的 logging 依賴故障。"""
@@ -519,11 +604,45 @@ def test_extraction_logging_failure_preserves_api_and_releases_lease(
     if failure_stage == "event_builder":
         monkeypatch.setattr(routes, "build_event", fail)
     else:
-        monkeypatch.setattr(routes.logger, "info", fail)
+        original_info = routes.logger.info
+
+        def counted_info(*args: Any, **kwargs: Any) -> Any:
+            """計算 terminal logging 嘗試次數並轉交既有 logger。"""
+            log_attempts.append(None)
+            if failure_stage == "logger":
+                return fail(*args, **kwargs)
+            return original_info(*args, **kwargs)
+
+        monkeypatch.setattr(routes.logger, "info", counted_info)
+        if failure_stage == "formatter":
+            monkeypatch.setattr(SafeEventFormatter, "format", fail)
+        elif failure_stage == "output":
+
+            class FailingStderr:
+                """模擬 application stderr 寫入失敗。"""
+
+                def write(self, _message: str) -> int:
+                    """拋出不含輸出內容的受控 I/O 例外。"""
+                    raise OSError("PRIVATE_STDERR_FAILURE")
+
+                def flush(self) -> None:
+                    """模擬 stderr flush 失敗。"""
+                    raise OSError("PRIVATE_STDERR_FAILURE")
+
+            monkeypatch.setattr("sns_media_list.logging_config.sys.stderr", FailingStderr())
     extractor = (
         FakeExtractor([record()])
         if error_code is None
-        else FixedErrorExtractor(error_code, "A safe diagnostic.")
+        else FixedErrorExtractor(
+            error_code,
+            "A safe diagnostic.",
+            extractor_diagnostics=ExtractorDiagnostics(
+                extractor_diagnostic_source="datajob_error",
+                extractor_error_type="http_error",
+                extractor_exit_code=0,
+                extractor_http_statuses=[403],
+            ),
+        )
     )
     token_store = TokenStore(capacity=20, ttl_seconds=600)
     service = ExtractionService(
@@ -541,6 +660,10 @@ def test_extraction_logging_failure_preserves_api_and_releases_lease(
 
     assert response.status_code == expected_status
     assert not application.state.limiter._active_extractions
+    if failure_stage == "event_builder":
+        assert log_attempts == []
+    else:
+        assert len(log_attempts) == 1
     if error_code is not None:
         assert response.json()["code"] == error_code
 

@@ -13,16 +13,17 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).parents[1]
 COMPOSE_FILE = PROJECT_ROOT / "docker-compose.yaml"
-CANDIDATE_IMAGE = "sns-media-list:story-diagnostics-candidate"
+_CANDIDATE_IMAGE_ENV = "SNS_MEDIA_STORY_DIAGNOSTICS_IMAGE"
 STORY_URL = "https://www.instagram.com/stories/example.user/1234567890/"
 COOKIE_CONTAINER_PATH = "/run/secrets/instagram-cookies.txt"
 FAKE_GALLERY_PATH = "/opt/venv/bin/gallery-dl"
-_STORY_MEDIA_IDS = ("1234567890", "1234567891", "1234567892", "1234567893")
+_STORY_MEDIA_IDS = ("1234567890", "1234567891", "1234567892", "1234567893", "1234567894")
 _SCENARIOS = (
     (
         "unknown-stderr",
@@ -31,6 +32,11 @@ _SCENARIOS = (
         502,
         "extraction_failed",
         "extractor_process_unclassified",
+        {
+            "extractor_diagnostic_source": "stderr",
+            "extractor_error_type": "unknown",
+            "extractor_exit_code": 1,
+        },
     ),
     (
         "unknown-datajob",
@@ -39,6 +45,11 @@ _SCENARIOS = (
         502,
         "extraction_failed",
         "extractor_process_unclassified",
+        {
+            "extractor_diagnostic_source": "datajob_error",
+            "extractor_error_type": "unknown",
+            "extractor_exit_code": 0,
+        },
     ),
     (
         "invalid-json",
@@ -47,6 +58,7 @@ _SCENARIOS = (
         502,
         "extraction_failed",
         "extractor_invalid_output",
+        {"extractor_exit_code": 0},
     ),
     (
         "anonymous-auth-required",
@@ -55,6 +67,11 @@ _SCENARIOS = (
         403,
         "story_auth_required",
         "extractor_platform_error",
+        {
+            "extractor_diagnostic_source": "stderr",
+            "extractor_error_type": "unknown",
+            "extractor_exit_code": 1,
+        },
     ),
     (
         "configured-auth-required",
@@ -63,6 +80,25 @@ _SCENARIOS = (
         503,
         "platform_authentication_failed",
         "extractor_platform_error",
+        {
+            "extractor_diagnostic_source": "stderr",
+            "extractor_error_type": "unknown",
+            "extractor_exit_code": 1,
+        },
+    ),
+    (
+        "configured-http-403",
+        "https://www.instagram.com/stories/example.user/1234567894/",
+        COOKIE_CONTAINER_PATH,
+        502,
+        "extraction_failed",
+        "extractor_process_unclassified",
+        {
+            "extractor_diagnostic_source": "datajob_error",
+            "extractor_error_type": "http_error",
+            "extractor_exit_code": 0,
+            "extractor_http_statuses": [403],
+        },
     ),
 )
 _SENTINELS = (
@@ -129,6 +165,12 @@ if media_id == "1234567892":
 if media_id == "1234567893":
     sys.stdout.write("PRIVATE_CONTAINER_INVALID_JSON")
     sys.exit(0)
+if media_id == "1234567894":
+    sys.stdout.write(json.dumps([[-1, {
+        "error": "HttpError",
+        "message": "HTTP 403 Forbidden PRIVATE_CONTAINER_RAW_DIAGNOSTIC",
+    }]]))
+    sys.exit(0)
 sys.stderr.write(
     "AuthRequired: authenticated cookies needed; "
     + sys.argv[-1] + "?q=FAKE_CONTAINER_QUERY_SENTINEL "
@@ -172,6 +214,7 @@ def _compose_args(project: str, override_file: Path) -> list[str]:
 def _write_compose_override(
     path: Path,
     *,
+    candidate_image: str,
     fake_gallery: Path,
     cookie_file: Path | None,
     proxy_port: int,
@@ -180,7 +223,7 @@ def _write_compose_override(
     lines = [
         "services:",
         "  app:",
-        f"    image: {json.dumps(CANDIDATE_IMAGE)}",
+        f"    image: {json.dumps(candidate_image)}",
         "    environment:",
         f'      SNS_MEDIA_EXTRACTION_PROXY_PORT: "{proxy_port}"',
     ]
@@ -300,6 +343,7 @@ def _verify_runtime_limits(
 def _verify_mode(
     temporary_directory: Path,
     *,
+    candidate_image: str,
     fake_gallery: Path,
     cookie_file: Path | None,
     scenario_name: str,
@@ -307,6 +351,7 @@ def _verify_mode(
     expected_status: int,
     expected_reason: str,
     expected_stage: str,
+    expected_diagnostics: Mapping[str, object],
     build_candidate: bool,
 ) -> None:
     """啟動單一隔離 Compose project 並驗證 HTTP response 與唯一安全 event。"""
@@ -319,6 +364,7 @@ def _verify_mode(
     override_file = temporary_directory / f"{scenario_name}-{mode}-compose.override.yaml"
     _write_compose_override(
         override_file,
+        candidate_image=candidate_image,
         fake_gallery=fake_gallery,
         cookie_file=cookie_file,
         proxy_port=proxy_port,
@@ -331,18 +377,18 @@ def _verify_mode(
             raise RuntimeError("candidate Compose command lost its access-log or worker boundary")
         if build_candidate:
             _run_command([*compose, "build", "--pull=false", "app"], env=environment)
-            identity = _run_command(
-                [
-                    "docker",
-                    "image",
-                    "inspect",
-                    "--format",
-                    "{{.Id}} {{json .RepoDigests}}",
-                    CANDIDATE_IMAGE,
-                ],
-                env=environment,
-            ).strip()
-            print(f"candidate image ID and repository digests: {identity}")
+        identity = _run_command(
+            [
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                "{{.Id}} {{json .RepoDigests}}",
+                candidate_image,
+            ],
+            env=environment,
+        ).strip()
+        print(f"candidate image ID and repository digests: {identity}")
         _run_command([*compose, "up", "-d", "--no-build", "app"], env=environment)
         _verify_runtime_limits(
             compose,
@@ -378,15 +424,47 @@ def _verify_mode(
             or event.get("failure_stage") != expected_stage
         ):
             raise RuntimeError("candidate container emitted an inconsistent extraction event")
-        if "failure_stage" in json.dumps(payload):
-            raise RuntimeError("candidate container exposed failure_stage in the API response")
+        for field_name, expected_value in expected_diagnostics.items():
+            if event.get(field_name) != expected_value:
+                raise RuntimeError("candidate container emitted invalid extractor diagnostics")
+        for field_name in {
+            "extractor_diagnostic_source",
+            "extractor_error_type",
+            "extractor_exit_code",
+            "extractor_http_statuses",
+        } - expected_diagnostics.keys():
+            if field_name in event:
+                raise RuntimeError("candidate container emitted an unsupported diagnostic field")
+        if any(
+            field_name in json.dumps(payload)
+            for field_name in (
+                "failure_stage",
+                "extractor_diagnostics",
+                "extractor_diagnostic_source",
+                "extractor_error_type",
+                "extractor_exit_code",
+                "extractor_http_statuses",
+            )
+        ):
+            raise RuntimeError("candidate container exposed diagnostics in the API response")
         if "POST /api/extractions" in logs or any(sentinel in logs for sentinel in _SENTINELS):
             raise RuntimeError("candidate container logs contain access or sensitive test data")
         if any(sentinel in json.dumps(payload) for sentinel in _SENTINELS):
             raise RuntimeError("candidate container response contains sensitive test data")
+        safe_diagnostics = {
+            field_name: event[field_name]
+            for field_name in (
+                "extractor_diagnostic_source",
+                "extractor_error_type",
+                "extractor_exit_code",
+                "extractor_http_statuses",
+            )
+            if field_name in event
+        }
         print(
             f"{scenario_name}/{mode}: HTTP {status}, reason_code={expected_reason}, "
-            f"failure_stage={expected_stage}"
+            f"failure_stage={expected_stage}, "
+            f"extractor_diagnostics={json.dumps(safe_diagnostics, sort_keys=True)}"
         )
     finally:
         _run_command([*compose, "down", "--remove-orphans"], env=environment)
@@ -410,6 +488,11 @@ def main() -> int:
     try:
         with tempfile.TemporaryDirectory(prefix="sns-story-diagnostics-") as directory_name:
             temporary_directory = Path(directory_name)
+            supplied_image = os.environ.get(_CANDIDATE_IMAGE_ENV)
+            candidate_image = supplied_image or (
+                f"sns-media-list:story-diagnostics-{uuid.uuid4().hex[:12]}"
+            )
+            build_image = supplied_image is None
             fake_gallery = _write_fake_gallery_dl(temporary_directory)
             cookie_file = _write_fake_cookie(temporary_directory)
             for index, (
@@ -419,9 +502,11 @@ def main() -> int:
                 expected_status,
                 expected_reason,
                 expected_stage,
+                expected_diagnostics,
             ) in enumerate(_SCENARIOS):
                 _verify_mode(
                     temporary_directory,
+                    candidate_image=candidate_image,
                     fake_gallery=fake_gallery,
                     cookie_file=cookie_file if configured_cookie_path is not None else None,
                     scenario_name=scenario_name,
@@ -429,7 +514,8 @@ def main() -> int:
                     expected_status=expected_status,
                     expected_reason=expected_reason,
                     expected_stage=expected_stage,
-                    build_candidate=index == 0,
+                    expected_diagnostics=expected_diagnostics,
+                    build_candidate=build_image and index == 0,
                 )
     except (OSError, RuntimeError, subprocess.TimeoutExpired, TimeoutError) as error:
         print(f"container Story diagnostics smoke failed: {error}", file=sys.stderr)

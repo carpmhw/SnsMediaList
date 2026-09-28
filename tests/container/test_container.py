@@ -1,15 +1,20 @@
 """Contract tests for the hardened container deployment."""
 
+import tomllib
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parents[2]
 
 
 def test_dockerfile_uses_pinned_runtime_and_non_root_entrypoint() -> None:
-    """Verify the image pins Python, installs the locked app, and runs as app."""
+    """確認 image 固定 Trixie base／FFmpeg 版本，安裝 locked app 並以 app 執行。"""
     dockerfile = (PROJECT_ROOT / "Dockerfile").read_text()
 
-    assert "python:3.12-slim-bookworm@sha256:" in dockerfile
+    assert (
+        "python:3.12-slim-trixie@sha256:"
+        "f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f"
+    ) in dockerfile
+    assert "ARG FFMPEG_VERSION=7:7.1.5-0+deb13u1" in dockerfile
     assert "ghcr.io/astral-sh/uv:" in dockerfile
     assert "COPY --from=uv" in dockerfile
     assert "UV_PROJECT_ENVIRONMENT=/opt/venv" in dockerfile
@@ -39,19 +44,30 @@ def test_dockerignore_excludes_cookie_material_from_build_context() -> None:
 
 
 def test_ffmpeg_license_notice_is_shipped() -> None:
-    """Verify the controlled FFmpeg runtime license notice is present."""
+    """確認 Debian Trixie FFmpeg runtime 的授權 notice 已隨 image 提供。"""
     notice = (PROJECT_ROOT / "LICENSES" / "ffmpeg.txt").read_text()
 
     assert "FFmpeg" in notice
+    assert "Debian Trixie" in notice
+    assert "7:7.1.5-0+deb13u1" in notice
     assert "GPL-2.0" in notice
     assert "ffmpeg.org" in notice
 
 
 def test_gallery_license_notice_is_shipped() -> None:
-    """Verify the pinned extractor license notice is part of the image context."""
+    """確認授權 notice 版本與專案精確 pin 一致並納入 image context。"""
     notice = (PROJECT_ROOT / "LICENSES" / "gallery-dl.txt").read_text()
+    project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    pins = [
+        dependency.removeprefix("gallery-dl==")
+        for dependency in project["project"]["dependencies"]
+        if isinstance(dependency, str) and dependency.startswith("gallery-dl==")
+    ]
 
-    assert "gallery-dl 1.32.7" in notice
+    assert len(pins) == 1
+    assert f"gallery-dl {pins[0]}" in notice
+    assert f"gallery-dl version {pins[0]}" in notice
+    assert f"/v{pins[0]}" in notice
     assert "GPL-2.0-only" in notice
     assert "codeberg.org/mikf/gallery-dl" in notice
 
@@ -179,7 +195,8 @@ def test_story_diagnostics_smoke_uses_external_readonly_fixtures() -> None:
     smoke_script = (PROJECT_ROOT / "scripts" / "container_story_diagnostics_smoke.py").read_text()
 
     for required in (
-        'CANDIDATE_IMAGE = "sns-media-list:story-diagnostics-candidate"',
+        '"SNS_MEDIA_STORY_DIAGNOSTICS_IMAGE"',
+        'f"sns-media-list:story-diagnostics-{uuid.uuid4().hex[:12]}"',
         "read_only: true",
         'FAKE_GALLERY_PATH = "/opt/venv/bin/gallery-dl"',
         'COOKIE_CONTAINER_PATH = "/run/secrets/instagram-cookies.txt"',
@@ -187,19 +204,26 @@ def test_story_diagnostics_smoke_uses_external_readonly_fixtures() -> None:
         '"unknown-stderr"',
         '"unknown-datajob"',
         '"invalid-json"',
+        '"configured-http-403"',
         '"story_auth_required"',
         '"platform_authentication_failed"',
         '"extractor_process_unclassified"',
         '"extractor_invalid_output"',
         '"extractor_platform_error"',
         '"failure_stage"',
+        '"extractor_diagnostic_source"',
+        '"extractor_error_type"',
+        '"extractor_exit_code"',
+        '"extractor_http_statuses"',
+        '"message": "HTTP 403 Forbidden PRIVATE_CONTAINER_RAW_DIAGNOSTIC"',
+        "extractor_diagnostics=",
         '"down", "--remove-orphans"',
     ):
         assert required in smoke_script
 
 
 def test_container_smoke_script_checks_runtime_boundaries() -> None:
-    """Verify the automated smoke command covers startup and isolation checks."""
+    """確認 container smoke 驗證啟動、隔離與 Trixie FFmpeg runtime。"""
     smoke_script = (PROJECT_ROOT / "scripts" / "container_smoke.py").read_text()
 
     for check in (
@@ -208,7 +232,7 @@ def test_container_smoke_script_checks_runtime_boundaries() -> None:
         "State.Health.Status",
         "expected 10001",
         '"ffmpeg", "-version"',
-        "5.1.9",
+        "7.1.5-",
         '"uvicorn", "--version"',
         "read-only root filesystem check failed",
         "NetworkSettings.Ports",
@@ -217,5 +241,40 @@ def test_container_smoke_script_checks_runtime_boundaries() -> None:
         "PidsLimit",
         "restart-marker",
         '"stop", "-t", "10"',
+        "container_story_diagnostics_smoke.py",
+        "SNS_MEDIA_STORY_DIAGNOSTICS_IMAGE",
+        "repository digests",
     ):
         assert check in smoke_script
+
+
+def test_container_smoke_uses_a_per_run_image_tag() -> None:
+    """確認 container smoke 使用獨立 image tag，不重標記共享 local image。"""
+    compose = (PROJECT_ROOT / "docker-compose.yaml").read_text()
+    smoke_script = (PROJECT_ROOT / "scripts" / "container_smoke.py").read_text()
+
+    assert "image: sns-media-list:${SNS_MEDIA_IMAGE_TAG:-local}" in compose
+    assert 'image_tag = f"smoke-{os.getpid()}"' in smoke_script
+    assert 'environment["SNS_MEDIA_IMAGE_TAG"] = image_tag' in smoke_script
+    assert 'image_reference = f"sns-media-list:{image_tag}"' in smoke_script
+    assert '"docker",\n                "image",\n                "inspect"' in smoke_script
+    assert 'diagnostic_environment["SNS_MEDIA_STORY_DIAGNOSTICS_IMAGE"] = image_reference' in (
+        smoke_script
+    )
+
+
+def test_story_diagnostics_smoke_uses_the_same_isolated_per_run_image() -> None:
+    """確認 Story 日誌矩陣使用 container smoke 的 per-run image reference。"""
+    container_smoke = (PROJECT_ROOT / "scripts" / "container_smoke.py").read_text()
+    diagnostics_smoke = (
+        PROJECT_ROOT / "scripts" / "container_story_diagnostics_smoke.py"
+    ).read_text()
+
+    assert 'diagnostic_environment["SNS_MEDIA_STORY_DIAGNOSTICS_IMAGE"] = image_reference' in (
+        container_smoke
+    )
+    assert "supplied_image = os.environ.get(_CANDIDATE_IMAGE_ENV)" in diagnostics_smoke
+    assert "build_candidate=build_image and index == 0" in diagnostics_smoke
+    assert 'CANDIDATE_IMAGE = "sns-media-list:story-diagnostics-candidate"' not in (
+        diagnostics_smoke
+    )
