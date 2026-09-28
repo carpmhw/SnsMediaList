@@ -13,7 +13,14 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).parents[2]
 STORY_URL = "https://www.instagram.com/stories/example.user/1234567890/"
-_STORY_MEDIA_IDS = ("1234567890", "1234567891", "1234567892", "1234567893", "1234567894")
+_STORY_MEDIA_IDS = (
+    "1234567890",
+    "1234567891",
+    "1234567892",
+    "1234567893",
+    "1234567894",
+    "1234567895",
+)
 SENSITIVE_SENTINELS = (
     *(
         f"https://www.instagram.com/stories/example.user/{media_id}/"
@@ -61,6 +68,13 @@ if media_id == "1234567894":
     sys.stdout.write(json.dumps([[-1, {
         "error": "HttpError",
         "message": "HTTP 403 Forbidden PRIVATE_RAW_DIAGNOSTIC",
+    }]]))
+    sys.exit(0)
+if media_id == "1234567895":
+    sys.stdout.write(json.dumps([[-1, {
+        "error": "HttpError",
+        "message": "'500 Internal Server Error' for '" + sys.argv[-1]
+                   + "?token=FAKE_TOKEN_SENTINEL' PRIVATE_RAW_DIAGNOSTIC",
     }]]))
     sys.exit(0)
 sys.stderr.write(
@@ -232,6 +246,20 @@ def _stop_uvicorn(process: subprocess.Popen[str]) -> str:
                 "extractor_http_statuses": [403],
             },
             id="configured-story-http-403",
+        ),
+        pytest.param(
+            "1234567895",
+            True,
+            502,
+            "extraction_failed",
+            "extractor_process_unclassified",
+            {
+                "extractor_diagnostic_source": "datajob_error",
+                "extractor_error_type": "http_error",
+                "extractor_exit_code": 0,
+                "extractor_http_statuses": [500],
+            },
+            id="configured-story-http-500-reason-phrase",
         ),
     ],
 )

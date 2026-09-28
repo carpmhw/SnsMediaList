@@ -29,6 +29,10 @@ _HTTP_STATUS_PATTERN = re.compile(
             |403\s+Forbidden
             |404\s+Not\s+Found
             |429\s+Too\s+Many\s+Requests
+            |500\s+Internal\s+Server\s+Error
+            |502\s+Bad\s+Gateway
+            |503\s+Service\s+Unavailable
+            |504\s+Gateway\s+Timeout
         )
     )\b
     """,
@@ -875,7 +879,7 @@ def _remove_http_urls(message: str) -> str:
 
 
 def _extract_http_statuses(message: str) -> set[int]:
-    """Return HTTP statuses with an HTTP prefix, status prefix, or reason phrase."""
+    """從 HTTP／status 前綴或明確配對的狀態碼與原因片語取得狀態。"""
     statuses: set[int] = set()
     for match in _HTTP_STATUS_PATTERN.finditer(message):
         prefixed = match.group("prefixed")

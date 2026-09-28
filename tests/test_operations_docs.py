@@ -120,7 +120,7 @@ def test_operations_guide_documents_cookie_lifecycle_and_story_error_split() -> 
     assert "最多保留最小 8 個" in diagnostics
     assert "upstream HTTP failure" in diagnostics
     assert "本服務回傳的 HTTP 502" in diagnostics
-    assert '"extractor_http_statuses":[403]' in diagnostics
+    assert '"extractor_http_statuses":[500]' in diagnostics
     assert "docker compose logs --no-log-prefix --since 10m app" in diagnostics
     assert "--no-access-log" in diagnostics
     assert "extraction_failed" in diagnostics
@@ -147,12 +147,6 @@ def test_operations_guide_documents_cookie_lifecycle_and_story_error_split() -> 
         "uv run python scripts/verify_gallery_contract.py",
         "CONNECT proxy",
         "raw stderr／stdout",
-        "git rev-parse HEAD",
-        "git status --short",
-        "docker image inspect --format",
-        "Deterministic fake-extractor／container",
-        "owner-controlled live Story 重試",
-        "#升級與-rollback",
     ):
         assert required_text in diagnostics
 
@@ -161,7 +155,7 @@ def test_operations_guide_documents_cookie_lifecycle_and_story_error_split() -> 
 
 
 def test_operations_guide_documents_instagram_extractor_compatibility() -> None:
-    """驗證 Instagram 相容性優先排錯、Trixie candidate 與 gate 流程。"""
+    """驗證通用相容性排錯、版本來源與 candidate gate，不綁定歷史升級紀錄。"""
     guide = (PROJECT_ROOT / "OPERATIONS.md").read_text(encoding="utf-8")
     assert "## Instagram Extractor Compatibility" in guide
     compatibility = guide.partition("## Instagram Extractor Compatibility")[2].partition("\n## ")[0]
@@ -174,21 +168,22 @@ def test_operations_guide_documents_instagram_extractor_compatibility() -> None:
         "com.docker.compose.service",
         "docker ps --filter label=com.docker.compose.service=app",
         "docker inspect --format",
-        "docker logs --since 10m <container>",
+        "docker logs --since 10m '<container>'",
+        "git rev-parse HEAD",
+        "git status --short",
+        "docker image inspect --format",
         "Cookie 檔案存在、同步、格式／權限檢查通過",
         "gallery-dl --version",
         "`uv run python scripts/verify_gallery_contract.py`",
-        "1.32.7",
-        "1.32.13",
+        "`pyproject.toml`",
+        "`uv.lock`",
+        "`Dockerfile`",
         "release notes",
-        "redirect detection during user lookup",
-        "python:3.12-slim-trixie@sha256:",
-        "7:7.1.5-0+deb13u1",
-        "sns-media-list:candidate-gallery-dl-1.32.13-trixie",
-        "`uv run python scripts/security_gate.py --image",
-        "owner-controlled",
+        "Deterministic fake-extractor／container",
+        "owner-controlled live Story 重試",
         "classifier",
-        "rollback",
+        "#升級與-rollback",
+        "#自動化檢查",
     ):
         assert required_text in compatibility
 
@@ -197,6 +192,19 @@ def test_operations_guide_documents_instagram_extractor_compatibility() -> None:
     )
     assert compatibility.index("verify_gallery_contract.py") < compatibility.index("release notes")
     assert compatibility.index("release notes") < compatibility.index("candidate image")
+
+    upgrade = guide.partition("## 升級與 rollback")[2].partition("\n## ")[0]
+    checks = guide.partition("## 自動化檢查")[2].partition("\n## ")[0]
+    for required_text in ("唯一 tag", "image ID／digest", "不可變", "rollback reference"):
+        assert required_text in upgrade
+    assert "另一個 smoke image 通過不能代替 candidate 驗證" in upgrade
+    for required_text in (
+        "uv run python scripts/security_gate.py --image",
+        "HIGH／CRITICAL",
+        "vulnerability-exceptions.json",
+        "每次專用 image tag",
+    ):
+        assert required_text in checks
 
 
 def test_operations_guide_documents_ephemeral_story_smoke_safety() -> None:

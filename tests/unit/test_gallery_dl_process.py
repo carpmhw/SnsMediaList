@@ -1288,11 +1288,58 @@ async def test_datajob_diagnostics_records_explicit_http_statuses(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["datajob_error", "stderr"])
+@pytest.mark.parametrize(
+    ("message", "expected_status"),
+    [
+        ("'500 Internal Server Error' for 'https://example.test/private?token=SECRET'", (500,)),
+        ("'502 Bad Gateway' for 'https://example.test/private?token=SECRET'", (502,)),
+        ("'503 Service Unavailable' for 'https://example.test/private?token=SECRET'", (503,)),
+        ("'504 Gateway Timeout' for 'https://example.test/private?token=SECRET'", (504,)),
+        ("'500 internal server error' for 'https://example.test/private?token=SECRET'", (500,)),
+        ("503 Service Unavailable; 500 Internal Server Error; 503 Service Unavailable", (500, 503)),
+    ],
+)
+async def test_runner_records_server_error_reason_phrases(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    source: str,
+    message: str,
+    expected_status: tuple[int, ...],
+) -> None:
+    """驗證兩種錯誤來源辨識明確 5xx 片語，保留公開分類且不洩漏原文。"""
+    error = await assert_runner_error(
+        monkeypatch,
+        target_url=STORY_URL,
+        settings=instagram_settings(tmp_path, configured=True),
+        message=message,
+        error_type="HttpError",
+        expected_code="extraction_failed",
+        process_stderr=source == "stderr",
+    )
+
+    assert error.status_code == 502
+    assert error.failure_stage == "extractor_process_unclassified"
+    assert error.extractor_diagnostics is not None
+    assert error.extractor_diagnostics.extractor_diagnostic_source == source
+    assert error.extractor_diagnostics.extractor_http_statuses == expected_status
+    assert "SECRET" not in repr(error.extractor_diagnostics)
+    assert "example.test" not in repr(error.extractor_diagnostics)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "message",
     [
         "403",
+        "500",
+        "Story ID 123500123",
+        "500 Bad Gateway",
+        "1500 Internal Server Error",
+        "500 Internal Server Errorish",
         "only inside https://example.test/path?query=HTTP%20403%20Forbidden",
+        "only inside https://example.test/path?query=500%20Internal%20Server%20Error",
+        "only inside https://example.test/500/Internal/Server/Error",
     ],
 )
 async def test_datajob_diagnostics_ignores_bare_and_url_only_statuses(
@@ -1324,6 +1371,8 @@ async def test_http_status_diagnostics_are_bounded_without_changing_reason_prior
         [
             *(f"HTTP {status}" for status in range(401, 409)),
             "HTTP 429 Too Many Requests",
+            "500 Internal Server Error",
+            "503 Service Unavailable",
             "HTTP 401",
         ]
     )
