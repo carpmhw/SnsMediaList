@@ -161,11 +161,12 @@ class _ParsedGalleryOutput:
 def build_gallery_command(
     target: str,
     *,
+    target_kind: TargetKind,
     proxy_url: str,
     timeout_seconds: float = 45.0,
     cookie_file: str | None = None,
 ) -> list[str]:
-    """Build a shell-free gallery-dl command with direct-media settings."""
+    """依可信目標類型建立不經 shell 的 gallery-dl 直接媒體 command。"""
     command = [
         "gallery-dl",
         "--config-ignore",
@@ -181,15 +182,19 @@ def build_gallery_command(
         "instagram,twitter",
         "--proxy",
         proxy_url,
-        "-o",
-        "extractor.instagram.videos=merged",
-        "-o",
-        "extractor.instagram.previews=false",
-        "-o",
-        "extractor.twitter.videos=true",
-        "-o",
-        "extractor.twitter.previews=false",
     ]
+    if target_kind != "story":
+        command.extend(["-o", "extractor.instagram.videos=merged"])
+    command.extend(
+        [
+            "-o",
+            "extractor.instagram.previews=false",
+            "-o",
+            "extractor.twitter.videos=true",
+            "-o",
+            "extractor.twitter.previews=false",
+        ]
+    )
     if cookie_file is not None:
         category = "instagram" if "instagram.com/" in target else "twitter"
         command.extend(
@@ -244,6 +249,7 @@ class GalleryDlRunner:
             cookie_file = _cookie_file_for_platform(self.settings, target.platform)
             command = build_gallery_command(
                 target.canonical_url,
+                target_kind=target.kind,
                 proxy_url=self.proxy_url,
                 timeout_seconds=self.settings.extraction_timeout_seconds,
                 cookie_file=cookie_file,
@@ -616,13 +622,24 @@ def _record_from_message_tuple(
 def _add_post_context(
     records: list[dict[str, object]], target: ValidatedExtractionTarget
 ) -> list[dict[str, object]]:
-    """Add application-owned target context and safe text fields to media records."""
+    """加入可信目標 context，並只轉換精確 Story 同筆 record 的影片來源。"""
     contextualized: list[dict[str, object]] = []
     for record in records:
         if "error" in record:
             contextualized.append(record)
             continue
         item = dict(record)
+        source_url = item.get("url")
+        video_url = item.get("video_url")
+        if (
+            target.platform == "instagram"
+            and target.kind == "story"
+            and isinstance(source_url, str)
+            and source_url.startswith("ytdl:")
+            and isinstance(video_url, str)
+            and video_url
+        ):
+            item["url"] = video_url
         if target.kind == "story":
             item["platform"] = target.platform
             item["post_url"] = target.canonical_url

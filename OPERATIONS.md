@@ -239,9 +239,21 @@ Stage 不改變公開錯誤；未提供時省略，無效值正規化為 `unknow
    ```
 
 2. **驗證 contract。** 執行 `uv run python scripts/verify_gallery_contract.py`，核對已安裝套件、`--resolve-json`、離線 DataJob 格式及 adapter；不使用真實 Cookie 作 fixture。
-3. **查官方 release notes。** 比對觀察到的行為與候選版本修正，再決定是否升級，不以版本更新本身宣稱修復。
-4. **驗證 candidate image。** 依[升級與 rollback](#升級與-rollback)及[自動化檢查](#自動化檢查)完成隔離驗證與 gate。
-5. **最後才改 classifier。** 有安全診斷與合成 fixture 才評估窄範圍規則；不以泛用 `redirect`／`failed` 字串推論驗證失敗。
+3. **核對 Instagram Story 相容性。** 在 pinned `gallery-dl` 1.32.14 中，精確 Story 使用套件預設 video mode，不強制 `extractor.instagram.videos=merged`；Instagram Post／Reel 繼續使用 merged。若 Story URL event 是 `ytdl:` pseudo URL，adapter 僅在 validated Instagram Story context 中，將同一 URL media record 的 top-level 非空 `video_url` 作為 source 候選，再交由既有驗證流程處理。
+4. **維持來源安全邊界。** `video_url` 搬移只是候選轉換，不是安全授權：既有 HTTPS URL 形狀檢查與 downstream host／port／DNS A／AAAA／IP／redirect／MIME／byte-limit 政策都必須通過。missing／unsafe source fail closed；不 unwrap `ytdl:`、不向其他 record／directory／queue／nested metadata 借 URL，也不新增 generic downloader 或 retry。
+5. **查官方 release notes。** 比對觀察到的行為與候選版本修正，再決定是否升級，不以版本更新本身宣稱修復。
+6. **驗證 candidate image。** 依[升級與 rollback](#升級與-rollback)及[自動化檢查](#自動化檢查)完成隔離驗證與 gate。
+7. **最後才改 classifier。** 有安全診斷與合成 fixture 才評估窄範圍規則；不以泛用 `redirect`／`failed` 字串推論驗證失敗。
+
+此相容性處理不表示所有 `KeyError: 'width'` 或 HTTP 403 都由相同原因造成；configured Story 模糊 403 仍依既有一般錯誤契約處理。
+
+### Story GraphQL 靜態資源與 CONNECT proxy
+
+Pinned gallery-dl 的 Story 流程會先取得使用者資訊與頁面，再從 `static.cdninstagram.com` 讀取靜態 JavaScript，以尋找 GraphQL `doc_id`。Extractor 的精確 host 白名單包含此單一網域；不授權整個 `*.cdninstagram.com`，仍須通過 HTTPS CONNECT、443 port、完整 DNS A／AAAA 公開 IP 檢查與目的地 pinning。此授權用於擷取期間的靜態資源，不改變 preview／download 的媒體政策或 Cookie 邊界。
+
+若使用者查詢與頁面讀取皆為 HTTP 200，但靜態資源請求出現 `ProxyError`／CONNECT tunnel 403，應先核對執行中映像的 extractor 白名單。本機 CONNECT proxy 拒絕目的地時也會回覆 403，不能僅由此認定 Instagram 拒絕 session 或 Story GraphQL 請求。診斷只保留固定請求類別、狀態碼與是否攜帶 Cookie 的布林旗標，不記錄實際資源 URL、Cookie 值或原始例外。
+
+原始碼白名單更新須經映像建置及部署替換才會生效；重新啟動舊映像不會取得修正。更新後以仍有效的 owner-controlled Story 確認流程可繼續到 GraphQL，再驗證分析與完整下載；解除靜態資源阻擋不代表後續平台請求必然成功。
 
 Cookie 檔案存在、同步、格式／權限檢查通過、瀏覽器可見或一般貼文成功，都不能證明 Story API 的 session 有效。Deterministic fake-extractor／container 結果與 owner-controlled live Story 重試分開記錄；合成測試通過不代表原事件已修復。
 

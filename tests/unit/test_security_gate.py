@@ -295,7 +295,7 @@ def test_exception_manifest_rejects_duplicate_exact_entries(tmp_path) -> None:
 
 
 def test_collect_trivy_uses_pinned_container_when_binary_is_unavailable(monkeypatch) -> None:
-    """Verify live scans remain reproducible when only Docker is available."""
+    """驗證無本機 Trivy 時使用固定 image 並要求完整套件清單。"""
     commands: list[list[str]] = []
     report = {
         "ArtifactName": "sns-media-list:candidate",
@@ -331,6 +331,7 @@ def test_collect_trivy_uses_pinned_container_when_binary_is_unavailable(monkeypa
             "--quiet",
             "--format",
             "json",
+            "--list-all-pkgs",
             "--severity",
             "HIGH,CRITICAL",
             "sns-media-list:candidate",
@@ -471,6 +472,26 @@ def test_validate_trivy_report_rejects_omitted_vulnerabilities_for_os_result() -
             },
             expected_image="sns-media-list:candidate",
         )
+
+
+def test_validate_trivy_report_accepts_complete_os_inventory_without_vulnerabilities() -> None:
+    """完整的 OS package inventory 省略漏洞欄位時代表 scanner 無 HIGH／CRITICAL finding。"""
+    report = {
+        "ArtifactName": "sns-media-list:candidate",
+        "ArtifactID": "sha256:report",
+        "Metadata": {"ImageID": "sha256:image"},
+        "Results": [
+            {
+                "Target": "rootfs",
+                "Class": "os-pkgs",
+                "Type": "alpine",
+                "Packages": [{"Name": "musl", "Version": "1.2.6-r2"}],
+            }
+        ],
+    }
+
+    validate_trivy_report(report, expected_image="sns-media-list:candidate")
+    assert evaluate_trivy(report, exceptions=[], today=date(2026, 9, 28)) == []
 
 
 @pytest.mark.parametrize(

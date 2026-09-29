@@ -67,9 +67,9 @@ def exec_python(container_id: str, source: str) -> None:
 
 
 def verify_ffmpeg(container_id: str) -> None:
-    """確認 runtime FFmpeg 版本符合 Dockerfile 精確 pin。"""
+    """確認 Alpine runtime FFmpeg 版本符合 Dockerfile 精確 pin。"""
     result = run_command(["docker", "exec", container_id, "ffmpeg", "-version"])
-    if not result.stdout.startswith("ffmpeg version 7.1.5-"):
+    if not result.stdout.startswith("ffmpeg version 8.1.2 "):
         raise RuntimeError("container FFmpeg version does not match the pinned runtime")
 
 

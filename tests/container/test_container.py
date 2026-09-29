@@ -7,19 +7,24 @@ PROJECT_ROOT = Path(__file__).parents[2]
 
 
 def test_dockerfile_uses_pinned_runtime_and_non_root_entrypoint() -> None:
-    """確認 image 固定 Trixie base／FFmpeg 版本，安裝 locked app 並以 app 執行。"""
+    """確認 image 固定 Alpine base／FFmpeg 版本，安裝 locked app 並以 app 執行。"""
     dockerfile = (PROJECT_ROOT / "Dockerfile").read_text()
 
     assert (
-        "python:3.12-slim-trixie@sha256:"
-        "f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f"
+        "python:3.12-alpine@sha256:4c47124a8391cb7a9f571164147d154777cf012a4ece5f86097130d7a4478111"
     ) in dockerfile
-    assert "ARG FFMPEG_VERSION=7:7.1.5-0+deb13u1" in dockerfile
+    assert "ARG FFMPEG_VERSION=8.1.2-r0" in dockerfile
     assert "ghcr.io/astral-sh/uv:" in dockerfile
     assert "COPY --from=uv" in dockerfile
     assert "UV_PROJECT_ENVIRONMENT=/opt/venv" in dockerfile
     assert "uv sync --frozen --no-dev" in dockerfile
     assert "COPY --from=builder /opt/venv /opt/venv" in dockerfile
+    assert 'apk add --no-cache "ffmpeg=${FFMPEG_VERSION}"' in dockerfile
+    assert "addgroup -S -g 10001 app" in dockerfile
+    assert "adduser -S -D -H -u 10001 -G app" in dockerfile
+    assert "apt-get" not in dockerfile
+    assert "groupadd" not in dockerfile
+    assert "useradd" not in dockerfile
     assert "/build/.venv" not in dockerfile
     assert "pip install" not in dockerfile
     assert "gallery-dl==1.32.7" not in dockerfile
@@ -44,13 +49,14 @@ def test_dockerignore_excludes_cookie_material_from_build_context() -> None:
 
 
 def test_ffmpeg_license_notice_is_shipped() -> None:
-    """確認 Debian Trixie FFmpeg runtime 的授權 notice 已隨 image 提供。"""
+    """確認 Alpine FFmpeg runtime 的授權 notice 已隨 image 提供。"""
     notice = (PROJECT_ROOT / "LICENSES" / "ffmpeg.txt").read_text()
 
     assert "FFmpeg" in notice
-    assert "Debian Trixie" in notice
-    assert "7:7.1.5-0+deb13u1" in notice
-    assert "GPL-2.0" in notice
+    assert "Alpine 3.24" in notice
+    assert "8.1.2-r0" in notice
+    assert "GPL-2.0-or-later" in notice
+    assert "LGPL-2.1-or-later" in notice
     assert "ffmpeg.org" in notice
 
 
@@ -223,7 +229,7 @@ def test_story_diagnostics_smoke_uses_external_readonly_fixtures() -> None:
 
 
 def test_container_smoke_script_checks_runtime_boundaries() -> None:
-    """確認 container smoke 驗證啟動、隔離與 Trixie FFmpeg runtime。"""
+    """確認 container smoke 驗證啟動、隔離與 Alpine FFmpeg runtime。"""
     smoke_script = (PROJECT_ROOT / "scripts" / "container_smoke.py").read_text()
 
     for check in (
@@ -232,7 +238,7 @@ def test_container_smoke_script_checks_runtime_boundaries() -> None:
         "State.Health.Status",
         "expected 10001",
         '"ffmpeg", "-version"',
-        "7.1.5-",
+        "8.1.2",
         '"uvicorn", "--version"',
         "read-only root filesystem check failed",
         "NetworkSettings.Ports",

@@ -445,6 +445,100 @@ async def test_proxy_connects_to_selected_pinned_address(monkeypatch: Any) -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("address", ["93.184.216.34", "2606:4700:4700::1111"])
+async def test_proxy_allows_instagram_story_docid_asset(
+    monkeypatch: pytest.MonkeyPatch, address: str
+) -> None:
+    """正式白名單允許 Story doc_id 靜態資源，並連向驗證後的公開 IP。"""
+    resolved: list[tuple[str, int]] = []
+    connected: list[tuple[str, int]] = []
+
+    def resolver(host: str, port: int) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+        """提供合成公開 DNS 結果並記錄實際驗證的目的地。"""
+        resolved.append((host, port))
+        return [ipaddress.ip_address(address)]
+
+    async def fake_open_connection(
+        host: str, port: int
+    ) -> tuple[FakeStreamReader, FakeStreamWriter]:
+        """記錄 pinned IP 的連線，避免測試存取真實 CDN。"""
+        connected.append((host, port))
+        return FakeStreamReader(), FakeStreamWriter()
+
+    monkeypatch.setattr(connect_proxy.asyncio, "open_connection", fake_open_connection)
+    proxy = ConnectProxy(DestinationPolicy(allowed_hosts=_EXTRACTION_HOSTS, resolver=resolver))
+    client = FakeStreamReader(
+        b"CONNECT static.cdninstagram.com:443 HTTP/1.1\r\nHost: static.cdninstagram.com:443\r\n\r\n"
+    )
+    writer = FakeStreamWriter()
+
+    await proxy.handle_client(client, writer)
+
+    assert resolved == [("static.cdninstagram.com", 443)]
+    assert connected == [(address, 443)]
+    assert writer.writes[0].startswith(b"HTTP/1.1 200 Connection Established")
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "cdninstagram.com",
+        "other.cdninstagram.com",
+        "sub.static.cdninstagram.com",
+        "static.cdninstagram.com.evil.example",
+        "evilstatic.cdninstagram.com",
+    ],
+)
+def test_policy_rejects_unapproved_instagram_static_asset_hosts(host: str) -> None:
+    """靜態資源授權僅適用精確 host，其他子網域與相似網域在 DNS 前遭拒。"""
+
+    def unexpected_resolver(
+        _host: str, _port: int
+    ) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+        """未授權 host 不得進入 DNS 解析。"""
+        raise AssertionError("未授權 host 不應觸發 DNS 解析。")
+
+    policy = DestinationPolicy(allowed_hosts=_EXTRACTION_HOSTS, resolver=unexpected_resolver)
+    with pytest.raises(AppError) as exc_info:
+        policy.validate(host, 443)
+
+    assert exc_info.value.code == "unsafe_destination"
+
+
+@pytest.mark.parametrize(
+    ("port", "addresses"),
+    [
+        pytest.param(80, ["93.184.216.34"], id="http-port"),
+        pytest.param(8443, ["93.184.216.34"], id="alternate-port"),
+        pytest.param(443, [], id="empty-dns"),
+        pytest.param(443, ["127.0.0.1"], id="loopback-v4"),
+        pytest.param(443, ["::1"], id="loopback-v6"),
+        pytest.param(443, ["10.0.0.1"], id="private-v4"),
+        pytest.param(443, ["fc00::1"], id="private-v6"),
+        pytest.param(443, ["169.254.169.254"], id="link-local"),
+        pytest.param(443, ["93.184.216.34", "fc00::1"], id="mixed-public-private"),
+    ],
+)
+def test_policy_rejects_unsafe_instagram_static_asset_destination(
+    port: int, addresses: list[str]
+) -> None:
+    """已授權 CDN 仍須通過 443 port 及完整 A／AAAA 公開位址檢查。"""
+    resolved: list[tuple[str, int]] = []
+
+    def resolver(host: str, port: int) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+        """回傳合成 DNS 結果，確認拒絕發生於正確的驗證階段。"""
+        resolved.append((host, port))
+        return [ipaddress.ip_address(address) for address in addresses]
+
+    policy = DestinationPolicy(allowed_hosts=_EXTRACTION_HOSTS, resolver=resolver)
+    with pytest.raises(AppError) as exc_info:
+        policy.validate("static.cdninstagram.com", port)
+
+    assert exc_info.value.code == "unsafe_destination"
+    assert resolved == ([("static.cdninstagram.com", 443)] if port == 443 else [])
+
+
+@pytest.mark.asyncio
 async def test_proxy_header_blackhole_returns_within_operation_timeout() -> None:
     """header readuntil blackhole 時 proxy handler 應在 bounded 時間內返回。"""
     policy = DestinationPolicy(

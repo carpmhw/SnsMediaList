@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-ARG PYTHON_IMAGE=python:3.12-slim-trixie@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
+ARG PYTHON_IMAGE=python:3.12-alpine@sha256:4c47124a8391cb7a9f571164147d154777cf012a4ece5f86097130d7a4478111
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.29@sha256:eb2843a1e56fd9e30c7276ce1a52cba86e64c7b385f5e3279a0e08e02dd058fc
 
 FROM ${UV_IMAGE} AS uv
@@ -21,7 +21,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 FROM ${PYTHON_IMAGE}
 
-ARG FFMPEG_VERSION=7:7.1.5-0+deb13u1
+ARG FFMPEG_VERSION=8.1.2-r0
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -31,11 +31,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     XDG_CONFIG_HOME=/tmp/app-home/config \
     XDG_CACHE_HOME=/tmp/app-home/cache
 
-RUN apt-get update \
-    && apt-get install --no-install-recommends --yes "ffmpeg=${FFMPEG_VERSION}" \
-    && rm -rf /var/lib/apt/lists/* \
-    && groupadd --system --gid 10001 app \
-    && useradd --system --uid 10001 --gid 10001 --home-dir /app --shell /usr/sbin/nologin app \
+RUN apk add --no-cache "ffmpeg=${FFMPEG_VERSION}" \
+    && addgroup -S -g 10001 app \
+    && adduser -S -D -H -u 10001 -G app -s /sbin/nologin app \
     && mkdir -p /app /tmp/app-home \
     && chown -R app:app /app /tmp/app-home
 
