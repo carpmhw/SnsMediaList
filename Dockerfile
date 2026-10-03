@@ -31,7 +31,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     XDG_CONFIG_HOME=/tmp/app-home/config \
     XDG_CACHE_HOME=/tmp/app-home/cache
 
-RUN apk add --no-cache "ffmpeg=${FFMPEG_VERSION}" \
+RUN apk add --no-cache "ffmpeg=${FFMPEG_VERSION}" "pcre2=10.49-r0" \
     && addgroup -S -g 10001 app \
     && adduser -S -D -H -u 10001 -G app -s /sbin/nologin app \
     && mkdir -p /app /tmp/app-home \

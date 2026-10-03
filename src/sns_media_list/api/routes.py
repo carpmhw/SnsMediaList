@@ -26,6 +26,7 @@ from ..network.media_client import (
     iter_validated_body,
     validate_resume_response,
 )
+from ..services.extraction_coordinator import ExtractionCoordinator
 from ..services.extraction_service import ExtractionService
 from ..services.thumbnail import ThumbnailGenerator, validate_thumbnail_media_class
 from ..services.thumbnail_cache import ThumbnailCoordinator
@@ -324,6 +325,7 @@ def build_router(
     media_client: MediaClient,
     *,
     limiter: RequestLimiter,
+    extraction_coordinator: ExtractionCoordinator,
     trusted_proxy_cidrs: Iterable[str],
     media_response_timeout_seconds: float,
     thumbnail_generator: ThumbnailGenerator,
@@ -337,11 +339,9 @@ def build_router(
         """擷取一個已驗證媒體目標，並回傳正規化媒體清單。"""
         started = perf_counter()
         try:
-            lease = limiter.acquire_extraction(
-                _request_client_identity(request, trusted_proxy_cidrs)
+            result = await extraction_coordinator.execute(
+                payload.url, _request_client_identity(request, trusted_proxy_cidrs)
             )
-            async with lease:
-                result = await service.extract(payload.url)
         except AppError as error:
             reason_code = (
                 error.code if error.code in EXTRACTION_REASON_CODES else "extraction_failed"

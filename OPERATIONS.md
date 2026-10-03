@@ -43,12 +43,92 @@ Compose 使用單一 worker、UID/GID 10001、read-only root filesystem、bounde
 | `SNS_MEDIA_RATE_LIMIT_MEDIA_ATTEMPTS` | 120 |
 | `SNS_MEDIA_RATE_LIMIT_IDENTITY_CAPACITY` | 2048 |
 | `SNS_MEDIA_GENERATED_PREVIEWS_ENABLED` | false |
+| `SNS_MEDIA_MCP_ENABLED` | false |
+| `SNS_MEDIA_MCP_MAX_REQUEST_BODY_BYTES` | 65536 bytes |
+| `SNS_MEDIA_MCP_ALLOWED_HOSTS` | `[]`，使用 SDK localhost defaults |
+| `SNS_MEDIA_MCP_ALLOWED_ORIGINS` | `[]`，使用 SDK localhost defaults |
 | `SNS_MEDIA_THUMBNAIL_INPUT_BYTES` | 32000000 bytes |
 | `SNS_MEDIA_THUMBNAIL_OUTPUT_BYTES` | 1000000 bytes |
 | `SNS_MEDIA_THUMBNAIL_TIMEOUT_SECONDS` | 10 seconds |
 | `SNS_MEDIA_THUMBNAIL_CONCURRENCY` | 1 |
 | `SNS_MEDIA_THUMBNAIL_CACHE_BYTES` | 32000000 bytes |
 | `SNS_MEDIA_THUMBNAIL_MAX_EDGE` | 640 pixels |
+
+## MCP deployment
+
+MCP 預設關閉，啟用時在同一 port 提供 `/mcp` **Streamable HTTP** 與單一 `extract_media`。沿用 loopback host publish、單 worker、唯讀 filesystem 與既有 CONNECT proxy／Cookie 邊界；`/healthz` 始終只表示 liveness，不建立 MCP session 或連線平台。
+
+### 啟用與協定 smoke
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.mcp.yaml config --quiet
+docker compose -f docker-compose.yaml -f docker-compose.mcp.yaml up -d --build
+uv run python scripts/mcp_smoke.py http://127.0.0.1:8000/mcp
+uv run python scripts/mcp_smoke.py http://127.0.0.1:8000/mcp --mode legacy
+```
+
+已有部署先確認 Compose labels，沿用**相同 project**、原 `-p` 與完整 Cookie／image overlays；啟用 overlay 只改 environment，不新增 port。Base Compose 的 `SNS_MEDIA_MCP_ENABLED` 為固定 false，單改 shell／`.env` 不會啟用 MCP。本機 Uvicorn 可用 `SNS_MEDIA_MCP_ENABLED=true`，仍須 `--workers 1 --no-access-log`。
+
+Smoke 預設只驗證連線、SDK 所需的 initialize／version negotiation、server 名稱與唯一 tool schema，不呼叫 Instagram／X。現代協定可能沒有 session ID，不能據此判定失敗。選用 live extraction 使用 `--url-file <暫存 URL 檔>`，僅限 owner-controlled 內容；不把真實 URL 放入 repository、CI、log 或 shell command history，完成後移除暫存檔。輸出不回顯 URL、token 或結果全文，live smoke 不作為 release gate。
+
+### 設定與 request budget
+
+- `SNS_MEDIA_MCP_ENABLED=false`：不建立 SDK server／manager，`/mcp` 404。
+- `SNS_MEDIA_MCP_MAX_REQUEST_BODY_BYTES=65536`：合法範圍 1–1048576 bytes；僅接受未壓縮 JSON。Declared 與 streamed bytes 都在 SDK parsing 前受限；超限 413，representation 不支援 415。
+- `SNS_MEDIA_MCP_ALLOWED_HOSTS`／`SNS_MEDIA_MCP_ALLOWED_ORIGINS`：JSON array，各最多 **32** 筆 exact allowlist。自訂值不允許 wildcard、port glob、credentials、path、query 或 fragment；Origin 必須是完整 HTTP(S) origin。
+- 兩組未自訂時保留 SDK localhost defaults；自訂 hosts 卻不提供 origins 時，所有帶 Origin 的 request 被拒絕，非瀏覽器 Client 仍須匹配 Host。
+- 自訂 origins 必須同時配置 hosts；單獨 Origin allowlist 在 Settings validation 拒絕，避免啟動後全部 Host 都被 421 拒絕。
+- 所有 MCP Client 共用 `mcp` identity，預設同時最多一個 MCP extraction；REST／MCP 共用 `SNS_MEDIA_MAX_EXTRACTIONS`，不建立第二組 slot 或 queue。
+- 每 60 秒最多 **10 個 MCP POST**（沿用 `SNS_MEDIA_RATE_LIMIT_EXTRACTION_ATTEMPTS`／window），其中 9 個一般 POST、1 個只保留給同一 session 中 active `extract_media` 的 legacy cancellation。initialize、notifications、list-tools、tool calls 與 malformed POST 消耗一般額度；不匹配的 cancellation 也算一般 POST，每個 HTTP POST 只計一次。一般額度用盡時，boundary 仍讀取一個有界 body 以辨識匹配 cancellation；其他 request 回傳 HTTP 429／`local_rate_limited`／Retry-After。REST／media identity churn 不會重置固定 MCP bucket；GET／DELETE 不消耗這個 POST budget。
+- MCP 啟用時 extraction attempt limit 至少 2；過低的 quota 可能不足以完成 legacy handshake，建議維持預設值。固定 MCP bucket 與 client identity LRU 分離，總 retained state 上限為 identity capacity 加一個固定大小 bucket。
+- SDK legacy session 固定最多 32 個，閒置期限沿用 token TTL；沒有持久 session store。Transport sessionless 不表示 token／limiters 能跨 worker，共享狀態仍只在單 process。
+
+### Reverse proxy、Host／Origin 與驗證
+
+`deploy/nginx/sns-media-list.conf` 的 exact `/mcp` location 繼承原 authentication、停用 access log、移除 credentials，並提供 64 KiB body、無 buffering 的 Streamable HTTP 與 300 秒 read timeout；REST 的 4 KiB body 與媒體串流設定維持獨立。調整 app body limit／extraction timeout 時須同步 proxy 的 body／timeout 邊界。
+
+範例 proxy 以 `$host` 轉送 Host（不含 port），必須為該精確值配置 app allowlist；Origin 使用 Client 實際發送的 scheme／host／port。以下是示意 deployment override，替換成自己的 ingress 值並沿用原部署 overlays：
+
+```yaml
+services:
+  app:
+    environment:
+      SNS_MEDIA_MCP_ALLOWED_HOSTS: '["sns-media.example.internal"]'
+      SNS_MEDIA_MCP_ALLOWED_ORIGINS: '["https://sns-media.example.internal"]'
+```
+
+SDK DNS-rebinding protection 保持啟用；不匹配 Host 為 **421**，不匹配 Origin 為 **403**。不能以關閉防護、任意 `X-Forwarded-For` 或 wildcard 修正；檢查 proxy 真正轉送的值，不從 Host 推導 absolute media URL。
+
+Host／Origin 防護不是身份驗證。MCP 只適合本人／可信網路或有 authentication／network ACL 的 ingress；若配置平台 Cookie，任何被允許的 MCP 使用者都可能間接使用 operator 帳號可見權限，沒有 per-user isolation。MCP 不提供 Cookie 上傳、OAuth 或憑證管理。
+
+### 結果、錯誤與排錯
+
+Tool 成功回傳 metadata 與 root-relative 相對 preview／download URL，Client 依明確的服務 origin 解析；TTL／purpose／capacity、HEAD／GET、預覽與到期 410 均沿用原 API。沒有 media binary、upstream URL、headers 或 raw output。
+
+Tool failure 使用 SDK `isError=true`，文字 content 為固定 `{code,message}` JSON；沒有成功 structured content 或 internal diagnostics。Protocol／validation error 不回顯 arguments；每次 tool（包含 validation failure）都有 safe `mcp_extraction_started` 與唯一 complete／failed／aborted event，使用 server-generated request ID；既有 `mcp_server_started`／startup failure event 也僅含安全欄位。保留 `--no-access-log`，不以 debug／request dump 排錯。
+
+上述 tool validation 指合法 RPC arguments object 內的 URL／額外欄位驗證；RPC envelope 本身無效（例如 arguments 是字串）由 SDK 回傳安全 `-32602` 等協定錯誤，未進入 tool lifecycle。取消 request ID 使用 SDK correlation 規則，數字字串與整數可相互匹配；仍須同一 session。既存 SDK logger／子 logger handlers 會被隔離，不輸出 raw SDK 訊息。
+
+| 現象 | 檢查方向 |
+| --- | --- |
+| `/mcp` 404 | 確認 runtime image／有效 Compose 設定為 enabled，且不是 `/mcp/mcp`。 |
+| 421／403 | 核對精確 Host／Origin 與 proxy 轉送；不放寬為 wildcard。 |
+| HTTP 429 | 區分 aggregate POST window、保留 cancellation 額度與 extraction slot；handshake 也計入一般 POST budget，等待 Retry-After。 |
+| 413／415 | 核對 app／proxy body limit 與未壓縮 application/json。 |
+| 406 | Client Accept 必須支援 application/json 與 text/event-stream，建議使用官方 SDK Client。 |
+| task-group-not-initialized | 核對 parent lifespan 是否管理 manager；不要只啟動 mounted sub-app。 |
+| Client 取消後仍有工作 | 使用 SDK 預設 Streamable HTTP response 模式；legacy 必須使用同 session 的 active request ID，純 JSON 分支無現代 disconnect cancellation。 |
+| 重啟後媒體／session 失效 | 記憶體狀態不恢復，Client 重新連線並重新分析。 |
+
+### 關閉與 rollback
+
+移除 MCP enable override，保留相同 project、其他必要的 Cookie／image overlays，再重新建立 app。例如最小部署：
+
+```bash
+docker compose -f docker-compose.yaml up -d --no-deps app
+```
+
+或在 deployment-owned override 明確設 `SNS_MEDIA_MCP_ENABLED: "false"`。確認 `/mcp` 回到 404、health／UI／REST 正常；重建會清除 token 與 SDK session。Image rollback 仍依下方不可變 reference 流程，不把另一個 smoke image 的結果套用到實際 candidate。
 
 ## 安全不變條件
 

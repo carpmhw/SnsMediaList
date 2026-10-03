@@ -138,3 +138,52 @@ def test_attempt_limiter_evicts_oldest_identity_at_capacity() -> None:
 
     assert limiter.identity_count == 2
     limiter.acquire("extraction", "203.0.113.10")
+
+
+def test_mcp_aggregate_bucket_survives_rest_identity_eviction() -> None:
+    """REST identity LRU churn 不得清除固定 MCP aggregate POST 狀態。"""
+    limiter = AttemptLimiter(
+        extraction_limit=3,
+        media_limit=2,
+        window_seconds=60,
+        max_identities=1,
+        reserve_mcp_cancellation=True,
+    )
+    limiter.acquire_mcp_post(cancellation=False)
+    limiter.acquire_mcp_post(cancellation=False)
+    limiter.acquire("extraction", "rest-first")
+    limiter.acquire("extraction", "rest-second")
+
+    with pytest.raises(AppError) as exc_info:
+        limiter.acquire_mcp_post(cancellation=False)
+
+    assert exc_info.value.code == "local_rate_limited"
+    assert limiter.identity_count == 1
+
+
+def test_mcp_post_quota_reserves_one_cancellation_with_same_total_cap() -> None:
+    """一般 MCP POST 留出一次 cancellation，合計永不超過既有 attempt limit。"""
+    now = [0.0]
+    limiter = AttemptLimiter(
+        extraction_limit=3,
+        media_limit=2,
+        window_seconds=60,
+        max_identities=1,
+        clock=lambda: now[0],
+        reserve_mcp_cancellation=True,
+    )
+    limiter.acquire_mcp_post(cancellation=False)
+    limiter.acquire_mcp_post(cancellation=False)
+    with pytest.raises(AppError) as regular_error:
+        limiter.acquire_mcp_post(cancellation=False)
+    assert regular_error.value.retry_after == 60
+
+    limiter.acquire_mcp_post(cancellation=True)
+    with pytest.raises(AppError) as cancellation_error:
+        limiter.acquire_mcp_post(cancellation=True)
+    assert cancellation_error.value.code == "local_rate_limited"
+    assert cancellation_error.value.retry_after == 60
+
+    now[0] = 61
+    limiter.acquire_mcp_post(cancellation=False)
+    limiter.acquire_mcp_post(cancellation=True)

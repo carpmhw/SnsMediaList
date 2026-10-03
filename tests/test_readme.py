@@ -100,3 +100,24 @@ def test_readme_uses_project_icon_and_documents_preview_default() -> None:
     assert "src/sns_media_list/static/favicon.svg" in readme
     assert "預設使用本機 placeholder" in readme
     assert "明確啟用" in readme
+
+
+def test_readme_documents_explicit_mcp_activation_and_relative_result() -> None:
+    """README 啟用命令必須真正覆寫 Compose，並說明可信與相對 URL 邊界。"""
+    section = (
+        (PROJECT_ROOT / "README.md").read_text().partition("## MCP Server")[2].partition("\n## ")[0]
+    )
+    for text in (
+        "預設關閉",
+        "docker-compose.mcp.yaml",
+        "Streamable HTTP",
+        "extract_media",
+        "/api/media/",
+        "相對",
+        "Cookie",
+        "operator",
+        "10 個 POST",
+        "驗證",
+    ):
+        assert text in section
+    assert "SNS_MEDIA_MCP_ENABLED=true docker compose" not in section

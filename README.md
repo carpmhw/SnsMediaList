@@ -88,6 +88,52 @@ SNS_MEDIA_X_COOKIE_HOST_FILE=/srv/secrets/x.cookies.txt \
 
 配置 Instagram Cookie 後，所有服務使用者都可能間接使用 operator 帳號的 Story 可見權限，包括私人、Close Friends 或受眾限定內容。服務不提供個別使用者的權限隔離，只適合本人或可信內網。輪替、撤銷與匿名模式 rollback 流程請參閱 [操作指南](OPERATIONS.md#平台-cookie-驗證)。
 
+## MCP Server
+
+MCP Server **預設關閉**。Phase 1 透過同一 app 的 `/mcp` 提供 **Streamable HTTP**，僅公開 `extract_media` tool，與 REST 共用擷取服務、併發 budget 及短效 token。
+
+使用明確的 Compose override 啟用：
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.mcp.yaml up -d --build
+uv run python scripts/mcp_smoke.py http://127.0.0.1:8000/mcp
+```
+
+Endpoint 為 `http://127.0.0.1:8000/mcp`，不需要新增 port。已有部署須沿用原 project 與全部 Cookie overlays；設定及 rollback 見 [MCP 操作指南](OPERATIONS.md#mcp-deployment)。本機 Uvicorn 可使用 `SNS_MEDIA_MCP_ENABLED=true` 環境變數；Compose 的固定 environment 必須以 override 覆寫。
+
+Tool input（只接受一個長度 1–2048 的 URL 字串）：
+
+```json
+{"url":"https://x.com/example/status/123/"}
+```
+
+成功的 structured content 範例（token 僅為示意）：
+
+```json
+{
+  "platform": "x",
+  "post_url": "https://x.com/example/status/123/",
+  "author": "example",
+  "description": null,
+  "unavailable_media_count": 0,
+  "media": [{
+    "media_type": "image",
+    "filename": "x-example-123-01.jpg",
+    "width": 1200,
+    "height": 800,
+    "duration": null,
+    "preview_url": "/placeholder.svg",
+    "download_url": "/api/media/example-download-token/download"
+  }]
+}
+```
+
+Media URL 是 root-relative **相對連結**，Client 必須依 operator 提供的服務 origin 解析，不能將 `/mcp` 當作路徑前綴。MCP 不傳圖片／影片 binary，不回傳 upstream URL、Cookie、headers 或 raw extractor output。下載仍使用既有 token API，維持 TTL、用途及容量限制。
+
+所有 MCP Client 共用固定 identity：預設同時最多一個 MCP extraction，且 REST／MCP 合計受 `SNS_MEDIA_MAX_EXTRACTIONS` 約束；每 60 秒最多 **10 個 POST**，其中 9 個一般 POST、1 個只保留給同一 session 中 active `extract_media` 的 legacy cancellation。initialize、notifications、list-tools 與 tool calls 會消耗一般額度；不匹配的 cancellation 也算一般 POST，超限不排隊。取消必須匹配同一 session 與 active request ID，不能用任意 ID 取消其他工作。
+
+MCP 僅適合 loopback、可信網路或有驗證的 reverse proxy。Phase 1 沒有 OAuth／個別使用者授權；啟用平台 Cookie 後，MCP 使用者也可能間接使用 operator 帳號的可見權限。Reverse proxy 必須配置精確 Host／Origin allowlist 與驗證邊界；不可將未驗證的 Cookie-enabled endpoint 直接公開到 Internet。
+
 ## 安全設計
 
 - 僅接受明確支援的 HTTPS URL 與平台/CDN host，拒絕不安全 scheme、port 與路徑。

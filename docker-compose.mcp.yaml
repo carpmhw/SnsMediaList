@@ -1,0 +1,5 @@
+# 明確啟用 MCP；與 Web 共用原本的單 worker、loopback port 與執行限制。
+services:
+  app:
+    environment:
+      SNS_MEDIA_MCP_ENABLED: "true"

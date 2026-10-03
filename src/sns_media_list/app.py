@@ -1,13 +1,18 @@
 """FastAPI application factory and process-level middleware."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from time import perf_counter
+from uuid import uuid4
 
+import anyio
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.routing import Route
 
 from .api.limits import AttemptLimiter, RequestLimiter
 from .api.middleware import SecurityBoundaryMiddleware
@@ -15,12 +20,15 @@ from .api.routes import build_router
 from .config import Settings, get_settings
 from .errors import AppError
 from .extractor.gallery_dl import GalleryDlRunner
-from .logging_config import configure_logging
+from .logging_config import configure_logging, log_mcp_event
+from .mcp.middleware import McpBoundaryMiddleware, McpRequestRegistry
+from .mcp.server import McpRuntimeFactory, create_mcp_runtime
 from .models import ErrorResponse
 from .network.connect_proxy import ConnectProxy
 from .network.dns import DestinationPolicy, resolve_system
 from .network.media_client import MediaClient, MediaDestinationPolicy
 from .security.tokens import TokenStore
+from .services.extraction_coordinator import ExtractionCoordinator
 from .services.extraction_service import ExtractionService
 from .services.thumbnail import ThumbnailGenerator
 from .services.thumbnail_cache import ThumbnailCache, ThumbnailCoordinator
@@ -53,8 +61,9 @@ def create_app(
     extraction_proxy: ConnectProxy | None = None,
     thumbnail_generator: ThumbnailGenerator | None = None,
     thumbnail_coordinator: ThumbnailCoordinator | None = None,
+    mcp_factory: McpRuntimeFactory | None = None,
 ) -> FastAPI:
-    """Create and configure the FastAPI application instance."""
+    """建立 app-local 核心相依與各 transport 共用的擷取 budget。"""
     configure_logging()
     settings = settings or get_settings()
     if extraction_proxy is None:
@@ -89,11 +98,18 @@ def create_app(
         max_downloads=settings.max_downloads,
         max_downloads_per_client=settings.max_downloads_per_client,
     )
+    extraction_coordinator = ExtractionCoordinator(extraction_service, limiter=limiter)
     attempt_limiter = AttemptLimiter(
         extraction_limit=settings.rate_limit_extraction_attempts,
         media_limit=settings.rate_limit_media_attempts,
         window_seconds=settings.rate_limit_window_seconds,
         max_identities=settings.rate_limit_identity_capacity,
+        reserve_mcp_cancellation=settings.mcp_enabled,
+    )
+    mcp_runtime = (
+        (mcp_factory or create_mcp_runtime)(extraction_coordinator, settings)
+        if settings.mcp_enabled
+        else None
     )
     thumbnail_generator = thumbnail_generator or ThumbnailGenerator(
         input_bytes=settings.thumbnail_input_bytes,
@@ -112,18 +128,53 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
-        """Start the extractor egress guard and close it during shutdown."""
+        """Parent 擁有 proxy／MCP 啟停，任何部分失敗仍清理已取得資源。"""
         server = await extraction_proxy.serve(
             settings.extraction_proxy_host,
             settings.extraction_proxy_port,
         )
         application.state.extraction_proxy_server = server
         try:
-            yield
+            if mcp_runtime is None:
+                yield
+            else:
+                started = perf_counter()
+                entered = False
+                request_id = uuid4().hex
+                try:
+                    async with asyncio.timeout(None) as shutdown_deadline:
+                        async with mcp_runtime.run():
+                            entered = True
+                            log_mcp_event(
+                                "mcp_server_started",
+                                request_id=request_id,
+                                platform=None,
+                                outcome="success",
+                                duration_ms=(perf_counter() - started) * 1000,
+                            )
+                            try:
+                                yield
+                            finally:
+                                shutdown_deadline.reschedule(asyncio.get_running_loop().time() + 5)
+                except BaseException:
+                    if not entered:
+                        log_mcp_event(
+                            "mcp_server_failed",
+                            request_id=request_id,
+                            platform=None,
+                            outcome="failed",
+                            reason_code="startup_failed",
+                            duration_ms=(perf_counter() - started) * 1000,
+                        )
+                    raise
         finally:
             server.close()
-            await server.wait_closed()
-            await extraction_proxy.close_clients()
+            with anyio.CancelScope(shield=True):
+                async with asyncio.timeout(5):
+                    try:
+                        await server.wait_closed()
+                    finally:
+                        await extraction_proxy.close_clients()
 
     application = FastAPI(
         title="SNS Media List",
@@ -133,6 +184,7 @@ def create_app(
     )
     application.state.limiter = limiter
     application.state.attempt_limiter = attempt_limiter
+    application.state.mcp_runtime = mcp_runtime
     application.state.thumbnail_cache = thumbnail_cache
     application.state.thumbnail_coordinator = thumbnail_coordinator
 
@@ -172,6 +224,7 @@ def create_app(
             extraction_service,
             media_client,
             limiter=limiter,
+            extraction_coordinator=extraction_coordinator,
             trusted_proxy_cidrs=settings.trusted_proxy_cidrs,
             media_response_timeout_seconds=settings.media_response_timeout_seconds,
             thumbnail_generator=thumbnail_generator,
@@ -184,6 +237,33 @@ def create_app(
         body_limit_bytes=settings.extraction_body_limit_bytes,
         attempt_limiter=attempt_limiter,
         trusted_proxy_cidrs=settings.trusted_proxy_cidrs,
+    )
+
+    if mcp_runtime is not None:
+        application.router.routes.append(
+            Route(
+                "/mcp",
+                endpoint=McpBoundaryMiddleware(
+                    mcp_runtime.http_app,
+                    body_limit_bytes=settings.mcp_max_request_body_bytes,
+                    attempt_limiter=attempt_limiter,
+                    request_registry=mcp_runtime.request_registry or McpRequestRegistry(),
+                ),
+            )
+        )
+    else:
+        application.router.routes.append(
+            Route(
+                "/mcp",
+                endpoint=JSONResponse(status_code=404, content={"detail": "Not Found"}),
+            )
+        )
+    # 保留 MCP namespace 的 404 語意，避免 static catch-all 將錯誤 POST 路徑變成 405。
+    application.router.routes.append(
+        Route(
+            "/mcp/{path:path}",
+            endpoint=JSONResponse(status_code=404, content={"detail": "Not Found"}),
+        )
     )
 
     static_dir = Path(__file__).parent / "static"
