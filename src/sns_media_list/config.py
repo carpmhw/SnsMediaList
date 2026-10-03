@@ -2,10 +2,12 @@
 
 import ipaddress
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,6 +37,11 @@ class Settings(BaseSettings):
     rate_limit_media_attempts: int = Field(default=120, gt=0, le=120)
     rate_limit_identity_capacity: int = Field(default=2_048, gt=0, le=2_048)
     generated_previews_enabled: bool = False
+    mcp_enabled: bool = False
+    mcp_max_request_body_bytes: int = Field(default=65_536, gt=0, le=1_048_576)
+    mcp_allowed_hosts: tuple[str, ...] = Field(default=(), max_length=32)
+    mcp_allowed_origins: tuple[str, ...] = Field(default=(), max_length=32)
+    public_base_url: str | None = None
     thumbnail_input_bytes: int = Field(default=32_000_000, gt=0, le=32_000_000)
     thumbnail_output_bytes: int = Field(default=1_000_000, gt=0, le=1_000_000)
     thumbnail_timeout_seconds: float = Field(default=10.0, gt=0, le=10.0)
@@ -46,6 +53,68 @@ class Settings(BaseSettings):
     extraction_proxy_port: int = Field(default=8765, ge=1, le=65535)
     instagram_cookie_file: str | None = None
     x_cookie_file: str | None = None
+
+    @field_validator("public_base_url")
+    @classmethod
+    def validate_public_base_url(cls, value: str | None) -> str | None:
+        """只接受明確 HTTP(S) origin，先拒絕非法原文，再移除單一 root slash。"""
+        if value is None:
+            return None
+        message = "public base URL must be an exact HTTP(S) origin"
+        if (
+            not value
+            or any(ord(character) <= 32 or ord(character) >= 127 for character in value)
+            or any(character in value for character in "?#\\")
+        ):
+            raise ValueError(message)
+        try:
+            parsed = urlsplit(value)
+            if (
+                parsed.scheme not in {"http", "https"}
+                or parsed.path not in {"", "/"}
+                or value != f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+            ):
+                raise ValueError(message)
+            _validate_mcp_authority(parsed.netloc)
+            if parsed.netloc.startswith("[") and not re.fullmatch(
+                r"\[[0-9A-Fa-f:.]+\](?::[0-9]+)?", parsed.netloc
+            ):
+                raise ValueError(message)
+        except ValueError:
+            raise ValueError(message) from None
+        return value.removesuffix("/")
+
+    @field_validator("mcp_allowed_hosts")
+    @classmethod
+    def validate_mcp_hosts(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """只接受精確 authority，不允許 wildcard、憑證或 URL 路徑。"""
+        for authority in value:
+            _validate_mcp_authority(authority)
+        return value
+
+    @field_validator("mcp_allowed_origins")
+    @classmethod
+    def validate_mcp_origins(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """限定精確 HTTP(S) origin，避免意外接受任意瀏覽器來源。"""
+        for origin in value:
+            parsed = urlsplit(origin)
+            if parsed.scheme not in {"http", "https"} or origin != (
+                f"{parsed.scheme}://{parsed.netloc}"
+            ):
+                raise ValueError("MCP origins must be exact HTTP(S) origins")
+            _validate_mcp_authority(parsed.netloc)
+        return value
+
+    @model_validator(mode="after")
+    def validate_mcp_cancellation_budget(self) -> "Settings":
+        """驗證 MCP 取消額度與自訂 allowlist 間的必要相依。"""
+        if self.mcp_enabled and self.rate_limit_extraction_attempts < 2:
+            raise ValueError(
+                "MCP requires at least two extraction attempts for POST and cancellation budgets"
+            )
+        if self.mcp_allowed_origins and not self.mcp_allowed_hosts:
+            raise ValueError("custom MCP origins require explicit allowed hosts")
+        return self
 
     @field_validator("trusted_proxy_cidrs")
     @classmethod
@@ -85,3 +154,23 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Return the process-wide validated settings instance."""
     return Settings()
+
+
+def _validate_mcp_authority(value: str) -> None:
+    """驗證 ASCII DNS／IP authority 與可選明確 port，不建立網路連線。"""
+    if (
+        not value
+        or len(value) > 260
+        or any(ord(character) <= 32 or ord(character) >= 127 for character in value)
+        or any(character in value for character in "*?/#@%\\")
+        or value.endswith(":")
+    ):
+        raise ValueError("MCP hosts must be exact host authorities")
+    parsed = urlsplit(f"//{value}")
+    host, port = parsed.hostname, parsed.port
+    if not host or parsed.netloc != value or port is not None and not 1 <= port <= 65535:
+        raise ValueError("MCP hosts must be exact host authorities")
+    if ":" in host:
+        ipaddress.IPv6Address(host)
+    elif not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", host):
+        raise ValueError("MCP hosts must be exact DNS or IP hosts")

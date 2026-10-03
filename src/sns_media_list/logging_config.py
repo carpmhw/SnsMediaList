@@ -5,6 +5,7 @@ import logging
 import math
 import re
 import sys
+from collections.abc import Mapping
 from typing import Any, cast
 
 from .errors import (
@@ -16,6 +17,14 @@ from .errors import (
 _TOKEN_PATH = re.compile(r"(/api/media/)[^/?\s]+(/(?:preview|download))")
 _REQUEST_ID = re.compile(r"(?:[0-9a-f]{32}|unknown)")
 _EXTRACTION_EVENTS = frozenset({"extraction_complete", "extraction_failed"})
+_MCP_OUTCOMES = {
+    "mcp_server_started": "success",
+    "mcp_server_failed": "failed",
+    "mcp_extraction_started": "started",
+    "mcp_extraction_complete": "success",
+    "mcp_extraction_failed": "failed",
+    "mcp_extraction_aborted": "aborted",
+}
 EXTRACTION_REASON_CODES = frozenset(
     {
         "invalid_url",
@@ -46,6 +55,7 @@ _EVENT_NAMES = frozenset(
         "media_download_resume_succeeded",
         "media_download_resume_failed",
     }
+    | _MCP_OUTCOMES.keys()
 )
 _EXTRACTOR_DIAGNOSTIC_FIELDS = (
     "extractor_diagnostic_source",
@@ -81,6 +91,11 @@ class SafeEventFormatter(logging.Formatter):
         if not isinstance(event, dict):
             return ""
         fields = {key: value for key, value in event.items() if key in _EVENT_FIELDS}
+        if record.msg in _MCP_OUTCOMES:
+            mcp_fields = _validated_mcp_fields(record.msg, fields)
+            if mcp_fields is None:
+                return ""
+            return json.dumps({"event": record.msg, **mcp_fields}, allow_nan=False)
         if record.msg in _EXTRACTION_EVENTS:
             validated_fields = _validated_extraction_fields(record.msg, fields)
             if validated_fields is None:
@@ -247,6 +262,82 @@ class PrivacyFilter(logging.Filter):
         record.msg = message
         record.args = ()
         return True
+
+
+def _validated_mcp_fields(
+    event_name: str, fields: Mapping[str, object]
+) -> dict[str, object] | None:
+    """依事件驗證 MCP enum／有限數值，回傳不含任何私有 extra 的新字典。"""
+    if event_name not in _MCP_OUTCOMES or fields.get("outcome") != _MCP_OUTCOMES[event_name]:
+        return None
+    platform = fields.get("platform")
+    duration = fields.get("duration_ms")
+    if platform is not None and (type(platform) is not str or platform not in {"instagram", "x"}):
+        return None
+    if type(duration) not in {int, float}:
+        return None
+    numeric_duration = cast(int | float, duration)
+    try:
+        if numeric_duration < 0 or not math.isfinite(numeric_duration):
+            return None
+    except OverflowError:
+        return None
+    request_id = fields.get("request_id")
+    if type(request_id) is not str or _REQUEST_ID.fullmatch(request_id) is None:
+        request_id = "unknown"
+    result: dict[str, object] = {
+        "request_id": request_id,
+        "platform": platform,
+        "outcome": _MCP_OUTCOMES[event_name],
+        "duration_ms": numeric_duration,
+    }
+    if event_name == "mcp_extraction_complete":
+        count = fields.get("item_count")
+        if type(count) is not int or not 0 <= count <= 20:
+            return None
+        result["item_count"] = count
+    elif event_name in {"mcp_extraction_failed", "mcp_extraction_aborted", "mcp_server_failed"}:
+        reason = fields.get("reason_code")
+        allowed = (
+            EXTRACTION_REASON_CODES | {"invalid_request"}
+            if event_name == "mcp_extraction_failed"
+            else {"cancelled"}
+            if event_name == "mcp_extraction_aborted"
+            else {"startup_failed"}
+        )
+        if type(reason) is not str or reason not in allowed:
+            return None
+        result["reason_code"] = reason
+    return result
+
+
+def build_mcp_event(event_name: str, **fields: object) -> dict[str, object]:
+    """在建立 event 時先套用相同白名單，未知資料不流向 logger。"""
+    return _validated_mcp_fields(event_name, fields) or {}
+
+
+def log_mcp_event(event_name: str, **fields: object) -> None:
+    """發出受控 MCP JSON 事件，logging 失敗不覆蓋操作結果或取消。"""
+    event = build_mcp_event(event_name, **fields)
+    if event:
+        try:
+            logging.getLogger("sns_media_list.mcp").info(event_name, extra={"event": event})
+        except Exception:
+            pass
+
+
+def configure_mcp_logging() -> None:
+    """隔離 SDK 與既存子 logger handlers，觀測僅用 application 白名單事件。"""
+    names = {
+        "mcp",
+        *(name for name in logging.Logger.manager.loggerDict if name.startswith("mcp.")),
+    }
+    for name in names:
+        logger = logging.getLogger(name)
+        logger.handlers.clear()
+        logger.addHandler(logging.NullHandler())
+        logger.propagate = False
+        logger.disabled = True
 
 
 def configure_logging() -> None:

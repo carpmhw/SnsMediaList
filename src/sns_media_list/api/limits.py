@@ -25,6 +25,14 @@ class _AttemptBucket:
     media: deque[float]
 
 
+@dataclass(slots=True)
+class _McpPostBucket:
+    """固定 MCP aggregate POST window，不與使用者 identity LRU 混用。"""
+
+    regular: deque[float]
+    cancellations: deque[float]
+
+
 class AttemptLimiter:
     """Enforce bounded rolling request-attempt windows per client identity."""
 
@@ -36,8 +44,9 @@ class AttemptLimiter:
         window_seconds: float,
         max_identities: int,
         clock: Callable[[], float] | None = None,
+        reserve_mcp_cancellation: bool = False,
     ) -> None:
-        """Initialize rolling limits with an injectable monotonic clock."""
+        """建立有界 rolling limits、可注入 clock 與可選 MCP 取消保留額度。"""
         if (
             extraction_limit <= 0
             or extraction_limit > _MAX_EXTRACTION_ATTEMPTS
@@ -47,12 +56,19 @@ class AttemptLimiter:
             or max_identities > _MAX_IDENTITIES
         ):
             raise ValueError("attempt limiter configuration exceeds bounded limits")
+        if reserve_mcp_cancellation and extraction_limit < 2:
+            raise ValueError("MCP requires an ordinary POST attempt and a cancellation reservation")
         self.extraction_limit = extraction_limit
         self.media_limit = media_limit
         self.window_seconds = window_seconds
         self.max_identities = max_identities
         self._clock = clock or monotonic
         self._attempts: OrderedDict[str, _AttemptBucket] = OrderedDict()
+        self._mcp_post_attempts = (
+            _McpPostBucket(regular=deque(), cancellations=deque())
+            if reserve_mcp_cancellation
+            else None
+        )
 
     @property
     def identity_count(self) -> int:
@@ -83,13 +99,35 @@ class AttemptLimiter:
             )
         attempts.append(now)
 
+    def acquire_mcp_post(self, *, cancellation: bool) -> None:
+        """即時扣除 aggregate POST attempt，並為 legacy cancel 保留一格。"""
+        bucket = self._mcp_post_attempts
+        if bucket is None:
+            raise RuntimeError("MCP POST accounting is not enabled for this limiter")
+        now = self._clock()
+        self._purge_expired(now)
+        attempts = bucket.cancellations if cancellation else bucket.regular
+        limit = 1 if cancellation else self.extraction_limit - 1
+        if len(attempts) >= limit:
+            retry_after = max(1, math.ceil(attempts[0] + self.window_seconds - now))
+            raise AppError(
+                "local_rate_limited",
+                "Too many MCP requests were attempted recently.",
+                retry_after=retry_after,
+            )
+        attempts.append(now)
+
     def _purge_expired(self, now: float) -> None:
-        """Remove identities whose extraction and media timestamps all expired."""
+        """移除已過期的 client identity，並清理固定 MCP bucket 的時間戳。"""
         for client_ip, bucket in list(self._attempts.items()):
             self._prune_attempts(bucket.extraction, now)
             self._prune_attempts(bucket.media, now)
             if not bucket.extraction and not bucket.media:
                 del self._attempts[client_ip]
+        mcp_bucket = self._mcp_post_attempts
+        if mcp_bucket is not None:
+            self._prune_attempts(mcp_bucket.regular, now)
+            self._prune_attempts(mcp_bucket.cancellations, now)
 
     def _prune_attempts(self, attempts: deque[float], now: float) -> None:
         """Discard timestamps outside the configured rolling window."""

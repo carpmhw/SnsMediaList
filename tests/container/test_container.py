@@ -60,6 +60,14 @@ def test_ffmpeg_license_notice_is_shipped() -> None:
     assert "ffmpeg.org" in notice
 
 
+def test_pcre2_license_notice_is_shipped() -> None:
+    """確認 pinned Alpine PCRE2 runtime 的 BSD notice 隨 image 提供。"""
+    notice = (PROJECT_ROOT / "LICENSES" / "pcre2.txt").read_text()
+    assert "pcre2 10.49-r0" in notice
+    assert "BSD-3-Clause WITH PCRE2-exception" in notice
+    assert "pcre.org" in notice
+
+
 def test_gallery_license_notice_is_shipped() -> None:
     """確認授權 notice 版本與專案精確 pin 一致並納入 image context。"""
     notice = (PROJECT_ROOT / "LICENSES" / "gallery-dl.txt").read_text()
@@ -126,6 +134,33 @@ def test_compose_documents_bounded_runtime_settings() -> None:
         "SNS_MEDIA_THUMBNAIL_MAX_EDGE",
     ):
         assert setting in compose
+
+
+def test_mcp_override_preserves_hardened_single_service_boundary() -> None:
+    """MCP 預設關閉，啟用 overlay 只能更改 environment，不新增 ingress 或 storage。"""
+    compose = (PROJECT_ROOT / "docker-compose.yaml").read_text()
+    overlay = (PROJECT_ROOT / "docker-compose.mcp.yaml").read_text()
+    assert 'SNS_MEDIA_MCP_ENABLED: "false"' in compose
+    assert 'SNS_MEDIA_MCP_MAX_REQUEST_BODY_BYTES: "65536"' in compose
+    assert 'SNS_MEDIA_MCP_ENABLED: "true"' in overlay
+    for forbidden in ("ports:", "volumes:", "command:", "user:", "read_only:"):
+        assert forbidden not in overlay
+    assert "127.0.0.1:${SNS_MEDIA_HOST_PORT:-8000}:8000" in compose
+
+
+def test_mcp_proxy_keeps_auth_and_uses_protocol_sized_streaming_location() -> None:
+    """MCP 專屬 location 不放寬 REST body，且沿用可信驗證／無敏感 access log。"""
+    nginx = (PROJECT_ROOT / "deploy/nginx/sns-media-list.conf").read_text()
+    mcp = nginx.partition("location = /mcp {")[2].partition("\n    }")[0]
+    assert mcp
+    assert "client_max_body_size 64k;" in mcp
+    assert "proxy_buffering off;" in mcp
+    assert "proxy_read_timeout 300s;" in mcp
+    assert "access_log off;" in mcp
+    assert 'proxy_set_header Authorization "";' in mcp
+    assert 'proxy_set_header Cookie "";' in mcp
+    assert "auth_basic_user_file" in nginx
+    assert "client_max_body_size 4k;" in nginx.partition("location = /mcp")[0]
 
 
 def test_platform_auth_overrides_mount_independent_read_only_cookie_files() -> None:

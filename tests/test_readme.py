@@ -100,3 +100,29 @@ def test_readme_uses_project_icon_and_documents_preview_default() -> None:
     assert "src/sns_media_list/static/favicon.svg" in readme
     assert "預設使用本機 placeholder" in readme
     assert "明確啟用" in readme
+
+
+def test_readme_documents_explicit_mcp_activation_and_media_origins() -> None:
+    """README 說明明確啟用、可選 origin、REST 相容與可信存取邊界。"""
+    section = (
+        (PROJECT_ROOT / "README.md").read_text().partition("## MCP Server")[2].partition("\n## ")[0]
+    )
+    for text in (
+        "預設關閉",
+        "docker-compose.mcp.yaml",
+        "Streamable HTTP",
+        "extract_media",
+        "/api/media/",
+        "相對",
+        "Cookie",
+        "operator",
+        "10 個 POST",
+        "驗證",
+        "SNS_MEDIA_PUBLIC_BASE_URL",
+        "絕對媒體連結",
+        "REST API 無論是否設定都維持相對連結",
+        "deployment-owned override",
+        "path prefix",
+    ):
+        assert text in section
+    assert "SNS_MEDIA_MCP_ENABLED=true docker compose" not in section

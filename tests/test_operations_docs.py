@@ -6,6 +6,41 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parents[1]
 
 
+def test_operations_documents_mcp_settings_and_real_override_rollback() -> None:
+    """所有 MCP 設定、allowlist、POST budget 與可用 rollback 都有操作說明。"""
+    guide = (PROJECT_ROOT / "OPERATIONS.md").read_text()
+    section = guide.partition("## MCP deployment")[2].partition("\n## ")[0]
+    for text in (
+        "SNS_MEDIA_MCP_ENABLED",
+        "SNS_MEDIA_MCP_MAX_REQUEST_BODY_BYTES",
+        "SNS_MEDIA_MCP_ALLOWED_HOSTS",
+        "SNS_MEDIA_MCP_ALLOWED_ORIGINS",
+        "SNS_MEDIA_PUBLIC_BASE_URL",
+        "canonical external origin",
+        "192.168.50.14:8000",
+        "deployment-owned override",
+        "公開 URL path prefix 不受支援",
+        "REST API 一律保留相對連結",
+        "三者不互相推導",
+        "不新增 public origin、media URL 或 token 日誌",
+        "32",
+        "Host",
+        "Origin",
+        "421",
+        "403",
+        "10 個 MCP POST",
+        "initialize",
+        "scripts/mcp_smoke.py",
+        "docker-compose.mcp.yaml",
+        "rollback",
+        "Cookie",
+        "相同 project",
+        "session",
+        "固定",
+    ):
+        assert text in section
+
+
 def test_operations_guide_preserves_translated_safety_and_commands() -> None:
     """Verify translated operator guidance retains critical deployment contracts."""
     guide = (PROJECT_ROOT / "OPERATIONS.md").read_text(encoding="utf-8")

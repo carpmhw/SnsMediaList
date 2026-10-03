@@ -9,11 +9,13 @@ import socket
 import subprocess
 import sys
 import time
+import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parents[1]
 COMPOSE_FILE = PROJECT_ROOT / "docker-compose.yaml"
+MCP_COMPOSE_FILE = PROJECT_ROOT / "docker-compose.mcp.yaml"
 
 
 def run_command(
@@ -103,6 +105,65 @@ def verify_runtime_hardening(container_id: str) -> None:
         raise RuntimeError("container PID limit is not bounded")
 
 
+def verify_mcp_disabled(container_id: str) -> None:
+    """確認 base image 的 MCP GET／POST 均為 404，不會自動增加能力。"""
+    exec_python(
+        container_id,
+        """from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+for method in ('GET', 'POST'):
+    request = Request('http://127.0.0.1:8000/mcp', method=method,
+                      data=b'{}' if method == 'POST' else None)
+    try:
+        urlopen(request, timeout=5).close()
+    except HTTPError as error:
+        assert error.code == 404
+    else:
+        raise AssertionError('disabled MCP is reachable')
+""",
+    )
+
+
+def verify_mcp_runtime(container_id: str) -> None:
+    """依 source pins 比對 container SDK／Pydantic，並輸出非敏感 runtime 版本。"""
+    dependencies = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())["project"][
+        "dependencies"
+    ]
+    expected = {
+        name: next(
+            dependency.split("==", 1)[1]
+            for dependency in dependencies
+            if dependency.startswith(f"{pin}==")
+        )
+        for name, pin in (("mcp", "mcp[cli]"), ("pydantic", "pydantic"))
+    }
+    source = f"""from importlib.metadata import version
+expected = {expected!r}
+assert all(version(name) == pin for name, pin in expected.items())
+print('MCP runtime:', ', '.join(name + '==' + version(name) for name in expected))
+"""
+    result = run_command(["docker", "exec", container_id, "python", "-c", source])
+    print(result.stdout, end="")
+
+
+def verify_mcp_protocol(environment: Mapping[str, str]) -> None:
+    """對隔離 candidate 執行現代／legacy smoke，不傳入 live extraction URL。"""
+    endpoint = f"http://127.0.0.1:{environment['SNS_MEDIA_HOST_PORT']}/mcp"
+    for mode in ("auto", "legacy"):
+        result = run_command(
+            [
+                sys.executable,
+                str(PROJECT_ROOT / "scripts" / "mcp_smoke.py"),
+                endpoint,
+                "--mode",
+                mode,
+            ],
+            env=environment,
+            timeout=90,
+        )
+        print(result.stdout, end="")
+
+
 def main() -> int:
     """使用獨立 image tag 建置、啟動、檢查、重啟並停止 smoke service。"""
     if shutil.which("docker") is None:
@@ -131,7 +192,9 @@ def main() -> int:
             ],
             env=environment,
         ).stdout.strip()
-        print(f"container smoke image ID and repository digests: {image_identity}")
+        print(
+            f"container smoke image {image_reference} ID and repository digests: {image_identity}"
+        )
         run_command([*compose, "up", "-d"], env=environment)
         container_id = run_command([*compose, "ps", "-q", "app"], env=environment).stdout.strip()
         if not container_id:
@@ -145,6 +208,8 @@ def main() -> int:
         verify_runtime_hardening(container_id)
         verify_ffmpeg(container_id)
         verify_uvicorn(container_id)
+        verify_mcp_runtime(container_id)
+        verify_mcp_disabled(container_id)
         exec_python(
             container_id,
             """import errno
@@ -175,6 +240,27 @@ assert not Path('/app/media').exists()
         ).stdout.strip()
         if state != "exited":
             raise RuntimeError(f"graceful shutdown left container in state {state}")
+
+        mcp_compose = [*compose, "-f", str(MCP_COMPOSE_FILE)]
+        run_command([*mcp_compose, "config", "--quiet"], env=environment)
+        run_command([*mcp_compose, "up", "-d", "--no-build"], env=environment)
+        container_id = run_command(
+            [*mcp_compose, "ps", "-q", "app"], env=environment
+        ).stdout.strip()
+        wait_for_health(mcp_compose, container_id)
+        verify_network_binding(container_id)
+        verify_runtime_hardening(container_id)
+        verify_mcp_runtime(container_id)
+        verify_mcp_protocol(environment)
+        run_command([*mcp_compose, "restart", "app"], env=environment)
+        wait_for_health(mcp_compose, container_id)
+        verify_mcp_protocol(environment)
+        run_command([*mcp_compose, "stop", "-t", "10"], env=environment)
+        state = run_command(
+            ["docker", "inspect", "-f", "{{.State.Status}}", container_id]
+        ).stdout.strip()
+        if state != "exited":
+            raise RuntimeError("MCP graceful shutdown left container running")
         diagnostic_environment = environment.copy()
         diagnostic_environment["SNS_MEDIA_STORY_DIAGNOSTICS_IMAGE"] = image_reference
         diagnostics_result = run_command(
