@@ -8,8 +8,10 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
+import pytest
 from mcp import Client
 
 from tests.integration.test_extraction_diagnostics import _stop_uvicorn
@@ -17,8 +19,8 @@ from tests.integration.test_extraction_diagnostics import _stop_uvicorn
 ROOT = Path(__file__).parents[2]
 
 
-def start_server() -> tuple[subprocess.Popen[str], str]:
-    """以動態 loopback port 啟動正式 logging 的 fake-backed Uvicorn。"""
+def start_server(public_base_url: str | None = None) -> tuple[subprocess.Popen[str], str]:
+    """以動態 loopback port 與指定 public origin 啟動正式 logging 的替身 app。"""
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
@@ -26,6 +28,9 @@ def start_server() -> tuple[subprocess.Popen[str], str]:
     environment["PYTHONPATH"] = os.pathsep.join((str(ROOT), str(ROOT / "src")))
     environment.pop("SNS_MEDIA_INSTAGRAM_COOKIE_FILE", None)
     environment.pop("SNS_MEDIA_X_COOKIE_FILE", None)
+    environment.pop("SNS_MEDIA_PUBLIC_BASE_URL", None)
+    if public_base_url is not None:
+        environment["SNS_MEDIA_PUBLIC_BASE_URL"] = public_base_url
     process = subprocess.Popen(
         [
             sys.executable,
@@ -65,10 +70,12 @@ def start_server() -> tuple[subprocess.Popen[str], str]:
     raise AssertionError("server startup timed out: " + _stop_uvicorn(process))
 
 
-async def test_subprocess_sdk_and_application_logs_do_not_leak() -> None:
-    """成功／分類錯誤／未知例外／malformed／取消均無原始敏感日誌。"""
-    process, origin = start_server()
+@pytest.mark.parametrize("base", [None, "https://SENSITIVE-BASE.example"])
+async def test_subprocess_sdk_and_application_logs_do_not_leak(base: str | None) -> None:
+    """有無 public origin 的成功、錯誤與取消均不輸出 URL、token 或敏感日誌。"""
+    process, origin = start_server(base)
     urls = [f"https://x.com/SENSITIVE_USER/status/{index}/" for index in range(1, 5)]
+    media_links: list[str] = []
     try:
         async with Client(f"{origin}/mcp", mode="2026-07-28", cache=None) as mcp:
             assert [tool.name for tool in (await mcp.list_tools()).tools] == ["extract_media"]
@@ -81,6 +88,9 @@ async def test_subprocess_sdk_and_application_logs_do_not_leak() -> None:
                     assert "SENSITIVE" not in result.model_dump_json()
                 else:
                     assert result.is_error is False
+                    item = result.structured_content["media"][0]
+                    media_links.extend((item["preview_url"], item["download_url"]))
+                    assert all(link.startswith(f"{base or ''}/api/media/") for link in media_links)
             invalid = await mcp.call_tool(
                 "extract_media", {"url": urls[0], "SENSITIVE_COOKIE": "secret"}
             )
@@ -127,6 +137,8 @@ async def test_subprocess_sdk_and_application_logs_do_not_leak() -> None:
     assert "SENSITIVE" not in output
     assert "FAKE_PRIVATE_SOURCE_SENTINEL" not in output
     assert "Traceback" not in output
+    assert all(link not in output for link in media_links)
+    assert all(urlsplit(link).path.split("/")[3] not in output for link in media_links)
     events = [json.loads(line) for line in output.splitlines() if line.startswith("{")]
     names = {item["event"] for item in events}
     assert {

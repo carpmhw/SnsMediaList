@@ -104,3 +104,98 @@ def test_custom_mcp_origins_require_explicit_hosts() -> None:
     """自訂 Origin 卻沒有 Host 時直接拒絕錯誤配置，而非啟動後永遠 421。"""
     with pytest.raises(ValidationError, match="hosts"):
         Settings(mcp_allowed_origins=("https://mcp.example",))
+
+
+def test_public_base_url_is_optional_and_loaded_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """公開 origin 預設未設定，環境載入後不自動啟用 MCP 或修改 allowlists。"""
+    monkeypatch.delenv("SNS_MEDIA_PUBLIC_BASE_URL", raising=False)
+    assert Settings().public_base_url is None
+    monkeypatch.setenv("SNS_MEDIA_PUBLIC_BASE_URL", "https://public.example/")
+    settings = Settings()
+    assert settings.public_base_url == "https://public.example"
+    assert settings.mcp_enabled is False
+    assert settings.mcp_allowed_hosts == ()
+    assert settings.mcp_allowed_origins == ()
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://192.168.50.14:8000",
+        "https://sns-media.example.internal",
+        "https://sns.example.internal:8443",
+        "http://[2001:db8::10]:8000",
+        "http://localhost:8000",
+        "https://Public.Example:443",
+    ],
+)
+@pytest.mark.parametrize("trailing_slash", ["", "/"])
+def test_public_base_url_accepts_exact_origins(origin: str, trailing_slash: str) -> None:
+    """只移除 root slash，保留明確 scheme、authority 大小寫與 port。"""
+    assert Settings(public_base_url=origin + trailing_slash).public_base_url == origin
+
+
+def test_public_base_url_and_mcp_allowlists_are_independent() -> None:
+    """Incoming allowlists 與 outgoing origin 各自保持 operator 的設定。"""
+    settings = Settings(
+        public_base_url="https://public.example",
+        mcp_allowed_hosts=("ingress.example:8443",),
+        mcp_allowed_origins=("https://ingress.example:8443",),
+    )
+    assert settings.public_base_url == "https://public.example"
+    assert settings.mcp_allowed_hosts == ("ingress.example:8443",)
+    assert settings.mcp_allowed_origins == ("https://ingress.example:8443",)
+    assert Settings(mcp_allowed_hosts=("ingress.example",)).public_base_url is None
+    with pytest.raises(ValidationError, match="hosts"):
+        Settings(
+            public_base_url="https://public.example",
+            mcp_allowed_origins=("https://ingress.example",),
+        )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "ftp://example.com",
+        "file:///tmp/test",
+        "example.com",
+        "//example.com",
+        "https://",
+        "https:///example.com",
+        "https://user:pass@example.com",
+        "https://example.com@evil.example",
+        "https://@example.com",
+        "https://*.example.com",
+        "https://example.com/path",
+        "https://example.com/%2f",
+        "https://example.com//",
+        "https://example.com?x=1",
+        "https://example.com?",
+        "https://example.com/#fragment",
+        "https://example.com/#",
+        " https://example.com",
+        "https://example.com ",
+        "https://exa\tmple.com",
+        "https://example.com\r\n",
+        "https://example.com\x00",
+        "https://example.com\x7f",
+        "https://example.com\\evil",
+        "https://例子.example",
+        "https://%65xample.com",
+        "https://bad_host.example",
+        "https://example.com:",
+        "https://example.com:abc",
+        "https://example.com:0",
+        "https://example.com:65536",
+        "http://2001:db8::10:8000",
+        "http://[not-ipv6]:8000",
+        "http://[2001:db8::10",
+    ],
+)
+def test_public_base_url_rejects_non_origins(value: str) -> None:
+    """拒絕非 origin 與 parser 可能容忍的原始非法字元，不進行網路探測。"""
+    with pytest.raises(ValidationError):
+        Settings(public_base_url=value)

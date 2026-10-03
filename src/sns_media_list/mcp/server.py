@@ -48,7 +48,7 @@ def create_mcp_server(
     configure_mcp_logging()
     tool = Tool(
         name="extract_media",
-        description="分析一個支援的 Instagram／X 單篇 URL，回傳 metadata 與短效相對媒體連結。",
+        description="分析一個支援的 Instagram／X 單篇 URL，回傳 metadata 與短效媒體連結。",
         input_schema=McpExtractionInput.model_json_schema(),
         output_schema=McpExtractionResult.model_json_schema(),
     )
@@ -64,7 +64,7 @@ def create_mcp_server(
         context: ServerRequestContext[object, object],
         params: CallToolRequestParams,
     ) -> CallToolResult:
-        """驗證 tool 名稱後交給安全 adapter，僅採用服務端 correlation ID。"""
+        """交給安全 adapter 並傳入 app-local origin，僅採用服務端 correlation ID。"""
         if params.name != "extract_media":
             return error_result("invalid_request")
         request = context.request
@@ -79,7 +79,12 @@ def create_mcp_server(
             else False
         )
         try:
-            return await execute_tool(coordinator, params.arguments or {}, request_id=request_id)
+            return await execute_tool(
+                coordinator,
+                params.arguments or {},
+                request_id=request_id,
+                public_base_url=settings.public_base_url,
+            )
         finally:
             if registered and request_registry is not None:
                 request_registry.finish(session_id, context.request_id)

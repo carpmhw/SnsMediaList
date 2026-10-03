@@ -47,6 +47,44 @@ class FakeProxy:
         self.events.append("proxy_close_clients")
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("base", ["http://192.168.50.14:8000", "https://public.example"])
+async def test_public_origin_keeps_rest_and_static_contracts(enabled: bool, base: str) -> None:
+    """公開 origin 不改 REST links、錯誤、UI 或純 liveness，亦不探測外部位址。"""
+    settings = Settings(mcp_enabled=enabled, public_base_url=base)
+    service, extractor = make_service(settings=settings)
+    app = create_app(settings=settings, extraction_service=service)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://localhost:8000"
+    ) as client:
+        assert (await client.get("/healthz")).json() == {"status": "ok"}
+        assert (await client.get("/")).status_code == 200
+        assert (await client.get("/app.js")).status_code == 200
+        assert (await client.get("/placeholder.svg")).status_code == 200
+        assert extractor.calls == 0
+        response = await client.post("/api/extractions", json={"url": X_URL})
+        assert response.status_code == 200
+        public = response.json()
+        assert set(public) == {
+            "platform",
+            "post_url",
+            "author",
+            "description",
+            "unavailable_media_count",
+            "media",
+        }
+        item = public["media"][0]
+        assert item["preview_url"].startswith("/api/media/")
+        assert item["preview_url"].endswith("/preview")
+        assert item["download_url"].startswith("/api/media/")
+        assert item["download_url"].endswith("/download")
+        assert base not in response.text
+        rejected = await client.post("/api/extractions", json={"url": "https://localhost/"})
+        assert rejected.status_code == 400
+        assert rejected.json()["code"] == "unsupported_url"
+    assert extractor.calls == 1
+
+
 async def test_disabled_mcp_does_not_invoke_factory_or_hide_ui() -> None:
     """預設部署不建立 MCP，且 UI／health／REST 照常工作。"""
 

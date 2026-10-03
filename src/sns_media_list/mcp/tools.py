@@ -54,8 +54,9 @@ async def execute_tool(
     arguments: object,
     *,
     request_id: str | None = None,
+    public_base_url: str | None = None,
 ) -> CallToolResult:
-    """嚴格驗證 input，透過共享 budget 擷取，再產生安全且有唯一 terminal 的結果。"""
+    """以共享 budget 擷取並投影明確 origin，維持安全結果與唯一 terminal。"""
     request_id = request_id or uuid4().hex
     started = perf_counter()
     platform: str | None = None
@@ -75,7 +76,9 @@ async def execute_tool(
             reason = "invalid_request"
             return error_result(reason)
         platform = platform_for_url(payload.url)
-        result = to_mcp_result(await coordinator.execute(payload.url, "mcp"))
+        result = to_mcp_result(
+            await coordinator.execute(payload.url, "mcp"), public_base_url=public_base_url
+        )
         public = result.model_dump(mode="json")
         response = CallToolResult(
             content=[TextContent(type="text", text=json.dumps(public, ensure_ascii=False))],

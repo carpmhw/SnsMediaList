@@ -36,6 +36,9 @@ def test_mcp_builder_and_formatter_allow_only_safe_fields(
         **optional,
         cookie="SENSITIVE",
         url="SENSITIVE",
+        public_base_url="https://SENSITIVE_BASE.example",
+        preview_url="https://SENSITIVE_BASE.example/api/media/SENSITIVE_TOKEN/preview",
+        download_url="https://SENSITIVE_BASE.example/api/media/SENSITIVE_TOKEN/download",
     )
     assert "SENSITIVE" not in json.dumps(fields)
     record = logging.LogRecord("sns_media_list", logging.INFO, "", 0, event, (), None)
@@ -44,6 +47,9 @@ def test_mcp_builder_and_formatter_allow_only_safe_fields(
         "source_url": "SENSITIVE",
         "token": "SENSITIVE",
         "failure_stage": "SENSITIVE",
+        "public_base_url": "https://SENSITIVE_BASE.example",
+        "preview_url": "https://SENSITIVE_BASE.example/api/media/SENSITIVE_TOKEN/preview",
+        "download_url": "https://SENSITIVE_BASE.example/api/media/SENSITIVE_TOKEN/download",
     }
     serialized = SafeEventFormatter().format(record)
     assert json.loads(serialized)["event"] == event

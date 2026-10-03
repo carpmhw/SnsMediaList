@@ -78,3 +78,65 @@ def test_mcp_mapper_preserves_public_metadata_and_relative_paths() -> None:
         "preview_url",
         "download_url",
     }
+
+
+@pytest.mark.parametrize("base", [None, "http://192.168.50.14:8000", "https://sns.example.com"])
+def test_mcp_mapper_projects_only_root_relative_links(base: str | None) -> None:
+    """公開 origin 只投影媒體 path，保留 metadata、順序與原始 response。"""
+    from sns_media_list.mcp.models import to_mcp_result
+
+    public = ExtractionResponse(
+        platform="x",
+        post_url="https://x.com/example/status/1/",
+        unavailable_media_count=2,
+        media=[
+            MediaItem(
+                media_type="image",
+                filename="one.jpg",
+                width=1200,
+                preview_url="/api/media/p/preview",
+                download_url="/api/media/d/download",
+            ),
+            MediaItem(
+                media_type="video",
+                filename="two.mp4",
+                preview_url="/placeholder.svg",
+                download_url="/api/media/d2/download",
+            ),
+        ],
+    )
+    before = public.model_dump(mode="json")
+    mapped = to_mcp_result(public, public_base_url=base).model_dump(mode="json")
+    expected = public.model_dump(mode="json")
+    if base is not None:
+        for item in expected["media"]:
+            item["preview_url"] = base + item["preview_url"]
+            item["download_url"] = base + item["download_url"]
+    assert mapped == expected
+    assert public.model_dump(mode="json") == before
+
+
+@pytest.mark.parametrize(
+    "preview", [None, "https://already.example/media.jpg", "relative.jpg", "//already.example/a"]
+)
+@pytest.mark.parametrize(
+    "download", ["https://already.example/media.mp4", "relative.mp4", "//already.example/b"]
+)
+def test_mcp_mapper_preserves_null_and_non_root_relative_links(
+    preview: str | None, download: str
+) -> None:
+    """既有絕對或 network-path reference 不會被重新串接或解析。"""
+    from sns_media_list.mcp.models import to_mcp_result
+
+    public = ExtractionResponse(
+        platform="x",
+        post_url="https://x.com/example/status/1/",
+        media=[
+            MediaItem(
+                media_type="video", filename="one.mp4", preview_url=preview, download_url=download
+            )
+        ],
+    )
+    item = to_mcp_result(public, public_base_url="https://sns.example.com").media[0]
+    assert item.preview_url == preview
+    assert item.download_url == download

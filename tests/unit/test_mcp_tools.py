@@ -15,6 +15,27 @@ from sns_media_list.services.extraction_coordinator import ExtractionCoordinator
 from tests.mcp_helpers import PRIVATE_SOURCE, X_URL, FakeExtractor, make_service
 
 
+@pytest.mark.parametrize("base", [None, "http://192.168.50.14:8000", "https://public.example"])
+async def test_tool_projects_links_in_text_and_structured_content(base: str | None) -> None:
+    """Tool 將 origin 明確交給 mapper，兩份公開 content 使用同一組連結。"""
+    from sns_media_list.mcp.tools import execute_tool
+
+    service, _ = make_service()
+    result = await execute_tool(
+        ExtractionCoordinator(service, limiter=RequestLimiter(max_extractions=1, max_downloads=1)),
+        {"url": X_URL},
+        public_base_url=base,
+    )
+    assert result.is_error is False
+    assert json.loads(result.content[0].text) == result.structured_content
+    item = result.structured_content["media"][0]
+    assert item["preview_url"].startswith(f"{base or ''}/api/media/")
+    assert item["preview_url"].endswith("/preview")
+    assert item["download_url"].startswith(f"{base or ''}/api/media/")
+    assert item["download_url"].endswith("/download")
+    assert PRIVATE_SOURCE not in result.model_dump_json()
+
+
 @pytest.mark.parametrize("mode", ["legacy", "2026-07-28"])
 @pytest.mark.parametrize(
     "url",

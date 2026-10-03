@@ -3,6 +3,7 @@
 import asyncio
 import json
 from typing import cast
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -25,15 +26,16 @@ from tests.mcp_helpers import (
 
 
 @pytest.mark.parametrize("mode", ["legacy", "2026-07-28"])
-async def test_official_http_client_and_existing_token_api(mode: str) -> None:
-    """SDK Client 使用正式 /mcp，結果可直接透過原 HEAD／GET／preview 取得。"""
+@pytest.mark.parametrize("base", [None, "http://192.168.50.14:8000", "https://public.example"])
+async def test_official_http_client_and_existing_token_api(mode: str, base: str | None) -> None:
+    """SDK 兩個協定世代回傳相對／絕對連結，token path 仍可在本機取得。"""
     now = [0.0]
 
     def clock() -> float:
         """提供 deterministic token 到期控制。"""
         return now[0]
 
-    settings = Settings(mcp_enabled=True)
+    settings = Settings(mcp_enabled=True, public_base_url=base)
     service, extractor = make_service(settings=settings, clock=clock)
     media = FakeMediaClient()
     app = create_app(
@@ -49,26 +51,32 @@ async def test_official_http_client_and_existing_token_api(mode: str) -> None:
             result = await client.call_tool("extract_media", {"url": X_URL})
         assert result.is_error is False
         assert PRIVATE_SOURCE not in result.model_dump_json()
+        assert json.loads(result.content[0].text) == result.structured_content
         item = result.structured_content["media"][0]
+        assert item["preview_url"].startswith(f"{base or ''}/api/media/")
+        assert item["download_url"].startswith(f"{base or ''}/api/media/")
+        preview_path = urlsplit(item["preview_url"]).path
+        download_path = urlsplit(item["download_url"]).path
         async with httpx.AsyncClient(base_url=origin) as http:
-            assert (await http.head(item["download_url"])).status_code == 204
-            download = await http.get(item["download_url"])
+            assert (await http.head(download_path)).status_code == 204
+            download = await http.get(download_path)
             assert download.status_code == 200
             assert download.content == media.body
             assert "attachment" in download.headers["content-disposition"]
-            assert (await http.get(item["preview_url"])).content == media.body
-            wrong_purpose = item["preview_url"].replace("/preview", "/download")
+            assert (await http.get(preview_path)).content == media.body
+            wrong_purpose = preview_path.replace("/preview", "/download")
             assert (await http.get(wrong_purpose)).status_code == 404
             now[0] = 601
-            assert (await http.get(item["download_url"])).status_code == 410
+            assert (await http.get(download_path)).status_code == 410
     assert extractor.calls == 1
     assert all(writer.closed for writer in media.writers)
     assert all("cookie" not in {key.lower() for key in headers} for headers in media.headers)
 
 
-async def test_mcp_token_capacity_failure_is_atomic() -> None:
-    """同一 TokenStore 容量不足時不會留下部分 MCP token。"""
-    settings = Settings(mcp_enabled=True)
+@pytest.mark.parametrize("base", [None, "https://public.example"])
+async def test_mcp_token_capacity_failure_is_atomic(base: str | None) -> None:
+    """有無公開 origin 都不會在容量不足時留下部分 MCP token。"""
+    settings = Settings(mcp_enabled=True, public_base_url=base)
     service, _ = make_service(settings=settings, capacity=1)
     app = create_app(
         settings=settings,
@@ -81,6 +89,77 @@ async def test_mcp_token_capacity_failure_is_atomic() -> None:
     assert result.is_error is True
     assert json.loads(result.content[0].text)["code"] == "capacity_exceeded"
     assert service.token_store.size == 0
+
+
+async def test_absolute_placeholder_uses_existing_static_route() -> None:
+    """缺少 poster 的影片取得絕對 placeholder，解析後仍使用既有 static route。"""
+    settings = Settings(mcp_enabled=True, public_base_url="https://public.example")
+    service, _ = make_service(
+        settings=settings, extractor=FakeExtractor(media_types=("video",), preview=False)
+    )
+    app = create_app(
+        settings=settings,
+        extraction_service=service,
+        extraction_proxy=cast(ConnectProxy, FakeProxy([])),
+    )
+    async with running_app(app) as origin:
+        async with Client(f"{origin}/mcp", cache=None) as client:
+            result = await client.call_tool("extract_media", {"url": X_URL})
+        preview = result.structured_content["media"][0]["preview_url"]
+        assert preview == "https://public.example/placeholder.svg"
+        async with httpx.AsyncClient(base_url=origin) as http:
+            response = await http.get(urlsplit(preview).path)
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("image/svg+xml")
+
+
+@pytest.mark.parametrize("base", [None, "https://public.example"])
+async def test_forwarded_headers_do_not_determine_media_origin(base: str | None) -> None:
+    """合法 localhost Host 下的任意 Forwarded headers 不改變 MCP 媒體 origin。"""
+    settings = Settings(mcp_enabled=True, public_base_url=base)
+    service, _ = make_service(settings=settings)
+    app = create_app(
+        settings=settings,
+        extraction_service=service,
+        extraction_proxy=cast(ConnectProxy, FakeProxy([])),
+    )
+    async with running_app(app) as origin:
+        async with httpx.AsyncClient(base_url=origin) as http:
+            response = await http.post(
+                "/mcp",
+                headers={
+                    "Accept": "application/json, text/event-stream",
+                    "MCP-Protocol-Version": "2026-07-28",
+                    "MCP-Method": "tools/call",
+                    "MCP-Name": "extract_media",
+                    "X-Forwarded-Host": "other.example",
+                    "X-Forwarded-Proto": "http",
+                    "Forwarded": "host=forwarded.example;proto=http",
+                },
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "extract_media",
+                        "arguments": {"url": X_URL},
+                        "_meta": {
+                            PROTOCOL_VERSION_META_KEY: "2026-07-28",
+                            CLIENT_CAPABILITIES_META_KEY: {},
+                        },
+                    },
+                },
+            )
+    assert response.status_code == 200
+    if response.headers["content-type"].startswith("text/event-stream"):
+        payload = json.loads(
+            next(line[6:] for line in response.text.splitlines() if line.startswith("data: "))
+        )
+    else:
+        payload = response.json()
+    item = payload["result"]["structuredContent"]["media"][0]
+    assert item["preview_url"].startswith(f"{base or ''}/api/media/")
+    assert item["download_url"].startswith(f"{base or ''}/api/media/")
 
 
 @pytest.mark.parametrize("first", ["rest", "mcp"])

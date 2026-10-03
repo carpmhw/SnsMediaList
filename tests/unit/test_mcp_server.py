@@ -5,12 +5,47 @@ import logging
 
 import httpx
 import pytest
+from mcp import Client
 from mcp.types import CLIENT_CAPABILITIES_META_KEY, PROTOCOL_VERSION_META_KEY
 
 from sns_media_list.api.limits import RequestLimiter
 from sns_media_list.config import Settings
 from sns_media_list.services.extraction_coordinator import ExtractionCoordinator
-from tests.mcp_helpers import make_service
+from tests.mcp_helpers import X_URL, make_service
+
+
+@pytest.mark.parametrize("first_origin", [None, "http://192.168.50.14:8000"])
+async def test_server_public_origins_are_app_local(first_origin: str | None) -> None:
+    """交錯呼叫不同 server 時，每個 mapper 僅接收自己 Settings 的 origin。"""
+    from sns_media_list.mcp.server import create_mcp_server
+
+    servers = []
+    for origin in (first_origin, "https://second.example"):
+        settings = Settings(public_base_url=origin)
+        service, _ = make_service(settings=settings)
+        servers.append(
+            create_mcp_server(
+                ExtractionCoordinator(
+                    service, limiter=RequestLimiter(max_extractions=1, max_downloads=1)
+                ),
+                settings=settings,
+            )
+        )
+    async with (
+        Client(servers[0], cache=None) as first,
+        Client(servers[1], cache=None) as second,
+    ):
+        await first.call_tool("extract_media", {"url": X_URL})
+        second_result = await second.call_tool("extract_media", {"url": X_URL})
+        first_result = await first.call_tool("extract_media", {"url": X_URL})
+    for result, origin in (
+        (first_result, first_origin),
+        (second_result, "https://second.example"),
+    ):
+        assert result.is_error is False
+        item = result.structured_content["media"][0]
+        assert item["preview_url"].startswith(f"{origin or ''}/api/media/")
+        assert item["download_url"].startswith(f"{origin or ''}/api/media/")
 
 
 def test_factory_does_not_bind_or_change_root_logging(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     mcp_max_request_body_bytes: int = Field(default=65_536, gt=0, le=1_048_576)
     mcp_allowed_hosts: tuple[str, ...] = Field(default=(), max_length=32)
     mcp_allowed_origins: tuple[str, ...] = Field(default=(), max_length=32)
+    public_base_url: str | None = None
     thumbnail_input_bytes: int = Field(default=32_000_000, gt=0, le=32_000_000)
     thumbnail_output_bytes: int = Field(default=1_000_000, gt=0, le=1_000_000)
     thumbnail_timeout_seconds: float = Field(default=10.0, gt=0, le=10.0)
@@ -52,6 +53,36 @@ class Settings(BaseSettings):
     extraction_proxy_port: int = Field(default=8765, ge=1, le=65535)
     instagram_cookie_file: str | None = None
     x_cookie_file: str | None = None
+
+    @field_validator("public_base_url")
+    @classmethod
+    def validate_public_base_url(cls, value: str | None) -> str | None:
+        """只接受明確 HTTP(S) origin，先拒絕非法原文，再移除單一 root slash。"""
+        if value is None:
+            return None
+        message = "public base URL must be an exact HTTP(S) origin"
+        if (
+            not value
+            or any(ord(character) <= 32 or ord(character) >= 127 for character in value)
+            or any(character in value for character in "?#\\")
+        ):
+            raise ValueError(message)
+        try:
+            parsed = urlsplit(value)
+            if (
+                parsed.scheme not in {"http", "https"}
+                or parsed.path not in {"", "/"}
+                or value != f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+            ):
+                raise ValueError(message)
+            _validate_mcp_authority(parsed.netloc)
+            if parsed.netloc.startswith("[") and not re.fullmatch(
+                r"\[[0-9A-Fa-f:.]+\](?::[0-9]+)?", parsed.netloc
+            ):
+                raise ValueError(message)
+        except ValueError:
+            raise ValueError(message) from None
+        return value.removesuffix("/")
 
     @field_validator("mcp_allowed_hosts")
     @classmethod

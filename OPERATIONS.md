@@ -1,58 +1,157 @@
 # SNS Media List 操作指南
 
-所有指令在 repository root 執行。版本與映像 pin 以 `pyproject.toml`、`uv.lock`、`Dockerfile` 為準；功能範圍及開發入口見 [README](README.md)。
+本指南供服務管理者部署、設定與排錯使用。所有指令在儲存庫根目錄執行；範例以 Bash 為準。套件版本以 [`pyproject.toml`](pyproject.toml)／[`uv.lock`](uv.lock)、映像 pin 以 [`Dockerfile`](Dockerfile)、設定預設值以 [`config.py`](src/sns_media_list/config.py) 為準；功能範圍與本機開發見 [README](README.md)。
 
-[部署](#部署) · [Cookie](#平台-cookie-驗證) · [升級／回復](#升級與-rollback) · [下載診斷](#安全下載診斷) · [Story 診斷](#instagram-story-extraction-diagnostics) · [人工驗證](#owner-controlled-manual-smoke-tests)
+| 工作 | 入口 |
+| --- | --- |
+| 首次啟動、調整環境變數 | [部署](#部署)、[設定](#設定) |
+| 以平台帳號擷取 | [Cookie 掛載、輪替與撤銷](#平台-cookie-驗證) |
+| 啟用 MCP 或設定絕對媒體連結 | [MCP deployment](#mcp-deployment) |
+| 設定外部入口 | [Reverse proxy](#reverse-proxy-logging)、[Trusted proxy](#trusted-proxy) |
+| 更新與回復版本 | [升級與 rollback](#升級與-rollback) |
+| 分析、下載或預覽異常 | [故障排除](#故障排除)、[下載診斷](#安全下載診斷)、[Story 診斷](#instagram-story-extraction-diagnostics)、[縮圖](#預覽與縮圖) |
+| 驗證修改與部署 | [自動化檢查](#自動化檢查)、[人工驗證](#owner-controlled-manual-smoke-tests) |
 
 ## 部署
 
-需求：Docker Engine、Docker Compose v2、可解析 outbound HTTPS 目的地的 DNS，以及私人或可信任的 operator 環境。本服務不是公開匿名 proxy。
+需求：Docker Engine、Docker Compose v2、可解析對外 HTTPS 目的地的 DNS，以及私人或可信任的 operator 環境。本服務不是公開匿名 proxy。需要執行 `uv run` 的維運腳本時，另依 [README 本機開發](README.md#本機開發)安裝 Python 3.12、uv 與開發相依套件。
+
+### 首次啟動
 
 ```bash
 docker compose build --pull
+docker compose config --quiet
 docker compose up -d
 docker compose ps
 curl --fail http://127.0.0.1:8000/healthz
 ```
 
-Compose 使用單一 worker、UID/GID 10001、read-only root filesystem、bounded tmpfs、`no-new-privileges`、drop all capabilities 與 PID limit。不掛載持久 media／token volume；預設綁定 `127.0.0.1:${SNS_MEDIA_HOST_PORT:-8000}:8000`，並停用 Uvicorn access log。遠端存取須配置驗證或 network ACL。
+`/healthz` 回傳 `{"status":"ok"}` 只表示服務存活，不驗證平台 session、媒體下載或 MCP 協定。首次啟動後開啟 <http://127.0.0.1:8000>；若改用其他 host port，後續檢查位址也須同步調整。
+
+Compose 的執行限制如下：
+
+| 項目 | 基本部署設定 |
+| --- | --- |
+| 程序與權限 | 單一 worker、UID/GID 10001、唯讀 root filesystem、`no-new-privileges`、移除所有 capabilities |
+| 資源 | 記憶體 768 MiB、CPU 1.0、PID 上限 128 |
+| 暫存空間 | `/tmp` 64 MiB、`/app/.cache` 32 MiB，皆為 bounded tmpfs |
+| 對外入口 | `127.0.0.1:${SNS_MEDIA_HOST_PORT:-8000}:8000`；遠端存取須配置驗證或 network ACL |
+| 日誌與停止 | 停用 Uvicorn access log、10 秒 graceful stop |
+
+不掛載持久 media／token volume。Token、限流、快取與 MCP session 都是 process-local；維持單一 process／worker，不能直接增加 worker 或副本來共用這些狀態。
+
+### 既有部署與停止
 
 既有部署先依 [Compose labels 確認實際服務](#instagram-extractor-compatibility)；後續指令沿用相同 `-p <project>`、`-f` 檔案與 Cookie overlays，避免啟動第二個 project。
 
-### 設定
+| Compose 檔案 | 用途 |
+| --- | --- |
+| `docker-compose.yaml` | 基本服務使用匿名擷取；MCP 與 generated preview 預設關閉 |
+| `docker-compose.instagram-auth.yaml` | 掛載 Instagram Cookie |
+| `docker-compose.x-auth.yaml` | 掛載 X Cookie |
+| `docker-compose.mcp.yaml` | 明確啟用同一 port 的 MCP endpoint |
+| 自行管理的 override | 指定已驗證映像、環境變數、公開 origin 或部署入口 |
 
-以下為預設值；完整欄位及合法範圍見 `src/sns_media_list/config.py`。Compose 中明列的 `environment` 請用 deployment override 覆寫，單改 shell／`.env` 不會取代這些固定值；`SNS_MEDIA_HOST_PORT`、`SNS_MEDIA_IMAGE_TAG` 等 `${…}` 插值才由 shell／`.env` 提供。
+所有範例都須帶入該部署完整的 `-p`／`-f` 組合，以及原先的插值變數；以下為基本部署的停止方式：
+
+```bash
+docker compose stop -t 10 app
+docker compose down
+```
+
+`stop` 停止服務，`down` 另移除該 project 的容器與網路。重新啟動後，舊媒體 token 與 MCP session 無法恢復，使用者須重新連線並分析。
+
+## 設定
+
+應用程式設定使用 `SNS_MEDIA_` 前綴，啟動時驗證；下表列出常用設定及預設值，完整欄位及合法範圍見 `src/sns_media_list/config.py`。本機 Uvicorn 從 process environment 讀取設定，不會自動載入 `.env`。
+
+### 設定生效方式
+
+- **Compose 插值：** `${…}` 由 shell／`.env` 提供，包含下表的 host port、image tag 與 Cookie 主機檔案路徑。
+- **容器環境變數：** Compose 中明列的固定 `environment` 請用 deployment-owned override 覆寫；單改 shell／`.env` 不會取代這些固定值，也不會自動把其他應用設定傳入容器。
+- **套用設定：** 先以完整 overlays 執行 `docker compose config --quiet`，再以相同組合 `up -d --no-deps app` 重新建立服務；單純 `restart` 不會套用新的容器環境設定。原始碼變更另須建置映像，見[升級流程](#升級與-rollback)。
+
+| Compose 插值變數 | 預設／用途 |
+| --- | --- |
+| `SNS_MEDIA_HOST_PORT` | `8000`，只改主機 port，不改容器內的 8000 |
+| `SNS_MEDIA_IMAGE_TAG` | `local`，基本映像名稱為 `sns-media-list:<tag>` |
+| `SNS_MEDIA_INSTAGRAM_COOKIE_HOST_FILE` | 無預設；使用 Instagram overlay 時必填主機檔案路徑 |
+| `SNS_MEDIA_X_COOKIE_HOST_FILE` | 無預設；使用 X overlay 時必填主機檔案路徑 |
+
+非預設 port 可在目前 shell 中保留，供後續 Compose 指令使用：
+
+```bash
+export SNS_MEDIA_HOST_PORT=8080
+docker compose config --quiet
+docker compose up -d
+curl --fail http://127.0.0.1:8080/healthz
+```
+
+### 擷取與短效 token
 
 | 設定 | 預設值 |
 | --- | ---: |
-| `SNS_MEDIA_TOKEN_TTL_SECONDS` | 600 |
+| `SNS_MEDIA_MEDIA_LIMIT` | 20 項媒體 |
+| `SNS_MEDIA_TOKEN_TTL_SECONDS` | 600 seconds |
 | `SNS_MEDIA_TOKEN_CAPACITY` | 200 |
-| `SNS_MEDIA_EXTRACTION_TIMEOUT_SECONDS` | 45 |
+| `SNS_MEDIA_EXTRACTION_TIMEOUT_SECONDS` | 45 seconds |
 | `SNS_MEDIA_EXTRACTION_OUTPUT_LIMIT` | 2000000 bytes |
 | `SNS_MEDIA_EXTRACTION_BODY_LIMIT_BYTES` | 4096 bytes |
+| `SNS_MEDIA_MAX_EXTRACTIONS` | 1，REST／MCP 共用 |
+
+### 媒體傳輸與限流
+
+| 設定 | 預設值 |
+| --- | ---: |
 | `SNS_MEDIA_MAX_DOWNLOAD_BYTES` | 500000000 bytes |
 | `SNS_MEDIA_CONNECT_TIMEOUT_SECONDS` | 10 seconds |
 | `SNS_MEDIA_READ_TIMEOUT_SECONDS` | 30 seconds |
 | `SNS_MEDIA_MEDIA_RESPONSE_TIMEOUT_SECONDS` | 120 seconds |
 | `SNS_MEDIA_MAX_REDIRECTS` | 3 |
-| `SNS_MEDIA_MAX_EXTRACTIONS` | 1 |
 | `SNS_MEDIA_MAX_DOWNLOADS` | 4 |
 | `SNS_MEDIA_MAX_DOWNLOADS_PER_CLIENT` | 2 |
 | `SNS_MEDIA_RATE_LIMIT_WINDOW_SECONDS` | 60 seconds |
 | `SNS_MEDIA_RATE_LIMIT_EXTRACTION_ATTEMPTS` | 10 |
 | `SNS_MEDIA_RATE_LIMIT_MEDIA_ATTEMPTS` | 120 |
 | `SNS_MEDIA_RATE_LIMIT_IDENTITY_CAPACITY` | 2048 |
+
+Timeout 不全是整檔期限，詳見[批次、下載與 timeout](#批次下載與-timeout)。MCP 的固定共用身分與取消保留額度見[request budget](#設定與-request-budget)。
+
+### 縮圖資源設定
+
+| 設定 | 預設值 |
+| --- | ---: |
 | `SNS_MEDIA_GENERATED_PREVIEWS_ENABLED` | false |
-| `SNS_MEDIA_MCP_ENABLED` | false |
-| `SNS_MEDIA_MCP_MAX_REQUEST_BODY_BYTES` | 65536 bytes |
-| `SNS_MEDIA_MCP_ALLOWED_HOSTS` | `[]`，使用 SDK localhost defaults |
-| `SNS_MEDIA_MCP_ALLOWED_ORIGINS` | `[]`，使用 SDK localhost defaults |
 | `SNS_MEDIA_THUMBNAIL_INPUT_BYTES` | 32000000 bytes |
 | `SNS_MEDIA_THUMBNAIL_OUTPUT_BYTES` | 1000000 bytes |
 | `SNS_MEDIA_THUMBNAIL_TIMEOUT_SECONDS` | 10 seconds |
 | `SNS_MEDIA_THUMBNAIL_CONCURRENCY` | 1 |
 | `SNS_MEDIA_THUMBNAIL_CACHE_BYTES` | 32000000 bytes |
 | `SNS_MEDIA_THUMBNAIL_MAX_EDGE` | 640 pixels |
+
+啟用條件與快取行為見[預覽與縮圖](#預覽與縮圖)。
+
+### MCP 與公開連結
+
+| 設定 | 預設值 |
+| --- | --- |
+| `SNS_MEDIA_MCP_ENABLED` | false |
+| `SNS_MEDIA_MCP_MAX_REQUEST_BODY_BYTES` | 65536 bytes |
+| `SNS_MEDIA_MCP_ALLOWED_HOSTS` | `[]`，使用 SDK localhost defaults |
+| `SNS_MEDIA_MCP_ALLOWED_ORIGINS` | `[]`，使用 SDK localhost defaults |
+| `SNS_MEDIA_PUBLIC_BASE_URL` | 未設定，MCP 使用相對媒體連結 |
+
+### Proxy 與平台 Cookie
+
+| 設定 | 預設／用途 |
+| --- | --- |
+| `SNS_MEDIA_TRUSTED_PROXY_CIDRS` | `[]`，預設只採 socket peer 作為 client 身分 |
+| `SNS_MEDIA_EXTRACTION_PROXY_HOST` | `127.0.0.1`，內部 extractor CONNECT proxy |
+| `SNS_MEDIA_EXTRACTION_PROXY_PORT` | `8765`，不要與其他 instance 衝突 |
+| `SNS_MEDIA_INSTAGRAM_COOKIE_FILE` | 未設定；Instagram overlay 設為 `/run/secrets/instagram.cookies.txt` |
+| `SNS_MEDIA_X_COOKIE_FILE` | 未設定；X overlay 設為 `/run/secrets/x-cookies.txt` |
+
+Cookie 設定值是**容器內檔案路徑**，不是 Cookie 內容或主機掛載來源；本機 Uvicorn 則使用該 process 可讀的絕對路徑。檔案須為可讀、非空的一般檔案，生命週期見[平台 Cookie 驗證](#平台-cookie-驗證)。
 
 ## MCP deployment
 
@@ -78,10 +177,37 @@ Smoke 預設只驗證連線、SDK 所需的 initialize／version negotiation、s
 - `SNS_MEDIA_MCP_ALLOWED_HOSTS`／`SNS_MEDIA_MCP_ALLOWED_ORIGINS`：JSON array，各最多 **32** 筆 exact allowlist。自訂值不允許 wildcard、port glob、credentials、path、query 或 fragment；Origin 必須是完整 HTTP(S) origin。
 - 兩組未自訂時保留 SDK localhost defaults；自訂 hosts 卻不提供 origins 時，所有帶 Origin 的 request 被拒絕，非瀏覽器 Client 仍須匹配 Host。
 - 自訂 origins 必須同時配置 hosts；單獨 Origin allowlist 在 Settings validation 拒絕，避免啟動後全部 Host 都被 421 拒絕。
+- `SNS_MEDIA_PUBLIC_BASE_URL`：optional canonical external origin，只在 MCP mapping layer 格式化 preview／download URL；預設未設定，REST API 一律保留相對連結。不能從 Request Host、X-Forwarded-Host、Forwarded、X-Forwarded-Proto、request.base_url 或 allowlist 推導。
 - 所有 MCP Client 共用 `mcp` identity，預設同時最多一個 MCP extraction；REST／MCP 共用 `SNS_MEDIA_MAX_EXTRACTIONS`，不建立第二組 slot 或 queue。
 - 每 60 秒最多 **10 個 MCP POST**（沿用 `SNS_MEDIA_RATE_LIMIT_EXTRACTION_ATTEMPTS`／window），其中 9 個一般 POST、1 個只保留給同一 session 中 active `extract_media` 的 legacy cancellation。initialize、notifications、list-tools、tool calls 與 malformed POST 消耗一般額度；不匹配的 cancellation 也算一般 POST，每個 HTTP POST 只計一次。一般額度用盡時，boundary 仍讀取一個有界 body 以辨識匹配 cancellation；其他 request 回傳 HTTP 429／`local_rate_limited`／Retry-After。REST／media identity churn 不會重置固定 MCP bucket；GET／DELETE 不消耗這個 POST budget。
 - MCP 啟用時 extraction attempt limit 至少 2；過低的 quota 可能不足以完成 legacy handshake，建議維持預設值。固定 MCP bucket 與 client identity LRU 分離，總 retained state 上限為 identity capacity 加一個固定大小 bucket。
 - SDK legacy session 固定最多 32 個，閒置期限沿用 token TTL；沒有持久 session store。Transport sessionless 不表示 token／limiters 能跨 worker，共享狀態仍只在單 process。
+
+### 公開媒體 Origin 與 LAN override
+
+`SNS_MEDIA_PUBLIC_BASE_URL` 只接受 `http://host[:port]` 或 `https://host[:port]`，沿用 ASCII DNS／IP authority 政策；支援 `http://[2001:db8::10]:8000`，明確 port 須為 1–65535。單一 root trailing slash 會移除，例如 `https://sns.example.com/` → `https://sns.example.com`。空字串、credentials、wildcard、非 root／encoded path、query／fragment（即使只有 `?`／`#`）、whitespace、CR/LF、控制字元、反斜線、非法 authority／port／IPv6 都會在 Settings validation 被拒絕，不會先修剪或進行 DNS／HTTP 探測。
+
+公開 URL path prefix 不受支援，部署須讓 `/api/media/` 與 `/placeholder.svg` 可在該 origin root 取得。Operator 應設定 Client 真正能存取的 canonical external origin；設定正確不代表網路一定可達。可信 LAN 可用 HTTP，正式或跨不可信網路建議 HTTPS。
+
+以下內容放在 **deployment-owned override**，例如自己管理的 `compose.public-origin.yaml`；generic Compose 不固定 LAN IP。這個範例只配置 environment，LAN ingress 的實際 publish／proxy／ACL 沿用自己的部署設定：
+
+```yaml
+services:
+  app:
+    environment:
+      SNS_MEDIA_MCP_ENABLED: "true"
+      SNS_MEDIA_MCP_ALLOWED_HOSTS: '["192.168.50.14:8000"]'
+      SNS_MEDIA_PUBLIC_BASE_URL: "http://192.168.50.14:8000"
+```
+
+使用原 project、Cookie／image overlays 再加自己的 override；最小命令範例（先建立上述檔案）：
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.mcp.yaml -f compose.public-origin.yaml config --quiet
+docker compose -f docker-compose.yaml -f docker-compose.mcp.yaml -f compose.public-origin.yaml up -d --build
+```
+
+`SNS_MEDIA_MCP_ALLOWED_HOSTS` 驗證 incoming Host，`SNS_MEDIA_MCP_ALLOWED_ORIGINS` 驗證 incoming Origin；`SNS_MEDIA_PUBLIC_BASE_URL` 則建立 outgoing media URL。三者不互相推導；公開 origin 不自動加入 allowlists、不提供 authentication，也不關閉 DNS-rebinding protection。
 
 ### Reverse proxy、Host／Origin 與驗證
 
@@ -93,17 +219,54 @@ Smoke 預設只驗證連線、SDK 所需的 initialize／version negotiation、s
 services:
   app:
     environment:
+      SNS_MEDIA_MCP_ENABLED: "true"
       SNS_MEDIA_MCP_ALLOWED_HOSTS: '["sns-media.example.internal"]'
       SNS_MEDIA_MCP_ALLOWED_ORIGINS: '["https://sns-media.example.internal"]'
+      SNS_MEDIA_PUBLIC_BASE_URL: "https://sns-media.example.internal"
 ```
 
 SDK DNS-rebinding protection 保持啟用；不匹配 Host 為 **421**，不匹配 Origin 為 **403**。不能以關閉防護、任意 `X-Forwarded-For` 或 wildcard 修正；檢查 proxy 真正轉送的值，不從 Host 推導 absolute media URL。
 
 Host／Origin 防護不是身份驗證。MCP 只適合本人／可信網路或有 authentication／network ACL 的 ingress；若配置平台 Cookie，任何被允許的 MCP 使用者都可能間接使用 operator 帳號可見權限，沒有 per-user isolation。MCP 不提供 Cookie 上傳、OAuth 或憑證管理。
 
+### 工具輸入與結果
+
+`extract_media` 只接受一個長度 1–2048 的 URL 字串，不接受額外欄位：
+
+```json
+{"url":"https://x.com/example/status/123/"}
+```
+
+成功結果同時提供文字 JSON 與 structured content。以下為未設定 public origin 的合成範例，token 僅供示意：
+
+```json
+{
+  "platform": "x",
+  "post_url": "https://x.com/example/status/123/",
+  "author": "example",
+  "description": null,
+  "unavailable_media_count": 0,
+  "media": [
+    {
+      "media_type": "image",
+      "filename": "x-example-123-01.jpg",
+      "width": 1200,
+      "height": 800,
+      "duration": null,
+      "preview_url": "/placeholder.svg",
+      "download_url": "/api/media/example-download-token/download"
+    }
+  ]
+}
+```
+
+`media_type` 為 `image` 或 `video`，X 動畫 GIF 以 `video` 表示；缺少的作者、描述、尺寸或時長可為 null。媒體維持來源順序、最多 20 項，精確 Story 只輸出一個主要媒體。
+
 ### 結果、錯誤與排錯
 
-Tool 成功回傳 metadata 與 root-relative 相對 preview／download URL，Client 依明確的服務 origin 解析；TTL／purpose／capacity、HEAD／GET、預覽與到期 410 均沿用原 API。沒有 media binary、upstream URL、headers 或 raw output。
+Tool 成功回傳 metadata；未設定 public origin 時為 root-relative 相對 preview／download URL，Client 依明確的服務 origin 解析。設定後兩種 path 會投影為絕對連結，placeholder 亦為 `{origin}/placeholder.svg`，null preview 保持 null。文字 JSON 與 structured content 使用同一份結果；REST API、TTL／purpose／capacity、HEAD／GET、預覽與到期 410 均沿用原契約。沒有 media binary、upstream URL、headers 或 raw output，不新增 public origin、media URL 或 token 日誌。
+
+部署後以 owner-controlled 內容呼叫 `extract_media`，核對公開 origin 並實際開啟 preview／download；另確認 `POST /api/extractions` 仍回傳相對 URL。預設 protocol smoke 只驗證協定，不證明 absolute media links 可用；人工驗收不保存真實連結／token 至 repository 或 log。
 
 Tool failure 使用 SDK `isError=true`，文字 content 為固定 `{code,message}` JSON；沒有成功 structured content 或 internal diagnostics。Protocol／validation error 不回顯 arguments；每次 tool（包含 validation failure）都有 safe `mcp_extraction_started` 與唯一 complete／failed／aborted event，使用 server-generated request ID；既有 `mcp_server_started`／startup failure event 也僅含安全欄位。保留 `--no-access-log`，不以 debug／request dump 排錯。
 
@@ -121,6 +284,8 @@ Tool failure 使用 SDK `isError=true`，文字 content 為固定 `{code,message
 | 重啟後媒體／session 失效 | 記憶體狀態不恢復，Client 重新連線並重新分析。 |
 
 ### 關閉與 rollback
+
+只要恢復相對 MCP media links，可移除 deployment-owned `SNS_MEDIA_PUBLIC_BASE_URL` 並以原 project／overlays 重新建立 app；不用關閉 MCP。重啟會清除 process-local tokens／sessions，須重新擷取。若回退至不含此功能的版本，沿用下方不可變映像 rollback 流程。
 
 移除 MCP enable override，保留相同 project、其他必要的 Cookie／image overlays，再重新建立 app。例如最小部署：
 
@@ -196,6 +361,17 @@ SNS_MEDIA_X_COOKIE_HOST_FILE=/srv/secrets/x.cookies.txt \
 ```
 
 部署前可將 `up -d --build` 改成 `config --quiet` 驗證 Compose。Override 只掛載 read-only file，並停用 Cookie 更新；不使用 override 即為匿名模式。
+
+同時啟用兩平台時合併兩份 overlays，並在後續指令保留相同路徑與組合；需要 MCP 時再加 `-f docker-compose.mcp.yaml`：
+
+```bash
+export SNS_MEDIA_INSTAGRAM_COOKIE_HOST_FILE=/srv/secrets/instagram.cookies.txt
+export SNS_MEDIA_X_COOKIE_HOST_FILE=/srv/secrets/x.cookies.txt
+docker compose -f docker-compose.yaml \
+  -f docker-compose.instagram-auth.yaml -f docker-compose.x-auth.yaml config --quiet
+docker compose -f docker-compose.yaml \
+  -f docker-compose.instagram-auth.yaml -f docker-compose.x-auth.yaml up -d --build
+```
 
 輪替時撤銷舊 session。Application 不快取 Cookie：保留 inode 覆寫 host file 後，新的 extractor process 會重新讀取；若用 rename 更換 inode，以原部署設定重新建立 container，確保掛載新檔。進行中的 process 不會熱重載。
 
@@ -366,9 +542,13 @@ uv run python scripts/security_gate.py --image '<candidate-image>'
 - `verify_gallery_contract.py` 為離線套件／adapter 驗證，不代表真實平台可用。
 - `container_smoke.py` 需要 Docker daemon，使用獨立 project、動態 port、每次專用 image tag，驗證 health、執行限制、tmpfs、10 秒 graceful stop，並以假 Cookie／fake extractor 驗證 Story 日誌。不重標記共享映像或替換既有服務。
 - `check_nginx_config.py` 使用本機 Nginx 或固定 digest 的 Docker 映像驗證語法。
-- `security_gate.py` 稽核 production dependencies 與指定 candidate；HIGH／CRITICAL finding 依 gate policy 阻擋。例外只接受 `security/vulnerability-exceptions.json` 中精確 CVE/package、版本、artifact digest、owner、理由、mitigation、expiry；不匹配、wildcard 或過期均失敗。Decoder policy 未通過時 generated preview 保持停用。
+- `security_gate.py` 使用 `pip-audit` 稽核鎖定的正式相依套件，並以本機 Trivy 或固定 digest 的 Trivy 容器掃描指定 candidate；需可用的 Docker 與掃描資料來源。HIGH／CRITICAL finding 依 gate policy 阻擋。例外只接受 `security/vulnerability-exceptions.json` 中精確 CVE/package、版本、artifact digest、owner、理由、mitigation、expiry；不匹配、wildcard 或過期均失敗。Decoder policy 未通過時 generated preview 保持停用。
 
-程式品質與各層測試入口見 [AGENTS.md](AGENTS.md#7-測試與驗證)。
+程式品質與各層測試入口見 [README](README.md#測試與品質檢查)及 [AGENTS.md](AGENTS.md#7-測試與驗證)。只調整操作文件時，可先執行文件與 smoke 工具契約測試，不需連線真實平台：
+
+```bash
+uv run pytest -q tests/test_readme.py tests/test_operations_docs.py tests/test_manual_smoke.py tests/test_mcp_smoke.py
+```
 
 ## Owner-controlled manual smoke tests
 

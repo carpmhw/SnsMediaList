@@ -54,6 +54,7 @@ SNS Media List 是低併發、自架式媒體整理、預覽與下載工具，�
 | `api/limits.py`、`api/middleware.py` | 併發與請求次數限制、入口安全邊界 |
 | `url_validation.py` | 支援的平台 URL 與精確目標驗證 |
 | `services/extraction_service.py` | 驗證、擷取、正規化與 token 核發的協調 |
+| `services/extraction_coordinator.py`、`mcp/` | REST／MCP 共享擷取 budget，以及可選 MCP transport／公開結果映射 |
 | `extractor/gallery_dl.py` | 受限 `gallery-dl` subprocess、DataJob 解析、錯誤分類與平台 Cookie 設定 |
 | `extractor/normalizer.py` | 擷取結果正規化、媒體順序、檔名與 metadata |
 | `network/dns.py`、`network/connect_proxy.py` | DNS/IP 政策與 extractor CONNECT proxy |
@@ -66,6 +67,8 @@ SNS Media List 是低併發、自架式媒體整理、預覽與下載工具，�
 主要流程：`POST /api/extractions` → URL 驗證 → extractor → 正規化 → token 核發 → 前端透過 `/api/media/{token}/preview` 或 `/api/media/{token}/download` 取得媒體。下載另有 `HEAD` 預檢；`GET /healthz` 不應存取外部平台。
 
 修改時沿用依賴注入與既有分層。網路政策放在 `network/`，擷取格式相容性放在 `extractor/`，不要將各層邏輯堆入 route 或前端。
+
+`ExtractionService` 的媒體連結維持 root-relative，REST 不因公開 origin 設定改變。MCP transport adapter 可只依明確且經驗證的 `SNS_MEDIA_PUBLIC_BASE_URL` 投影為絕對 preview／download URL；設定從 app-local Settings 傳遞，不從 Request Host／Forwarded headers 或 allowlists 推導，也不反向修改 ingress allowlists。不新增 public origin、media URL 或 token 日誌。
 
 ## 5. 必須維持的執行與資料邊界
 
