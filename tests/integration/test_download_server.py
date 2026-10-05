@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 import pytest
 
-from tests.integration.download_server import IMAGE, SENTINEL
+from tests.integration.download_server import IMAGE, SENTINEL, VIDEO
 
 
 @contextmanager
@@ -69,10 +69,10 @@ def running_server(tmp_path: Path, *, backend="h11", mode="success", known=True,
                 process.wait(timeout=5)
 
 
-def extract(origin: str) -> dict[str, Any]:
-    """透過正式 extraction API 取得 purpose-bound token。"""
+def extract(origin: str, *, target_path: str = "/p/fixture/") -> dict[str, Any]:
+    """透過正式 extraction API 取得指定貼文、Reel 或 Story 的 purpose-bound token。"""
     response = httpx.post(
-        origin + "/api/extractions", json={"url": "https://www.instagram.com/p/fixture/"}
+        origin + "/api/extractions", json={"url": "https://www.instagram.com" + target_path}
     )
     assert response.status_code == 200, response.text
     return response.json()["media"][0]
@@ -205,6 +205,49 @@ def test_real_failure_boundaries(tmp_path: Path, mode) -> None:
     assert terminal[0]["bytes_streamed"] == (
         len(IMAGE) if mode == "postcomplete" else 0 if mode == "reject" else 65536
     )
+
+
+@pytest.mark.parametrize("backend", ["h11", "httptools"])
+@pytest.mark.parametrize("mode", ["resume", "truncated", "resume-ignored", "resume-invalid-range"])
+def test_instagram_video_range_resume(tmp_path: Path, backend: str, mode: str) -> None:
+    """真實 HTTP 驗證 Instagram 續傳的 bytes、framing、terminal event 與清理。"""
+    with running_server(tmp_path, backend=backend, mode=mode, kind="video") as origin:
+        media = extract(origin)
+        if mode == "resume":
+            response = httpx.get(origin + media["download_url"])
+            assert response.content == VIDEO
+            assert response.headers["content-length"] == str(len(VIDEO))
+        else:
+            with pytest.raises(httpx.RemoteProtocolError):
+                httpx.get(origin + media["download_url"])
+        assert httpx.get(origin + "/fixture-stats").json() == {
+            "fetches": 2,
+            "closes": 2,
+            "ranges": [None, 65536],
+            "active": 0,
+            "methods": ["GET"],
+        }
+    records = [event for event in events(tmp_path) if event["event"].startswith("media_download")]
+    success = mode == "resume"
+    assert [event["event"] for event in records] == [
+        "media_download_started",
+        "media_download_resume_attempted",
+        "media_download_resume_succeeded" if success else "media_download_resume_failed",
+        "media_download_completed" if success else "media_download_failed",
+    ]
+    assert len({event["request_id"] for event in records}) == 1
+    assert all(event["platform"] == "instagram" for event in records)
+    assert records[1]["resume_attempt"] == records[2]["resume_attempt"] == 1
+    assert records[-1]["bytes_streamed"] == (
+        len(VIDEO) if success else 65536 + 4096 if mode == "truncated" else 65536
+    )
+    if not success:
+        assert records[-1]["reason_code"] == (
+            "upstream_truncation" if mode == "truncated" else "upstream_validation"
+        )
+    stderr = (tmp_path / "server.log").read_text()
+    assert SENTINEL not in stderr
+    assert ("StreamAborted" in stderr) == (not success)
 
 
 def test_real_disconnect_cleanup(tmp_path: Path) -> None:

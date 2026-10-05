@@ -25,6 +25,7 @@ SNS Media List 是一個低併發 Web 工具，可分析支援的 Instagram 貼�
 - 一般貼文、Reel 與 X 媒體使用含作者識別的智慧檔名。
 - 批次分析最多 5 個 URL，透過循序前端 queue 呼叫既有單筆 API，不建立後端工作佇列。
 - 使用短效、用途綁定的 opaque token 隱藏 upstream media URL。
+- Instagram 與 X 漸進式影片符合條件的提前截斷可自動續傳一次；需 CDN 回傳有效的 Range response。
 - 預覽優先使用可信 CDN poster；缺少 poster 時預設使用本機 placeholder，只有 operator 明確啟用後才按需生成受限 JPEG。
 - 不建立使用者帳號、不保存歷史記錄，也不永久保存完整媒體檔案。
 - 可透過 REST API 或選用的 MCP `extract_media` tool 取得同一套媒體清單與短效下載連結。

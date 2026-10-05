@@ -766,7 +766,7 @@ async def _stream_media(
                     can_resume = (
                         not preview
                         and not resume_attempted
-                        and record.platform == "x"
+                        and record.platform in {"x", "instagram"}
                         and record.media_class == "video"
                         and response.status_code == 200
                         and original_total_length is not None
@@ -784,11 +784,14 @@ async def _stream_media(
                         raise truncation_error
                     resume_attempted = True
                     resume_offset = bytes_streamed
+                    await close_response_once(response)
+                    # 清理期間的取消仍須釋放 lease，但不得再建立續傳連線。
+                    if cleanup_errors and isinstance(cleanup_errors[-1], asyncio.CancelledError):
+                        raise cleanup_errors[-1] from None
                     log_resume_event(
                         "media_download_resume_attempted",
                         outcome="attempted",
                     )
-                    await close_response_once(response)
                     try:
                         resumed_response = await _await_with_deadline(
                             media_client.fetch(

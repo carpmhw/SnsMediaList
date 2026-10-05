@@ -79,7 +79,7 @@ SNS Media List 是低併發、自架式媒體整理、預覽與下載工具，�
 - **Cookie 僅用於擷取：** 僅從 operator 掛載的對應平台唯讀檔讀取；不新增 UI/API Cookie 上傳，不把 Cookie 傳給 preview/download CDN。
 - **日誌不洩漏敏感資料：** 不記錄完整 token 路徑、Cookie、request body、upstream media URL 或 raw extractor output。維持 Uvicorn `--no-access-log`，reverse proxy 的對應 access log 也須停用或遮蔽。錯誤使用既有 `AppError` 與 `ErrorResponse` 契約。
 - **串流可正確結束：** 修改下載時保留 timeout、byte limit、client disconnect、取消與清理行為，確保 upstream response 與併發 slot 被釋放；不得改成無界限地把完整檔案載入記憶體。
-- **下載與預覽期限分開：** Attachment download 使用 connect／read idle timeout 與 byte limit，不套用整檔期限；`media_response_timeout_seconds` 用於 CDN preview 與 generated thumbnail。僅 X 影片符合既有條件時可嘗試一次 Range resume，Instagram 不續傳或增加伺服器重試。
+- **下載與預覽期限分開：** Attachment download 使用 connect／read idle timeout 與 byte limit，不套用整檔期限；`media_response_timeout_seconds` 用於 CDN preview 與 generated thumbnail。X 與 Instagram 漸進式影片在 initial `200`、合法非 chunked `Content-Length`、部分 bytes 已交付且明確提前 EOF 時，最多嘗試一次經驗證的 Range resume；不對圖片、preview、未知／chunked 長度、timeout、驗證失敗或取消增加續傳或一般重試。
 - **中斷與完成語意：** Headers 已送出而 body 未完成時，保留固定 `StreamAborted` 中止流程，不補送成功結尾或第二份錯誤 response。下載僅在最後 body 與 cleanup 均成功後記錄 completed；保留唯一 terminal event，且 `bytes_streamed` 不代表瀏覽器落盤 bytes。
 - **預覽有界限：** 優先使用可信 CDN poster，缺少時預設使用 `/placeholder.svg`。Generated preview 預設關閉；啟用時保留輸入／輸出大小、時間、併發及快取上限。
 - **部署限制：** 維持 UID/GID 10001、唯讀 root filesystem、bounded tmpfs、loopback port 與無永久媒體 volume 的設計。
