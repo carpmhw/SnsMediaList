@@ -3,6 +3,7 @@
 import asyncio
 import ipaddress
 import logging
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -427,6 +428,26 @@ class CountingLease(Lease):
         await super().release()
 
 
+class BlockingCloseWriter(CountingWriter):
+    """在正式 MediaResponse cleanup 等待關閉期間提供可取消的同步點。"""
+
+    def __init__(self) -> None:
+        """初始化關閉計數與 cleanup 開始、取消及釋放事件。"""
+        super().__init__()
+        self.close_started = asyncio.Event()
+        self.close_cancelled = asyncio.Event()
+        self.release_close = asyncio.Event()
+
+    async def wait_closed(self) -> None:
+        """等待測試釋放或取消，並標記 detached cleanup 的取消。"""
+        self.close_started.set()
+        try:
+            await self.release_close.wait()
+        except asyncio.CancelledError:
+            self.close_cancelled.set()
+            raise
+
+
 class FailingReleaseLease(Lease):
     """在實際釋放 reservation 後模擬 lease cleanup 例外。"""
 
@@ -635,15 +656,20 @@ def make_client(
     )
 
 
-def make_download_record() -> PrivateMediaRecord:
-    """建立 deterministic 的私有影片下載紀錄。"""
+def make_download_record(*, platform: str = "x") -> PrivateMediaRecord:
+    """建立指定平台的 deterministic 私有影片下載紀錄。"""
+    source_url = (
+        "https://video.twimg.com/1.mp4"
+        if platform == "x"
+        else "https://scontent.cdninstagram.com/1.mp4"
+    )
     return PrivateMediaRecord(
         token="download-token",
         purpose="download",
-        source_url="https://video.twimg.com/1.mp4",
+        source_url=source_url,
         media_class="video",
         filename="video.mp4",
-        platform="x",
+        platform=platform,
         expires_at=9999999999.0,
         request_headers={},
     )
@@ -811,10 +837,12 @@ async def test_download_streams_complete_body_forwards_length_and_cleans_up_once
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["x", "instagram"])
 async def test_download_resumes_once_after_valid_truncation(
+    platform: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """X progressive video 截斷後應只續傳一次並產生完整 bytes。"""
+    """X 與 Instagram progressive video 截斷後應只續傳一次並產生完整 bytes。"""
     caplog.set_level(logging.INFO, logger="sns_media_list")
     initial, initial_writer = make_tracked_media_response(
         SequencedReader([(0, b"abcd"), (0, b"")]),
@@ -836,7 +864,7 @@ async def test_download_resumes_once_after_valid_truncation(
     lease = make_counting_lease()
 
     response = await _stream_media(
-        make_download_record(),
+        make_download_record(platform=platform),
         media_client,
         preview=False,
         lease=lease,
@@ -872,12 +900,16 @@ async def test_download_resumes_once_after_valid_truncation(
     assert events[1][1]["resume_attempt"] == 1
     assert events[2][1]["resume_attempt"] == 1
     assert "reason_code" not in events[2][1]
+    assert all(event["platform"] == platform for _name, event in events)
+    assert events[-1][1]["bytes_streamed"] == 10
     assert "source_url" not in str(events)
     assert "download-token" not in str(events)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["x", "instagram"])
 async def test_download_does_not_resume_after_repeated_truncation(
+    platform: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """resume response 再次截斷時不得進入第二次 Range retry。"""
@@ -902,7 +934,7 @@ async def test_download_does_not_resume_after_repeated_truncation(
     lease = make_counting_lease()
 
     response = await _stream_media(
-        make_download_record(),
+        make_download_record(platform=platform),
         media_client,
         preview=False,
         lease=lease,
@@ -928,16 +960,14 @@ async def test_download_does_not_resume_after_repeated_truncation(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "record_factory",
-    [make_image_download_record, make_preview_record],
-    ids=["image-download", "preview"],
-)
-async def test_download_does_not_resume_image_or_preview(record_factory: Any) -> None:
+@pytest.mark.parametrize("platform", ["x", "instagram"])
+@pytest.mark.parametrize("kind", ["image-download", "image-preview", "video-preview"])
+async def test_download_does_not_resume_image_or_preview(platform: str, kind: str) -> None:
     """圖片與 preview 截斷時應保持 fail-closed 且不建立 Range request。"""
+    media_type = "video/mp4" if kind == "video-preview" else "image/jpeg"
     initial, _writer = make_tracked_media_response(
         SequencedReader([(0, b"abc"), (0, b"")]),
-        {"content-type": "image/jpeg", "content-length": "6"},
+        {"content-type": media_type, "content-length": "6"},
     )
     resumed, _resumed_writer = make_tracked_media_response(
         SequencedReader([(0, b"unused")]),
@@ -945,7 +975,13 @@ async def test_download_does_not_resume_image_or_preview(record_factory: Any) ->
     )
     media_client = ResumableMediaClient(initial, resumed)
     lease = make_counting_lease()
-    record = record_factory()
+    record = (
+        make_download_record(platform=platform)
+        if kind == "video-preview"
+        else make_image_download_record(platform=platform)
+    )
+    if kind.endswith("preview"):
+        record = replace(record, purpose="preview")
 
     with pytest.raises(AppError):
         response = await _stream_media(
@@ -961,7 +997,10 @@ async def test_download_does_not_resume_image_or_preview(record_factory: Any) ->
 
 
 @pytest.mark.asyncio
-async def test_download_does_not_resume_when_initial_validation_or_size_fails() -> None:
+@pytest.mark.parametrize("platform", ["x", "instagram"])
+async def test_download_does_not_resume_when_initial_validation_or_size_fails(
+    platform: str,
+) -> None:
     """initial MIME 或大小驗證失敗時不得啟動 Range resume。"""
     validation_response, _validation_writer = make_tracked_media_response(
         SequencedReader([(0, b"body")]),
@@ -978,7 +1017,7 @@ async def test_download_does_not_resume_when_initial_validation_or_size_fails() 
         lease = make_counting_lease()
         with pytest.raises(AppError):
             response = await _stream_media(
-                make_download_record(),
+                make_download_record(platform=platform),
                 media_client,
                 preview=False,
                 lease=lease,
@@ -989,7 +1028,51 @@ async def test_download_does_not_resume_when_initial_validation_or_size_fails() 
 
 
 @pytest.mark.asyncio
-async def test_download_does_not_resume_after_client_disconnect() -> None:
+@pytest.mark.parametrize("platform", ["x", "instagram"])
+@pytest.mark.parametrize("failure", ["chunked", "unknown-length", "initial-partial", "timeout"])
+async def test_download_does_not_resume_ineligible_video_response(
+    platform: str, failure: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """無可信長度、chunked、initial 206 或 timeout 的影片失敗不得續傳。"""
+    caplog.set_level(logging.INFO, logger="sns_media_list")
+    headers = {"content-type": "video/mp4"}
+    reader: Reader
+    if failure == "chunked":
+        headers["transfer-encoding"] = "chunked"
+        reader = ChunkedReader(b"4\r\nabcd\r\n")
+    elif failure == "unknown-length":
+        reader = SequencedReader([(0, b"abcd"), (0, OSError("private upstream detail"))])
+    else:
+        headers["content-length"] = "10"
+        delay, tail = (0.05, b"ef") if failure == "timeout" else (0, b"")
+        reader = SequencedReader([(0, b"abcd"), (delay, tail)])
+    writer = CountingWriter()
+    initial = MediaResponse(
+        206 if failure == "initial-partial" else 200,
+        headers,
+        reader,
+        writer,
+        max_bytes=100,
+        read_timeout=0.01 if failure == "timeout" else 1.0,
+    )
+    media_client = ResumableMediaClient(initial, initial)
+    lease = make_counting_lease()
+    response = await _stream_media(
+        make_download_record(platform=platform), media_client, preview=False, lease=lease
+    )
+    with pytest.raises(AppError):
+        _ = [chunk async for chunk in response.body_iterator]
+
+    assert [request[2] for request in media_client.requests] == [None]
+    assert writer.close_calls == 1
+    assert lease.release_calls == 1
+    events = download_event_records(caplog)
+    assert [name for name, _event in events] == ["media_download_started", "media_download_failed"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["x", "instagram"])
+async def test_download_does_not_resume_after_client_disconnect(platform: str) -> None:
     """client disconnect 中斷 body read 時不得啟動 Range resume。"""
     initial, writer = make_tracked_media_response(
         BlockingSecondReadReader(),
@@ -998,7 +1081,7 @@ async def test_download_does_not_resume_after_client_disconnect() -> None:
     media_client = ResumableMediaClient(initial, initial)
     lease = make_counting_lease()
     response = await _stream_media(
-        make_download_record(),
+        make_download_record(platform=platform),
         media_client,
         preview=False,
         lease=lease,
@@ -1019,20 +1102,103 @@ async def test_download_does_not_resume_after_client_disconnect() -> None:
 
 
 @pytest.mark.asyncio
-async def test_download_rejects_invalid_resume_response_and_closes_both_responses() -> None:
+@pytest.mark.parametrize("platform", ["x", "instagram"])
+async def test_download_cancelled_during_initial_close_does_not_resume(
+    platform: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """initial close 期間取消後不得發 Range 或送出剩餘 bytes，且恰好清理一次。"""
+    caplog.set_level(logging.INFO, logger="sns_media_list")
+    initial_writer = BlockingCloseWriter()
+    initial = MediaResponse(
+        200,
+        {"content-type": "video/mp4", "content-length": "10"},
+        SequencedReader([(0, b"abcd"), (0, b"")]),
+        initial_writer,
+        max_bytes=100,
+    )
+    resumed_writer = CountingWriter()
+    resumed = MediaResponse(
+        206,
+        {
+            "content-type": "video/mp4",
+            "content-range": "bytes 4-9/10",
+            "content-length": "6",
+        },
+        Reader(b"efghij"),
+        resumed_writer,
+        max_bytes=100,
+    )
+    media_client = ResumableMediaClient(initial, resumed)
+    lease = make_counting_lease()
+    response = await _stream_media(
+        make_download_record(platform=platform), media_client, preview=False, lease=lease
+    )
+    messages: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        """ASGI 2.4 不使用 disconnect listener。"""
+        raise AssertionError("ASGI 2.4 response should not read receive")
+
+    async def send(message: dict[str, Any]) -> None:
+        """記錄取消前後是否仍送出 body 或成功結尾。"""
+        messages.append(message)
+
+    task = asyncio.create_task(response(make_asgi_scope(spec_version="2.4"), receive, send))
+    try:
+        await asyncio.wait_for(initial_writer.close_started.wait(), timeout=1.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1.0)
+        await asyncio.wait_for(initial_writer.close_cancelled.wait(), timeout=1.0)
+    finally:
+        initial_writer.release_close.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert [request[2] for request in media_client.requests] == [None]
+    assert initial_writer.close_calls == 1
+    assert resumed_writer.close_calls == 0
+    assert lease.release_calls == 1
+    bodies = [message for message in messages if message["type"] == "http.response.body"]
+    assert b"".join(message.get("body", b"") for message in bodies) == b"abcd"
+    assert all(message.get("more_body", False) for message in bodies)
+    events = download_event_records(caplog)
+    assert [name for name, _event in events] == ["media_download_started", "media_download_aborted"]
+    assert events[-1][1]["reason_code"] == "client_disconnect"
+    assert events[-1][1]["bytes_streamed"] == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["x", "instagram"])
+@pytest.mark.parametrize("invalid", ["status", "offset", "total", "mime", "length"])
+async def test_download_rejects_invalid_resume_response_and_closes_both_responses(
+    platform: str, invalid: str
+) -> None:
     """無效 resumed response 應在讀取 body 前 fail closed 並清理兩條 connection。"""
     initial, initial_writer = make_tracked_media_response(
         SequencedReader([(0, b"abcd"), (0, b"")]),
         {"content-type": "video/mp4", "content-length": "10"},
     )
     resumed_writer = CountingWriter()
+    resumed_headers = {
+        "content-type": "video/mp4",
+        "content-range": "bytes 4-9/10",
+        "content-length": "6",
+    }
+    if invalid == "offset":
+        resumed_headers["content-range"] = "bytes 3-9/10"
+    elif invalid == "total":
+        resumed_headers["content-range"] = "bytes 4-10/11"
+    elif invalid == "mime":
+        resumed_headers["content-type"] = "video/webm"
+    elif invalid == "length":
+        resumed_headers["content-length"] = "5"
+    resumed_reader = SequencedReader([(0, b"efghij")])
     resumed = MediaResponse(
-        200,
-        {
-            "content-type": "video/mp4",
-            "content-length": "6",
-        },
-        SequencedReader([(0, b"efghij")]),
+        200 if invalid == "status" else 206,
+        resumed_headers,
+        resumed_reader,
         resumed_writer,
         max_bytes=100,
     )
@@ -1040,16 +1206,20 @@ async def test_download_rejects_invalid_resume_response_and_closes_both_response
     lease = make_counting_lease()
 
     response = await _stream_media(
-        make_download_record(),
+        make_download_record(platform=platform),
         media_client,
         preview=False,
         lease=lease,
     )
 
+    chunks: list[bytes] = []
     with pytest.raises(AppError) as exc_info:
-        _ = [chunk async for chunk in response.body_iterator]
+        async for chunk in response.body_iterator:
+            chunks.append(chunk)
 
     assert exc_info.value.code == "upstream_media_invalid"
+    assert b"".join(chunks) == b"abcd"
+    assert resumed_reader.read_calls == 0
     assert [request[2] for request in media_client.requests] == [None, 4]
     assert initial_writer.close_calls == 1
     assert resumed_writer.close_calls == 1
@@ -1057,7 +1227,9 @@ async def test_download_rejects_invalid_resume_response_and_closes_both_response
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["x", "instagram"])
 async def test_download_resume_enforces_remaining_byte_budget(
+    platform: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """resumed body 超過原始剩餘 bytes 時應停止並記錄 bounded size failure。"""
@@ -1079,7 +1251,7 @@ async def test_download_resume_enforces_remaining_byte_budget(
     media_client = ResumableMediaClient(initial, resumed)
     lease = make_counting_lease()
     response = await _stream_media(
-        make_download_record(),
+        make_download_record(platform=platform),
         media_client,
         preview=False,
         lease=lease,
@@ -1105,7 +1277,8 @@ async def test_download_resume_enforces_remaining_byte_budget(
 
 
 @pytest.mark.asyncio
-async def test_download_resume_cleanup_error_does_not_replace_primary_error() -> None:
+@pytest.mark.parametrize("platform", ["x", "instagram"])
+async def test_download_resume_cleanup_error_does_not_replace_primary_error(platform: str) -> None:
     """resumed body truncation 應優先於 resumed response cleanup error。"""
     initial, initial_writer = make_tracked_media_response(
         SequencedReader([(0, b"abcd"), (0, b"")]),
@@ -1126,7 +1299,7 @@ async def test_download_resume_cleanup_error_does_not_replace_primary_error() ->
     lease = make_counting_lease()
 
     response = await _stream_media(
-        make_download_record(),
+        make_download_record(platform=platform),
         media_client,
         preview=False,
         lease=lease,

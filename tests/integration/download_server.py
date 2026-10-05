@@ -13,6 +13,7 @@ from sns_media_list.config import Settings
 from sns_media_list.network.media_client import MediaResponse
 from sns_media_list.security.tokens import TokenStore
 from sns_media_list.services.extraction_service import ExtractionService
+from sns_media_list.url_validation import ValidatedExtractionTarget
 
 SENTINEL = "PRIVATE_SENTINEL_URL_TOKEN_COOKIE_AUTH_ETAG"
 IMAGE = b"\xff\xd8\xff" + b"image-data" * 10000
@@ -22,14 +23,14 @@ VIDEO = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom" + b"video-data" * 10
 class Extractor:
     """提供不接觸外部服務的 Instagram metadata。"""
 
-    async def extract(self, _url: Any) -> list[dict[str, Any]]:
-        """依測試設定回傳圖片或 progressive 影片。"""
+    async def extract(self, target: ValidatedExtractionTarget) -> list[dict[str, Any]]:
+        """依測試設定回傳指定貼文、Reel 或單則 Story 的媒體。"""
         kind = os.environ.get("MEDIA_KIND", "image")
         return [
             {
                 "platform": "instagram",
-                "post_url": "https://www.instagram.com/p/fixture/",
-                "post_id": "fixture",
+                "post_url": target.canonical_url,
+                "post_id": target.target_id,
                 "num": 1,
                 "type": kind,
                 "url": f"https://scontent.cdninstagram.com/{SENTINEL}?token={SENTINEL}",
@@ -89,19 +90,38 @@ class Client:
         self.read_timeout = 0.2
 
     async def fetch(self, _url: str, *, headers: Any, range_start: int | None = None) -> Any:
-        """依環境配置建立固定長度或 EOF-delimited 上游。"""
+        """依環境配置建立原始上游或成功、截斷、無效的單次 Range response。"""
         self.fetches += 1
         self.ranges.append(range_start)
         kind = os.environ.get("MEDIA_KIND", "image")
         body = IMAGE if kind == "image" else VIDEO
         mode = os.environ.get("STREAM_MODE", "success")
         response_headers = {"content-type": "image/jpeg" if kind == "image" else "video/mp4"}
+        status = 403 if mode == "reject" else 200
+        reader_mode = mode
+        if kind == "video" and mode.startswith("resume"):
+            reader_mode = "truncated"
+        if range_start is not None:
+            assert kind == "video" and mode in {
+                "truncated",
+                "resume",
+                "resume-ignored",
+                "resume-invalid-range",
+            }
+            if mode != "resume-ignored":
+                offset = range_start + 1 if mode == "resume-invalid-range" else range_start
+                response_headers["content-range"] = f"bytes {offset}-{len(body) - 1}/{len(body)}"
+                body = body[range_start:]
+                status = 206
+            reader_mode = "success"
         if os.environ.get("KNOWN_LENGTH", "1") == "1":
             response_headers["content-length"] = str(len(body))
+        if range_start is not None and mode == "truncated":
+            body = body[:4096]
         return MediaResponse(
-            403 if mode == "reject" else 200,
+            status,
             response_headers,
-            Reader(body, mode),
+            Reader(body, reader_mode),
             Writer(self),
             max_bytes=1000000,
             read_timeout=10 if mode == "disconnect" else self.read_timeout,

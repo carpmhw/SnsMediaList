@@ -320,7 +320,9 @@ batch UI 不會改變 `SNS_MEDIA_MAX_EXTRACTIONS`；最多五個 URL 由瀏覽�
 
 Application logger 預設以 INFO 將每筆事件寫成一行 JSON 至 stderr，Docker 可直接收集；不需開啟 debug 或 access log。沿用[擷取診斷的日誌查詢](#instagram-story-extraction-diagnostics)，以 `request_id` 串接事件。
 
-下載事件為 `media_download_started`，以及唯一的 `media_download_completed`、`media_download_failed` 或 `media_download_aborted` terminal event。X 影片符合既有條件時另有 `media_download_resume_attempted`、`media_download_resume_succeeded` 或 `media_download_resume_failed`，`resume_attempt` 固定為 1。Instagram 不增加 Range resume 或伺服器重試；瀏覽器本身可能重新發出 GET，每次 GET 都有不同 request ID。
+下載事件為 `media_download_started`，以及唯一的 `media_download_completed`、`media_download_failed` 或 `media_download_aborted` terminal event。X 與 Instagram 漸進式影片符合條件時另有 `media_download_resume_attempted`、`media_download_resume_succeeded` 或 `media_download_resume_failed`，`resume_attempt` 固定為 1。Instagram 範圍包含一般貼文、Reel 與精確單則 Story 的影片；瀏覽器本身可能重新發出 GET，每次 GET 都有不同 request ID。
+
+單次續傳只用於 attachment video：initial response 為 `200`、具有合法非 chunked `Content-Length`、已交付大於零且小於原始總長度的 bytes，並明確遭遇提前 EOF。系統向同一媒體 URL 發出一次 `Range: bytes=<offset>-`，只有 `206`、`Content-Range` 起點／終點／總長度、MIME 與 optional `Content-Length` 全部符合原始回應才接續串流。CDN 忽略 Range 回傳 `200`、response 驗證失敗或再次截斷時直接失敗，不從頭重播或重新擷取 URL。圖片、preview、未知／chunked 長度、timeout、大小超限及 client disconnect／取消不觸發續傳。
 
 分享時只保留事件的安全欄位：`event`、`request_id`、`platform`、`media_class`、`outcome`、`duration_ms`、`bytes_streamed`、`reason_code`。不附 URL、token、Cookie、headers、raw ETag 或原始 exception。
 
@@ -329,7 +331,7 @@ Application logger 預設以 INFO 將每筆事件寫成一行 JSON 至 stderr，
 | `idle_timeout` | 上游讀取或下游 send 閒置期限到期；需比對 client 與 ingress，不能僅由此判定 CDN 根因。 |
 | `size_limit` | 超過既有 byte limit；不得為重現直接放寬限制。 |
 | `client_disconnect` | Client disconnect 或取消，terminal outcome 為 `aborted`。 |
-| `upstream_truncation` | 媒體提前結束且未恢復；Instagram 不續傳。 |
+| `upstream_truncation` | 媒體提前結束且未恢復；可能是不符合單次續傳條件，或唯一一次續傳仍截斷。 |
 | `upstream_validation` | 狀態、MIME、媒體內容或 resume response 等驗證失敗。 |
 | `unexpected_upstream_failure` | 未落入上述分類的讀取、送出或 cleanup 錯誤；不輸出 raw exception。 |
 
