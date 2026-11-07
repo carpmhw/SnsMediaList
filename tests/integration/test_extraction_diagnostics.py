@@ -20,6 +20,7 @@ _STORY_MEDIA_IDS = (
     "1234567893",
     "1234567894",
     "1234567895",
+    "1234567896",
 )
 SENSITIVE_SENTINELS = (
     *(
@@ -52,6 +53,12 @@ def _install_fake_gallery_dl(directory: Path) -> Path:
 import json
 import sys
 media_id = sys.argv[-1].rstrip("/").rsplit("/", 1)[-1]
+if media_id == "1234567896":
+    sys.stdout.write(json.dumps([[-1, {
+        "error": "NotFoundError",
+        "message": "Requested user could not be found",
+    }]]))
+    sys.exit(0)
 if media_id == "1234567891":
     sys.stderr.write("unrecognized diagnostic PRIVATE_RAW_DIAGNOSTIC\\n")
     sys.exit(1)
@@ -172,6 +179,19 @@ def _stop_uvicorn(process: subprocess.Popen[str]) -> str:
         "expected_diagnostics",
     ),
     [
+        pytest.param(
+            "1234567896",
+            True,
+            502,
+            "extraction_failed",
+            "extractor_process_unclassified",
+            {
+                "extractor_diagnostic_source": "datajob_error",
+                "extractor_error_type": "not_found",
+                "extractor_exit_code": 0,
+            },
+            id="configured-story-user-not-found",
+        ),
         pytest.param(
             "1234567890",
             False,

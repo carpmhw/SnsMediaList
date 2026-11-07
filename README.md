@@ -226,4 +226,6 @@ OPERATIONS.md         部署、設定、診斷與驗證指南
 
 API 不會回傳 upstream media URL、Cookie、credentials、raw extractor output 或 stack trace。請勿在 issue、log 或錯誤回報中貼出 media token、Cookie 或敏感 URL。管理者可依[故障排除](OPERATIONS.md#故障排除)查詢安全事件；Story 的公開錯誤與內部診斷分層見 [Story 診斷](OPERATIONS.md#instagram-story-extraction-diagnostics)。
 
+Story 的帳號解析可能先於 Story 清單查詢失敗。明確 `Requested user could not be found` 會回傳 `extraction_failed`／502，而非表示 Story 已失效；真正 Story 不存在或未辨明對象的 NotFound／404 仍依既有 `story_unavailable` 契約處理。同帳號在瀏覽器可見或已配置 Cookie，不能證明服務使用的 API 工作階段有效，也不能只由 `not_found` 日誌判定 Story 已過期。
+
 本專案使用 pinned [`gallery-dl`](https://github.com/mikf/gallery-dl) 執行 extraction；其 GPL-2.0-only notice 位於 [`LICENSES/gallery-dl.txt`](LICENSES/gallery-dl.txt)。FFmpeg notice 位於 [`LICENSES/ffmpeg.txt`](LICENSES/ffmpeg.txt)，專案程式碼採 [MIT License](LICENSE)。

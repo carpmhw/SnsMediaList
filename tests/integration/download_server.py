@@ -10,6 +10,7 @@ from starlette.routing import Route
 from sns_media_list.api import routes
 from sns_media_list.app import create_app
 from sns_media_list.config import Settings
+from sns_media_list.extractor.gallery_dl import GalleryDlRunner
 from sns_media_list.network.media_client import MediaResponse
 from sns_media_list.security.tokens import TokenStore
 from sns_media_list.services.extraction_service import ExtractionService
@@ -91,6 +92,7 @@ class Client:
 
     async def fetch(self, _url: str, *, headers: Any, range_start: int | None = None) -> Any:
         """依環境配置建立原始上游或成功、截斷、無效的單次 Range response。"""
+        assert not any(key.lower() in {"cookie", "authorization"} for key in headers)
         self.fetches += 1
         self.ranges.append(range_start)
         kind = os.environ.get("MEDIA_KIND", "image")
@@ -135,7 +137,9 @@ def factory() -> Any:
     )
     service = ExtractionService(
         settings,
-        extractor=Extractor(),
+        extractor=GalleryDlRunner(settings)
+        if os.environ.get("STORY_USER_RESOLUTION") == "1"
+        else Extractor(),
         token_store=TokenStore(capacity=100, ttl_seconds=300),
     )
     client = Client()

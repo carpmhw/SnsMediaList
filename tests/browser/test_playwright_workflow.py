@@ -866,6 +866,27 @@ def test_story_auth_required_uses_fixed_operator_guidance(page: Page, base_url: 
     expect(page.locator("#status")).not_to_contain_text(raw_message)
 
 
+def test_story_user_lookup_failure_displays_generic_safe_message(page: Page, base_url: str) -> None:
+    """確認帳號查詢失敗不誤顯示 Story 失效，且不回顯 raw 診斷。"""
+    raw_message = "Requested user could not be found sessionid=PRIVATE_COOKIE"
+
+    def extraction_error(route: Any, _request: Any) -> None:
+        """回傳帳號查詢失敗的既有公開錯誤契約。"""
+        fulfill_json(
+            route,
+            {"code": "extraction_failed", "message": raw_message, "request_id": "test"},
+            status=502,
+        )
+
+    page.route("**/api/extractions", extraction_error)
+    page.goto(base_url)
+    page.fill("#post-url", STORY_URL)
+    page.click("#analyze-button")
+    expect(page.locator("#status")).to_have_text("目前無法分析此內容。")
+    expect(page.locator("body")).not_to_contain_text(raw_message)
+    expect(page.locator("#status")).not_to_contain_text("已過期")
+
+
 def test_rate_limit_error_is_inline(page: Page, base_url: str) -> None:
     """Verify stable API errors appear in the status region."""
 

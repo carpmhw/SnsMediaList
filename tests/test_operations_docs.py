@@ -6,6 +6,65 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parents[1]
 
 
+def test_alpine_runtime_remediation_documents_exact_build_and_revalidation() -> None:
+    """核對操作指南的 runtime 修補 pins 與新映像必須重新驗證的邊界。"""
+    guide = (PROJECT_ROOT / "OPERATIONS.md").read_text(encoding="utf-8")
+    dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    for pin in (
+        "brotli-libs=1.2.1-r0",
+        "libexpat=2.10.0-r0",
+        "libx11=1.8.14-r0",
+        "musl=1.2.6-r3",
+        "musl-utils=1.2.6-r3",
+        "zlib=1.4-r0",
+    ):
+        assert pin in guide
+        assert pin in dockerfile
+    assert "FFmpeg `8.1.3-r0`" in guide
+    assert "不得沿用修補前" in guide
+
+
+def test_story_user_resolution_guidance_matches_production_command() -> None:
+    """確認 1.32.19 Story 解析說明與正式 command 一致且保留單次擷取限制。"""
+    from sns_media_list.extractor.gallery_dl import build_gallery_command
+
+    guide = (PROJECT_ROOT / "OPERATIONS.md").read_text(encoding="utf-8")
+    section = guide.partition("## Instagram Extractor Compatibility")[2].partition("\n## ")[0]
+    command = build_gallery_command(
+        "https://www.instagram.com/stories/example.user/1234567890/",
+        target_kind="story",
+        proxy_url="http://127.0.0.1:8765",
+    )
+    assert not any("user-strategy" in arg for arg in command)
+    assert "1.32.19" in section
+    assert "extractor.instagram.user-strategy" not in section
+    assert "已於 1.32.17 移除" in section
+    assert "profile_id" in section
+    assert "PolarisProfilePageContentQuery" in section
+    assert "不是第二次擷取" in section
+    assert "總期限" in section
+
+
+def test_story_user_not_found_guidance_distinguishes_account_from_media() -> None:
+    """驗證兩份操作入口均區分帳號解析與內容失效，不過度推論 Cookie 狀態。"""
+    for name in ("README.md", "OPERATIONS.md"):
+        guide = (PROJECT_ROOT / name).read_text(encoding="utf-8")
+        assert "Requested user could not be found" in guide
+        assert "帳號解析" in guide
+        assert "extraction_failed" in guide
+        assert "502" in guide
+        assert "不能證明" in guide
+
+
+def test_story_recovery_evidence_keeps_synthetic_and_live_results_separate() -> None:
+    """確認 Story 恢復驗收不把合成結果、placeholder 或開始下載當成完整落盤。"""
+    guide = (PROJECT_ROOT / "OPERATIONS.md").read_text(encoding="utf-8")
+    assert "test_pinned_story_user_resolution_downloads_exact_media_over_real_http" in guide
+    assert "實際恢復未確認" in guide
+    assert "placeholder 是正常" in guide
+    assert "不代表瀏覽器落盤" in guide
+
+
 def test_operations_documents_mcp_settings_and_real_override_rollback() -> None:
     """所有 MCP 設定、allowlist、POST budget 與可用 rollback 都有操作說明。"""
     guide = (PROJECT_ROOT / "OPERATIONS.md").read_text()
@@ -248,7 +307,7 @@ def test_operations_guide_documents_limited_story_video_compatibility() -> None:
     compatibility = guide.partition("## Instagram Extractor Compatibility")[2].partition("\n## ")[0]
 
     for required_text in (
-        "pinned `gallery-dl` 1.32.14",
+        "pinned `gallery-dl` 1.32.19",
         "不強制 `extractor.instagram.videos=merged`",
         "Instagram Post／Reel 繼續使用 merged",
         "同一 URL media record 的 top-level 非空 `video_url`",

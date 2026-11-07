@@ -13,7 +13,9 @@ from typing import NoReturn
 
 import pytest
 from gallery_dl import job as gallery_job
+from gallery_dl.extractor import instagram
 from gallery_dl.extractor.common import Extractor
+from requests import Response, Session
 
 from scripts import verify_gallery_contract
 from sns_media_list.errors import AppError
@@ -139,6 +141,116 @@ def test_installed_distribution_matches_exact_project_pin() -> None:
     assert importlib.metadata.version("gallery-dl") == _project_gallery_dl_pin()
 
 
+def _story_extractor_with_page(
+    monkeypatch: pytest.MonkeyPatch, page: bytes
+) -> instagram.InstagramStoriesExtractor:
+    """建立使用合成個人頁的實際 Story extractor，並關閉跨測試快取。"""
+    from gallery_dl.extractor import common as gallery_common
+
+    target = "https://www.instagram.com/stories/contract.user/123456789/"
+    pattern = instagram.InstagramStoriesExtractor.pattern
+    match = re.match(pattern, target)
+    assert match is not None
+    extractor = instagram.InstagramStoriesExtractor(match)
+    extractor.session = Session()
+    original_config = extractor.config
+
+    def configured(key: str, default: object = None) -> object:
+        """套用正式合約中的 Story 選項，並關閉帳號快取。"""
+        if key == "user-cache":
+            return False
+        if key == "previews":
+            return False
+        return original_config(key, default)
+
+    def page_response(_url: str, **_kwargs: object) -> Response:
+        """回傳不含真實網路內容的合成個人頁。"""
+        response = Response()
+        response.status_code = 200
+        response._content = page
+        return response
+
+    monkeypatch.setattr(gallery_common, "CACHE_MEMORY", {})
+    monkeypatch.setattr(extractor, "config", configured)
+    monkeypatch.setattr(extractor, "request", page_response)
+    extractor.initialize()
+    return extractor
+
+
+def test_installed_story_user_resolution_uses_profile_page_then_graphql(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """驗證 1.32.19 先解析個人頁 profile_id，再以 GraphQL 取得帳號。"""
+    page = b'<script>{"profile_id":"12345","params":{"username":"contract.user"}}</script>'
+    extractor = _story_extractor_with_page(monkeypatch, page)
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def graphql(opname: str, variables: dict[str, object], **_kwargs: object) -> dict[str, object]:
+        """取代實際 GraphQL transport，保留套件的 user orchestration。"""
+        calls.append((opname, variables.copy()))
+        return {"user": {"id": "12345", "username": "contract.user"}}
+
+    monkeypatch.setattr(extractor.api, "_call_graphql", graphql)
+
+    user = extractor.api.user("contract.user")
+
+    assert user["id"] == "12345"
+    assert user["username"] == "contract.user"
+    assert calls == [
+        (
+            "PolarisProfilePageContentQuery",
+            {"enable_integrity_filters": True, "id": "12345"},
+        )
+    ]
+
+
+def test_installed_story_user_resolution_requires_profile_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """個人頁缺少 profile_id 時，1.32.19 必須回報固定 user-not-found。"""
+    extractor = _story_extractor_with_page(monkeypatch, b"<html>no profile marker</html>")
+
+    with pytest.raises(extractor.exc.NotFoundError, match="Requested user could not be found"):
+        extractor.api.user("contract.user")
+
+
+def test_installed_story_user_resolution_maps_graphql_failure_to_user_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GraphQL 帳號查詢失敗時，套件仍必須收斂為固定 user-not-found。"""
+    page = b'<script>{"profile_id":"12345","params":{"username":"contract.user"}}</script>'
+    extractor = _story_extractor_with_page(monkeypatch, page)
+    monkeypatch.setattr(extractor.log, "traceback", lambda *_args, **_kwargs: None, raising=False)
+
+    def fail_graphql(*_args: object, **_kwargs: object) -> dict[str, object]:
+        """模擬 GraphQL transport 失敗，不輸出原始例外內容。"""
+        raise RuntimeError("synthetic graphql failure")
+
+    monkeypatch.setattr(extractor.api, "_call_graphql", fail_graphql)
+
+    with pytest.raises(extractor.exc.NotFoundError, match="Requested user could not be found"):
+        extractor.api.user("contract.user")
+
+
+@pytest.mark.parametrize("subject", ["user", "story"])
+def test_installed_not_found_datajob_preserves_resource_subject(
+    monkeypatch: pytest.MonkeyPatch, subject: str
+) -> None:
+    """鎖定真實套件 NotFound 的對象訊息，避免以猜測 fixture 寫 classifier。"""
+    from gallery_dl import exception
+
+    def missing_items(_self: object) -> Iterator[tuple[int, str, dict[str, object]]]:
+        """讓真實 DataJob 處理指定資源不存在的套件例外。"""
+        raise exception.NotFoundError(subject)
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(ContractExtractor, "items", missing_items)
+    parsed = _parse_json_records(_data_job_output(monkeypatch))
+    assert list(parsed.error_records) == [
+        {"error": "NotFoundError", "message": f"Requested {subject} could not be found"}
+    ]
+
+
 def test_installed_cli_accepts_resolve_json() -> None:
     """確認安裝的 gallery-dl CLI 接受 adapter 使用的 --resolve-json。"""
     executable = shutil.which("gallery-dl")
@@ -162,7 +274,7 @@ def test_installed_data_job_events_round_trip_through_adapter(
     output = _data_job_output(monkeypatch)
     events = json.loads(output)
     assert isinstance(events, list)
-    assert [event[0] for event in events] == [2, 3, 6, -1]
+    assert [event[0] for event in events] == [2, 3, 6, -1], events
 
     parsed = _parse_json_records(output)
     assert parsed.literal_empty is False

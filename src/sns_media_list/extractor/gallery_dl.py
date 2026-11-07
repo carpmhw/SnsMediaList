@@ -837,6 +837,16 @@ def _map_story_extractor_error(
     authenticated: bool,
 ) -> AppError:
     """依明確 diagnostic 證據與 Cookie 配置狀態分類單則 Story 錯誤。"""
+    if normalized_type in {None, _NOT_FOUND_ERROR_TYPE} and re.search(
+        r"^(?:\[instagram\]\[error\]\s*)?Requested user could not be found[.!]?\s*$",
+        diagnostic,
+        re.IGNORECASE | re.MULTILINE,
+    ):
+        return AppError(
+            "extraction_failed",
+            "The source platform could not be extracted.",
+            failure_stage="extractor_process_unclassified",
+        )
     if normalized_type == _NOT_FOUND_ERROR_TYPE or 404 in statuses:
         return AppError(
             "story_unavailable",

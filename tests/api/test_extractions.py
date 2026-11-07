@@ -478,17 +478,27 @@ def test_story_missing_or_unsafe_pseudo_source_issues_no_token_or_private_output
             assert private_value not in log_text
 
 
-def test_story_width_keyerror_keeps_generic_fallback_without_tokens(
+@pytest.mark.parametrize(
+    ("error_type", "message", "diagnostic_type"),
+    [
+        ("KeyError", "'width'", "unknown"),
+        ("NotFoundError", "Requested user could not be found", "not_found"),
+    ],
+)
+def test_story_extraction_errors_keep_generic_fallback_without_tokens(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     tmp_path: Path,
+    error_type: str,
+    message: str,
+    diagnostic_type: str,
 ) -> None:
-    """驗證合成 KeyError width 延用一般 extraction_failed 與私有診斷契約。"""
+    """驗證 width 與帳號解析錯誤沿用一般失敗、不核發 token 且不公開診斷。"""
     story_id = "6666666666666666666"
     story_url = f"https://www.instagram.com/stories/example.user/{story_id}/"
     cookie_file = tmp_path / "synthetic-instagram-cookies.txt"
     cookie_file.write_text("width-keyerror-cookie-sentinel", encoding="utf-8")
-    output = json.dumps([[-1, {"error": "KeyError", "message": "'width'"}]]).encode()
+    output = json.dumps([[-1, {"error": error_type, "message": message}]]).encode()
     install_synthetic_gallery_subprocess(monkeypatch, output)
     token_store = TokenStore(capacity=20, ttl_seconds=600)
     settings = Settings(instagram_cookie_file=str(cookie_file))
@@ -504,10 +514,14 @@ def test_story_width_keyerror_keeps_generic_fallback_without_tokens(
 
     assert response.status_code == 502
     assert response.json()["code"] == "extraction_failed"
+    assert response.headers["X-SNS-Error-Code"] == "extraction_failed"
     assert token_store.size == 0
     assert "failure_stage" not in response.text
     assert "extractor_diagnostics" not in response.text
-    assert "'width'" not in response.text
+    assert message not in response.text
+    for field in ("failure_stage", "extractor_diagnostics", "extractor_error_type"):
+        assert field not in str(response.headers)
+        assert field not in json.dumps(client.get("/openapi.json").json())
     events = [
         record.__dict__["event"]
         for record in caplog.records
@@ -516,7 +530,7 @@ def test_story_width_keyerror_keeps_generic_fallback_without_tokens(
     assert len(events) == 1
     assert events[0]["failure_stage"] == "extractor_process_unclassified"
     assert events[0]["extractor_diagnostic_source"] == "datajob_error"
-    assert events[0]["extractor_error_type"] == "unknown"
+    assert events[0]["extractor_error_type"] == diagnostic_type
     assert events[0]["extractor_exit_code"] == 0
 
 

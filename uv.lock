@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -433,14 +433,14 @@ wheels = [
 
 [[package]]
 name = "gallery-dl"
-version = "1.32.14"
+version = "1.32.19"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e6/a7/81d656eee98122bbae8234a3e85b6923b19c6c5b7c43d3a907625806003a/gallery_dl-1.32.14.tar.gz", hash = "sha256:70657865488e09c2d7bcabc1faf9b5f8c5a8b550ee123a87ca5c7740f70ed382", size = 755950, upload-time = "2026-09-27T10:01:08.286Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1a/71/f233d60f40e37381f33590907f0884da453e46963112fb22f352dc1def26/gallery_dl-1.32.19.tar.gz", hash = "sha256:63323bc1bc37b8ba25c19d2ef7a86158d1f79cccaee8d69dda907986f3f3e824", size = 765627, upload-time = "2026-10-31T11:28:47.403Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/48/85/44e7fbc106921e6f55ce7ca7bd53048fe6cf5a5fea6912394dffd931c8d3/gallery_dl-1.32.14-py3-none-any.whl", hash = "sha256:c1be6e1397a9eaf53252eceb0fc3701631fa1f29a34c155cb374f71e5345b943", size = 937876, upload-time = "2026-09-27T10:01:04.098Z" },
+    { url = "https://files.pythonhosted.org/packages/5d/c3/87c38fa0d392455a14b3f32b8a3acf0887ced4689a7b5fc6e0d9f761213f/gallery_dl-1.32.19-py3-none-any.whl", hash = "sha256:f6b1eb5e9a7409a988b754335d99dbb1873e130d133ed5d164d32e5e645d1c50", size = 946594, upload-time = "2026-10-31T11:28:43.517Z" },
 ]
 
 [[package]]
@@ -1486,7 +1486,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = "==0.139.2" },
-    { name = "gallery-dl", specifier = "==1.32.14" },
+    { name = "gallery-dl", specifier = "==1.32.19" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "httpx2", marker = "extra == 'dev'", specifier = "==2.12.0" },
     { name = "mcp", extras = ["cli"], specifier = "==2.3.0" },

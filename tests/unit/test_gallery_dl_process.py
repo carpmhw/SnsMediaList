@@ -14,6 +14,8 @@ from sns_media_list.extractor.gallery_dl import (
     GalleryDlRunner,
     _add_post_context,
     _cleanup_extraction_tasks,
+    _map_json_error_records,
+    _map_process_error,
     _stop_extraction_process,
     build_gallery_command,
     build_sanitized_environment,
@@ -61,6 +63,150 @@ def test_command_keeps_merged_video_mode_for_instagram_post() -> None:
 
     assert "extractor.instagram.videos=merged" in command
     assert "extractor.instagram.previews=false" in command
+
+
+@pytest.mark.parametrize("cookie_file", [None, "/run/secrets/instagram-cookies.txt"])
+def test_story_command_keeps_security_options_without_removed_strategy(
+    cookie_file: str | None,
+) -> None:
+    """確認 1.32.19 Story command 不含已移除選項，且 Cookie、proxy 與影片模式不變。"""
+    command = build_gallery_command(
+        STORY_URL,
+        target_kind="story",
+        proxy_url="http://127.0.0.1:8765",
+        cookie_file=cookie_file,
+    )
+    assert not any("user-strategy" in arg for arg in command)
+    assert "extractor.instagram.videos=merged" not in command
+    assert "extractor.instagram.previews=false" in command
+    assert command[command.index("--retries") + 1] == "0"
+    assert command[command.index("--proxy") + 1] == "http://127.0.0.1:8765"
+    assert command[-1] == STORY_URL
+    if cookie_file:
+        assert f"extractor.instagram.cookies={cookie_file}" in command
+        assert "extractor.instagram.cookies-update=false" in command
+    else:
+        assert not any(".cookies=" in arg for arg in command)
+
+
+@pytest.mark.parametrize(
+    ("target", "target_kind"),
+    [
+        (STORY_URL, "story"),
+        (POST_URL, "post"),
+        ("https://www.instagram.com/reel/ABC123/", "post"),
+        ("https://x.com/creator/status/1", "post"),
+    ],
+)
+def test_all_commands_omit_removed_user_strategy(target: str, target_kind: str) -> None:
+    """確認 1.32.19 已移除的 user-strategy 不會出現在任何 command。"""
+    command = build_gallery_command(
+        target, target_kind=target_kind, proxy_url="http://127.0.0.1:8765"
+    )
+    assert not any("user-strategy" in arg for arg in command)
+
+
+@pytest.mark.parametrize("authenticated", [False, True])
+@pytest.mark.parametrize("source", ["record", "stderr"])
+@pytest.mark.parametrize(
+    ("error_type", "message", "expected", "stderr_expected"),
+    [
+        (
+            "NotFoundError",
+            "Requested user could not be found",
+            "extraction_failed",
+            "extraction_failed",
+        ),
+        (
+            "NotFoundError",
+            "Requested user could not be found\nHTTP 404 Not Found",
+            "extraction_failed",
+            "extraction_failed",
+        ),
+        (
+            "NotFoundError",
+            "Requested story could not be found",
+            "story_unavailable",
+            "story_unavailable",
+        ),
+        ("NotFoundError", "NotFoundError", "story_unavailable", "story_unavailable"),
+        ("NotFoundError", "HTTP 404 Not Found", "story_unavailable", "story_unavailable"),
+        ("NotFoundError", "user", "story_unavailable", "extraction_failed"),
+        (
+            "NotFoundError",
+            "Requested user could not be found elsewhere",
+            "story_unavailable",
+            "extraction_failed",
+        ),
+        (
+            "NotFoundError",
+            "https://example.invalid/?message=Requested%20user%20could%20not%20be%20found",
+            "story_unavailable",
+            "extraction_failed",
+        ),
+        (
+            "NotFoundError",
+            "Requested user could not be found\nHTTP 429 Too Many Requests",
+            "upstream_rate_limited",
+            "upstream_rate_limited",
+        ),
+    ],
+)
+def test_story_user_not_found_is_not_story_availability(
+    authenticated: bool,
+    source: str,
+    error_type: str,
+    message: str,
+    expected: str,
+    stderr_expected: str,
+) -> None:
+    """驗證精確 user 診斷例外、來源對等與窄範圍匹配不改變 Story 及限流語意。"""
+    if source == "record":
+        with pytest.raises(AppError) as raised:
+            _map_json_error_records(
+                [{"error": error_type, "message": message}],
+                target_kind="story",
+                authenticated=authenticated,
+            )
+        error = raised.value
+    else:
+        expected = stderr_expected
+        error = _map_process_error(
+            ("[instagram][error] " + message).encode(),
+            exit_code=1,
+            target_kind="story",
+            authenticated=authenticated,
+        )
+    assert error.code == expected
+    assert error.failure_stage == (
+        "extractor_process_unclassified"
+        if expected == "extraction_failed"
+        else "extractor_platform_error"
+    )
+    assert error.extractor_diagnostics is not None
+    assert error.extractor_diagnostics.extractor_error_type == (
+        "not_found" if source == "record" else "unknown"
+    )
+
+
+def test_user_not_found_does_not_borrow_later_record_or_override_wrong_type() -> None:
+    """確認第一筆 Story error 及已知錯配 type 不會被後續 user 診斷覆寫。"""
+    for records, expected in (
+        (
+            [
+                {"error": "NotFoundError", "message": "Requested story could not be found"},
+                {"error": "NotFoundError", "message": "Requested user could not be found"},
+            ],
+            "story_unavailable",
+        ),
+        (
+            [{"error": "HttpError", "message": "Requested user could not be found\nHTTP 404"}],
+            "story_unavailable",
+        ),
+    ):
+        with pytest.raises(AppError) as raised:
+            _map_json_error_records(records, target_kind="story", authenticated=True)
+        assert raised.value.code == expected
 
 
 def test_command_passes_only_matching_instagram_cookie_path() -> None:
@@ -2051,6 +2197,39 @@ async def test_runner_terminates_on_timeout(monkeypatch: Any) -> None:
     assert exc_info.value.failure_stage == "extractor_timeout"
     assert exc_info.value.extractor_diagnostics is None
     assert process.terminated is True
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_story_info_resolution_keeps_one_process_and_bounded_cleanup(
+    monkeypatch: pytest.MonkeyPatch, cancel: bool
+) -> None:
+    """確認 Story 帳號解析等待期間的總期限與取消不會啟動額外擷取。"""
+    process = StreamProcess(b"", b"")
+    commands: list[tuple[object, ...]] = []
+
+    async def create(*args: object, **_kwargs: object) -> StreamProcess:
+        """保留正式 command，回傳等待終止的受控 subprocess。"""
+        commands.append(args)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+    runner = GalleryDlRunner(Settings(extraction_timeout_seconds=1 if cancel else 0.01))
+    extraction = asyncio.create_task(runner.extract(validate_post_url(STORY_URL)))
+    await asyncio.wait_for(process.wait_started.wait(), timeout=0.5)
+    if cancel:
+        extraction.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await extraction
+    else:
+        with pytest.raises(AppError) as raised:
+            await extraction
+        assert raised.value.code == "extraction_timeout"
+        assert raised.value.failure_stage == "extractor_timeout"
+    assert len(commands) == 1
+    assert not any("user-strategy" in str(arg) for arg in commands[0])
+    assert "extractor.instagram.previews=false" in commands[0]
+    assert process.terminated
+    assert process.returncode is not None
 
 
 @pytest.mark.asyncio
