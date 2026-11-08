@@ -27,7 +27,7 @@ def test_readme_documents_supported_operation_and_limits() -> None:
 
 
 def test_readme_documents_single_story_support_and_security_boundaries() -> None:
-    """Verify the README documents exact Story support and trusted-session risks."""
+    """驗證單則與清單支援、上限及可信工作階段風險均有說明。"""
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
     support_section = readme.partition("## 支援範圍與限制")[2].partition("\n## ")[0]
     cookie_section = readme.partition("## 平台 Cookie 驗證（可信部署）")[2].partition("\n## ")[0]
@@ -43,14 +43,21 @@ def test_readme_documents_single_story_support_and_security_boundaries() -> None
     assert "匿名" in story_support_row.group()
     assert "best effort" in story_support_row.group()
     assert re.search(
-        r"^\|[^|\n]*帳號全部 Stories[^|\n]*Highlights[^|\n]*\|\s*不支援\s*\|$",
+        r"^\|[^|\n]*Stories tray[^|\n]*Highlights[^|\n]*\|\s*不支援\s*\|$",
         support_section,
         re.MULTILINE,
     )
 
     assert re.search(r"Story[^|\n]*主要圖片[^|\n]*漸進式影片", support_section)
     assert re.search(r"圖片 Story[^。\n]*音訊[^。\n]*audio", support_section)
-    assert re.search(r"不提供[^。\n]*Story 批次[^。\n]*ZIP[^。\n]*轉碼", support_section)
+    assert re.search(r"不提供[^。\n]*ZIP[^。\n]*轉碼", support_section)
+    assert re.search(
+        r"^\|[^|\n]*`/stories/<username>/`[^|\n]*\|\s*支援[^|\n]*20[^|\n]*\|$",
+        support_section,
+        re.MULTILINE,
+    )
+    assert "不截斷" in support_section
+    assert "單則連結" in support_section
 
     assert re.search(
         r"operator[^。\n]*Story[^。\n]*私人[^。\n]*Close Friends[^。\n]*受眾限定",

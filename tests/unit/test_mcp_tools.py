@@ -93,6 +93,7 @@ async def test_tool_projects_links_in_text_and_structured_content(base: str | No
         "https://www.instagram.com/p/example/",
         "https://www.instagram.com/reel/example/",
         "https://www.instagram.com/stories/example/123/",
+        "https://www.instagram.com/stories/example/",
     ],
 )
 async def test_tool_uses_existing_pipeline_with_public_schema(url: str, mode: str) -> None:
@@ -112,6 +113,7 @@ async def test_tool_uses_existing_pipeline_with_public_schema(url: str, mode: st
         tools = await client.list_tools()
         assert [tool.name for tool in tools.tools] == ["extract_media"]
         tool = tools.tools[0]
+        assert "Story 清單" in tool.description
         assert tool.input_schema["additionalProperties"] is False
         assert tool.output_schema["additionalProperties"] is False
         result = await client.call_tool("extract_media", {"url": url})
@@ -121,7 +123,9 @@ async def test_tool_uses_existing_pipeline_with_public_schema(url: str, mode: st
     assert result.is_error is False
     assert result.structured_content["post_url"] == url
     assert result.structured_content["media"][0]["download_url"].startswith("/api/media/")
-    assert len(result.structured_content["media"]) == (1 if "/stories/" in url else 2)
+    assert len(result.structured_content["media"]) == (
+        1 if url.endswith("/123/") and "/stories/" in url else 2
+    )
     assert PRIVATE_SOURCE not in result.model_dump_json()
 
 
@@ -182,7 +186,7 @@ async def test_invalid_arguments_emit_started_and_one_terminal_event(
         "http://127.0.0.1/",
         "http://169.254.169.254/",
         "https://localhost/",
-        "https://www.instagram.com/stories/example/",
+        "https://www.instagram.com/stories/me/",
         "https://x.com/example/",
     ],
 )

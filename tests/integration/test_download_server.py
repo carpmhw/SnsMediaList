@@ -103,6 +103,44 @@ def extract(origin: str, *, target_path: str = "/p/fixture/") -> dict[str, Any]:
     return response.json()["media"][0]
 
 
+@pytest.mark.parametrize("mode", ["success", "error"])
+def test_story_list_distinct_downloads_and_cleanup(tmp_path: Path, mode: str) -> None:
+    """清單各 token 經真實 HTTP 取得對應完整檔案，失敗後釋放 upstream。"""
+    with running_server(tmp_path, mode=mode) as origin:
+        response = httpx.post(
+            origin + "/api/extractions",
+            json={"url": "https://www.instagram.com/stories/example.user/"},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["post_url"] == "https://www.instagram.com/stories/example.user/"
+        assert [item["filename"] for item in payload["media"]] == [
+            "instagram-101-1.jpg",
+            "instagram-202-1.mp4",
+        ]
+        for item, expected in zip(payload["media"], [IMAGE, VIDEO], strict=True):
+            assert httpx.head(origin + item["download_url"]).status_code == 204
+            if mode == "success":
+                download = httpx.get(origin + item["download_url"])
+                assert download.content == expected
+                assert item["filename"] in download.headers["content-disposition"]
+            else:
+                with pytest.raises(httpx.RemoteProtocolError):
+                    httpx.get(origin + item["download_url"])
+        stats = httpx.get(origin + "/fixture-stats").json()
+        assert stats["fetches"] == stats["closes"] == 2
+        assert stats["active"] == 0
+    lifecycle = [
+        event for event in events(tmp_path) if event["event"].startswith("media_download_")
+    ]
+    terminal = [event for event in lifecycle if event["event"] != "media_download_started"]
+    assert len(terminal) == 2
+    assert {event["event"] for event in terminal} == {
+        "media_download_completed" if mode == "success" else "media_download_failed"
+    }
+    assert SENTINEL not in (tmp_path / "server.log").read_text()
+
+
 def events(tmp_path: Path) -> list[dict[str, Any]]:
     """只解析實際程序輸出的 application JSON 行。"""
     return [

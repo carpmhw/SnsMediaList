@@ -17,11 +17,12 @@
 
 SNS Media List 是低併發、自架式媒體整理、預覽與下載工具，後端採 FastAPI，前端為直接提供的 HTML、CSS 與原生 JavaScript。
 
-- 支援 Instagram 單篇貼文、Reel、`/stories/<username>/<numeric-media-id>/` 精確單則 Story，以及 X/Twitter 單篇狀態貼文。
+- 支援 Instagram 單篇貼文、Reel、`/stories/<username>/<numeric-media-id>/` 精確單則 Story、`/stories/<username>/` 帳號當下 Story 清單，以及 X/Twitter 單篇狀態貼文。
 - 媒體包含圖片、漸進式影片及 X 動畫 GIF，保留來源順序。單則 Story 只輸出一個主要媒體。
 - 批次分析最多 5 個 URL，由前端循序呼叫單筆 API；不要將其改成後端批次工作佇列。
 - 選取下載為逐項交給瀏覽器；UI 的「已開始下載」不等於檔案已完成保存。
-- 不建立使用者帳號、歷史記錄或永久完整媒體儲存；目前不提供帳號 feed、全部 Stories、Highlights、ZIP、轉碼或 HLS/DASH 合併。
+- Story 清單預設及最高 20 則，較低 operator 上限仍生效；超量整次拒絕、提醒改貼單則，不截斷或核發部分 token。逐則保留自己的 media ID／檔名，不使用帳號 reel ID。
+- 不建立使用者帳號、歷史記錄或永久完整媒體儲存；目前不提供帳號 feed、跨帳號 Stories tray、歷史／過期 Stories、Highlights、ZIP、轉碼或 HLS/DASH 合併。
 - 匿名存取受平台限制；operator 可透過唯讀 Cookie 檔提供對應平台的帳號可見權限。服務沒有個別使用者權限隔離。
 
 若任務涉及擴充上述邊界，先確認需求與相關規格，再同步調整實作、測試和文件。

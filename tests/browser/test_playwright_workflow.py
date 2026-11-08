@@ -839,9 +839,104 @@ def test_story_unavailable_uses_safe_generic_message(page: Page, base_url: str) 
     page.click("#analyze-button")
 
     expect(page.locator("#status")).to_have_text(
-        "此 Instagram Story 已無法取得，可能已過期、刪除或無權限存取。"
+        "目前無可取得的 Instagram Story，可能沒有可見內容、已過期、刪除或無權限存取。"
     )
     expect(page.locator("#status")).not_to_contain_text(raw_message)
+
+
+def test_story_list_limit_shows_safe_guidance_without_partial_cards(
+    page: Page, base_url: str
+) -> None:
+    """超量只顯示固定提醒，不回顯原始診斷或顯示前二十張成功卡片。"""
+
+    def extraction_error(route: Any, _request: Any) -> None:
+        """以低 operator 上限也可能觸發的共用錯誤碼回應。"""
+        fulfill_json(
+            route,
+            {
+                "code": "extraction_limit_exceeded",
+                "message": "private raw upstream 21",
+                "request_id": "test",
+            },
+            status=422,
+        )
+
+    page.route("**/api/extractions", extraction_error)
+    page.goto(base_url)
+    expect(page.locator("#url-help")).to_contain_text("Story 清單")
+    page.fill("#post-url", "https://www.instagram.com/stories/example.user/")
+    page.click("#analyze-button")
+    expect(page.locator("#status")).to_contain_text("最高 20")
+    expect(page.locator("#status")).to_contain_text("單則連結")
+    expect(page.locator("#status")).not_to_contain_text("private raw")
+    expect(page.locator(".media-card")).to_have_count(0)
+
+
+def test_story_list_selection_and_native_download_preserve_order(page: Page, base_url: str) -> None:
+    """清單沿用單群組選取、類型篩選與下載，不自動下載或重複公告。"""
+    url = "https://www.instagram.com/stories/example.user/"
+    payload = {
+        **SUCCESS_PAYLOAD,
+        "platform": "instagram",
+        "post_url": url,
+        "unavailable_media_count": 0,
+        "media": [
+            {
+                **SUCCESS_PAYLOAD["media"][0],
+                "filename": "instagram-202-1.jpg",
+                "download_url": "/api/media/story-202/download",
+            },
+            {
+                **SUCCESS_PAYLOAD["media"][0],
+                "media_type": "video",
+                "filename": "instagram-101-1.mp4",
+                "download_url": "/api/media/story-101/download",
+            },
+        ],
+    }
+    methods: list[str] = []
+
+    def extraction(route: Any, _request: Any) -> None:
+        """提供來源順序不按 ID 排序的合成清單。"""
+        fulfill_json(route, payload)
+
+    def download(route: Any, request: Any) -> None:
+        """提供瀏覽器原生下載的合成附件。"""
+        methods.append(f"{request.method}:{urlsplit(request.url).path}")
+        route.fulfill(
+            status=204 if request.method == "HEAD" else 200,
+            headers={"Content-Disposition": 'attachment; filename="story.bin"'},
+            body=b"media",
+        )
+
+    page.route("**/api/extractions", extraction)
+    page.route("**/api/media/**/download", download)
+    page.set_viewport_size({"width": 320, "height": 800})
+    page.goto(base_url)
+    page.fill("#post-url", url)
+    page.click("#analyze-button")
+    expect(page.locator(".media-card")).to_have_count(2)
+    expect(page.locator("#source-link")).to_have_attribute("href", url)
+    expect(page.locator(".selection-summary")).to_contain_text("0 / 2")
+    assert methods == []
+    page.get_by_role("button", name="只選圖片").click()
+    expect(page.locator(".media-selection").nth(0)).to_be_checked()
+    expect(page.locator(".media-selection").nth(1)).not_to_be_checked()
+    page.get_by_role("button", name="只選影片").click()
+    expect(page.locator(".media-selection").nth(0)).not_to_be_checked()
+    expect(page.locator(".media-selection").nth(1)).to_be_checked()
+    page.get_by_role("button", name="全選", exact=True).click()
+    page.get_by_role("button", name="下載選取項目").click()
+    expect(page.locator(".download-summary")).to_contain_text("2 個下載已開始")
+    expect(page.locator(".download-summary")).to_have_count(1)
+    expect(page.locator(".group-status")).to_be_empty()
+    assert [method for method in methods if method.startswith("HEAD")] == [
+        "HEAD:/api/media/story-202/download",
+        "HEAD:/api/media/story-101/download",
+    ]
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    page.click("#analyze-button")
+    expect(page.locator(".selection-summary")).to_contain_text("0 / 2")
 
 
 def test_story_auth_required_uses_fixed_operator_guidance(page: Page, base_url: str) -> None:

@@ -36,13 +36,13 @@ let activeResultGroupIndex = 0;
 const activeDownloadRuns = new Set();
 
 const ERROR_MESSAGES = {
-  invalid_url: '請輸入 HTTPS Instagram 貼文、Reel、單則 Story 或 X 狀態貼文 URL。',
-  unsupported_url: '僅支援 Instagram 貼文、Reel、單則 Story 與 X 狀態貼文 URL；帳號目前全部 Stories 與 Highlights 不支援。',
+  invalid_url: '請輸入 HTTPS Instagram 貼文、Reel、單則 Story、帳號當下 Story 清單或 X 狀態貼文 URL。',
+  unsupported_url: '僅支援 Instagram 貼文、Reel、單則 Story、帳號當下 Story 清單與 X 狀態貼文 URL；帳號首頁、Stories tray 與 Highlights 不支援。',
   post_unavailable: '此貼文無法使用、已刪除，或目前帳號無法讀取。',
   story_auth_required: '此 Instagram Story 需要登入驗證，服務目前未設定 Instagram 工作階段。請聯絡服務管理者。',
-  story_unavailable: '此 Instagram Story 已無法取得，可能已過期、刪除或無權限存取。',
+  story_unavailable: '目前無可取得的 Instagram Story，可能沒有可見內容、已過期、刪除或無權限存取。',
   no_media: '此內容沒有可直接串流的媒體。',
-  extraction_limit_exceeded: '此內容的媒體數量超過服務可列出的上限。',
+  extraction_limit_exceeded: '此內容的媒體數量超過服務上限（最高 20 項，依管理者設定可能更低），不會截取部分結果。Story 請改貼單則連結。',
   request_too_large: '提交的請求太大，請只貼上一個內容 URL。',
   unsupported_media_type: '請使用未壓縮的 JSON 請求提交內容 URL。',
   local_rate_limited: '服務目前忙碌中，請稍候再試。',

@@ -142,12 +142,13 @@ def test_installed_distribution_matches_exact_project_pin() -> None:
 
 
 def _story_extractor_with_page(
-    monkeypatch: pytest.MonkeyPatch, page: bytes
+    monkeypatch: pytest.MonkeyPatch,
+    page: bytes,
+    target: str = "https://www.instagram.com/stories/contract.user/123456789/",
 ) -> instagram.InstagramStoriesExtractor:
     """建立使用合成個人頁的實際 Story extractor，並關閉跨測試快取。"""
     from gallery_dl.extractor import common as gallery_common
 
-    target = "https://www.instagram.com/stories/contract.user/123456789/"
     pattern = instagram.InstagramStoriesExtractor.pattern
     match = re.match(pattern, target)
     assert match is not None
@@ -175,6 +176,73 @@ def _story_extractor_with_page(
     monkeypatch.setattr(extractor, "request", page_response)
     extractor.initialize()
     return extractor
+
+
+@pytest.mark.parametrize("exact", [False, True])
+def test_installed_story_list_preserves_item_identity(
+    monkeypatch: pytest.MonkeyPatch, exact: bool
+) -> None:
+    """以 pinned extractor 鎖定 reel 與逐則媒體身分，避免 adapter 借用帳號 ID。"""
+    target = "https://www.instagram.com/stories/contract.user/"
+    if exact:
+        target += "202/"
+    extractor = _story_extractor_with_page(monkeypatch, b"synthetic", target)
+
+    def user(_username: str) -> dict[str, str]:
+        """提供合成帳號，不呼叫平台。"""
+        assert _username == "contract.user"
+        return {"id": "999", "username": "contract.user"}
+
+    def reels(ids: tuple[str, ...]) -> list[dict[str, object]]:
+        """提供一個 reel 內的圖片與影片供真正套件解析。"""
+        assert ids == ("999",)
+        return [
+            {
+                "id": "999",
+                "seen": 1700000000,
+                "user": {"pk": "999", "username": "contract.user"},
+                "items": [
+                    {
+                        "pk": "101",
+                        "taken_at": 1700000000,
+                        "image_versions2": {
+                            "candidates": [
+                                {"url": "https://cdn.example/a.jpg", "width": 10, "height": 20}
+                            ]
+                        },
+                    },
+                    {
+                        "pk": "202",
+                        "taken_at": 1700000001,
+                        "image_versions2": {
+                            "candidates": [
+                                {"url": "https://cdn.example/b.jpg", "width": 10, "height": 20}
+                            ]
+                        },
+                        "video_versions": [
+                            {"url": "https://cdn.example/b.mp4", "width": 10, "height": 20}
+                        ],
+                    },
+                ],
+            }
+        ]
+
+    monkeypatch.setattr(extractor.api, "user", user)
+    monkeypatch.setattr(extractor.api, "reels_media", reels)
+    posts = list(extractor.posts())
+    metadata = extractor._parse_post(posts[0])
+    assert metadata["post_id"] == "999"
+    files = metadata["_files"]
+    assert [item["media_id"] for item in files] == (["202"] if exact else ["101", "202"])
+    assert [item["num"] for item in files] == ([1] if exact else [1, 2])
+    assert files[-1]["video_url"] == "https://cdn.example/b.mp4"
+    output = io.StringIO()
+    data_job = gallery_job.DataJob(extractor, file=output, resolve=True)
+    assert data_job.run() == 0
+    records = _parse_json_records(output.getvalue().encode()).media_records
+    assert [record["media_id"] for record in records] == (["202"] if exact else ["101", "202"])
+    assert all(record["post_id"] == "999" for record in records)
+    assert records[-1]["video_url"] == "https://cdn.example/b.mp4"
 
 
 def test_installed_story_user_resolution_uses_profile_page_then_graphql(

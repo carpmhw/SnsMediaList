@@ -66,13 +66,15 @@ def test_command_keeps_merged_video_mode_for_instagram_post() -> None:
 
 
 @pytest.mark.parametrize("cookie_file", [None, "/run/secrets/instagram-cookies.txt"])
+@pytest.mark.parametrize("url", [STORY_URL, "https://www.instagram.com/stories/example.user/"])
 def test_story_command_keeps_security_options_without_removed_strategy(
     cookie_file: str | None,
+    url: str,
 ) -> None:
     """確認 1.32.19 Story command 不含已移除選項，且 Cookie、proxy 與影片模式不變。"""
     command = build_gallery_command(
-        STORY_URL,
-        target_kind="story",
+        url,
+        target_kind=validate_post_url(url).kind,
         proxy_url="http://127.0.0.1:8765",
         cookie_file=cookie_file,
     )
@@ -81,7 +83,7 @@ def test_story_command_keeps_security_options_without_removed_strategy(
     assert "extractor.instagram.previews=false" in command
     assert command[command.index("--retries") + 1] == "0"
     assert command[command.index("--proxy") + 1] == "http://127.0.0.1:8765"
-    assert command[-1] == STORY_URL
+    assert command[-1] == url
     if cookie_file:
         assert f"extractor.instagram.cookies={cookie_file}" in command
         assert "extractor.instagram.cookies-update=false" in command
@@ -495,6 +497,72 @@ async def assert_runner_error(
     if expected_status is not None:
         assert exc_info.value.status_code == expected_status
     return exc_info.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured", [False, True])
+@pytest.mark.parametrize("stderr", [False, True])
+@pytest.mark.parametrize(
+    ("error_type", "message", "code"),
+    [
+        ("NotFoundError", "Requested user could not be found", "extraction_failed"),
+        ("NotFoundError", "Requested story could not be found", "story_unavailable"),
+        ("HttpError", "HTTP 429 Too Many Requests", "upstream_rate_limited"),
+        ("AuthRequired", "login required", "auth"),
+    ],
+)
+async def test_story_list_error_sources_keep_existing_classification(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    configured: bool,
+    stderr: bool,
+    error_type: str,
+    message: str,
+    code: str,
+) -> None:
+    """清單沿用 Story 分類，不能以一般貼文分類掩蓋可用性或認證原因。"""
+    if code == "auth":
+        code = "platform_authentication_failed" if configured else "story_auth_required"
+    await assert_runner_error(
+        monkeypatch,
+        target_url="https://www.instagram.com/stories/example.user/",
+        settings=instagram_settings(tmp_path, configured),
+        message=message,
+        expected_code=code,
+        error_type=error_type,
+        process_stderr=stderr,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("output", "code"),
+    [
+        (b"[]", "story_unavailable"),
+        (b"[[2, {}]]", "no_media"),
+        (b"not-json", "extraction_failed"),
+        (
+            b'[[3,"https://cdn.example/a.jpg",{"media_id":"101"}],'
+            b'[-1,{"error":"NotFoundError","message":"Requested story could not be found"}],'
+            b'[-1,{"error":"HttpError","message":"HTTP 429"}]]',
+            "story_unavailable",
+        ),
+    ],
+)
+async def test_story_list_empty_and_error_results_are_not_partial_success(
+    monkeypatch: pytest.MonkeyPatch,
+    output: bytes,
+    code: str,
+) -> None:
+    """合法空清單、非媒體、破損與第一筆錯誤各自保留原安全結果。"""
+    with pytest.raises(AppError) as caught:
+        await extract_process_output(
+            monkeypatch,
+            output,
+            validate_post_url("https://www.instagram.com/stories/example.user/"),
+            Settings(),
+        )
+    assert caught.value.code == code
 
 
 @pytest.mark.asyncio
@@ -2200,8 +2268,11 @@ async def test_runner_terminates_on_timeout(monkeypatch: Any) -> None:
 
 
 @pytest.mark.parametrize("cancel", [False, True])
+@pytest.mark.parametrize("url", [STORY_URL, "https://www.instagram.com/stories/example.user/"])
 async def test_story_info_resolution_keeps_one_process_and_bounded_cleanup(
-    monkeypatch: pytest.MonkeyPatch, cancel: bool
+    monkeypatch: pytest.MonkeyPatch,
+    cancel: bool,
+    url: str,
 ) -> None:
     """確認 Story 帳號解析等待期間的總期限與取消不會啟動額外擷取。"""
     process = StreamProcess(b"", b"")
@@ -2214,7 +2285,7 @@ async def test_story_info_resolution_keeps_one_process_and_bounded_cleanup(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
     runner = GalleryDlRunner(Settings(extraction_timeout_seconds=1 if cancel else 0.01))
-    extraction = asyncio.create_task(runner.extract(validate_post_url(STORY_URL)))
+    extraction = asyncio.create_task(runner.extract(validate_post_url(url)))
     await asyncio.wait_for(process.wait_started.wait(), timeout=0.5)
     if cancel:
         extraction.cancel()

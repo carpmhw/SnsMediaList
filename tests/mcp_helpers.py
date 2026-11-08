@@ -61,8 +61,10 @@ class FakeExtractor:
                 records.append(
                     {
                         "platform": target.platform,
-                        "post_url": target.canonical_url,
-                        "post_id": target.target_id,
+                        "post_url": f"{target.canonical_url}{index}/"
+                        if target.kind == "story_list"
+                        else target.canonical_url,
+                        "post_id": str(index) if target.kind == "story_list" else target.target_id,
                         "author": "example",
                         "num": index,
                         "type": media_type,

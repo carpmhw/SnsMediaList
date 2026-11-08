@@ -262,6 +262,8 @@ Host／Origin 防護不是身份驗證。MCP 只適合本人／可信網路或�
 
 `media_type` 為 `image` 或 `video`，X 動畫 GIF 以 `video` 表示；缺少的作者、描述、尺寸或時長可為 null。媒體維持來源順序、最多 20 項，精確 Story 只輸出一個主要媒體。
 
+MCP `extract_media` 共用 `/stories/<username>/` 帳號 Story 清單：群組 post_url 為帳號 Stories canonical URL，逐則 filename／token 保持獨立，最多 20 項且較低設定仍生效。超量安全 isError、無部分 structured content 或 token；Cookie 仍為 operator 共用工作階段，並非 Client 個別授權。不改 public origin、Host／Origin allowlist 或 REST／MCP 共用 budget。
+
 ### 結果、錯誤與排錯
 
 Tool 成功回傳 metadata；未設定 public origin 時為 root-relative 相對 preview／download URL，Client 依明確的服務 origin 解析。設定後兩種 path 會投影為絕對連結，placeholder 亦為 `{origin}/placeholder.svg`，null preview 保持 null。文字 JSON 與 structured content 使用同一份結果；REST API、TTL／purpose／capacity、HEAD／GET、預覽與到期 410 均沿用原契約。沒有 media binary、upstream URL、headers 或 raw output，不新增 public origin、media URL 或 token 日誌。
@@ -446,7 +448,13 @@ Proxy 必須覆寫 forwarded client header，不可附加內容；不要信任�
 
 ## 匿名平台限制
 
-僅支援 Instagram `/p/`、`/reel/`、精確 `/stories/<username>/<numeric-media-id>/` 與 X status URL。Story 匿名擷取是 best effort；帳號全部 Stories、Stories tray 與 Highlights 不支援。配置 Cookie 後仍只處理精確 URL 及帳號可見內容。本服務不會接受平台 Cookie 或 credentials 由 request 傳入，也不合併 HLS/DASH stream。
+僅支援 Instagram `/p/`、`/reel/`、精確 `/stories/<username>/<numeric-media-id>/`、帳號當下 `/stories/<username>/` 清單與 X status URL。Story 匿名擷取是 best effort；Stories tray、Highlights、歷史／過期 Story、帳號首頁與裸帳號不支援。配置 Cookie 後只處理明確 URL 及帳號可見內容。本服務不會接受平台 Cookie 或 credentials 由 request 傳入，也不合併 HLS/DASH stream。
+
+清單沿用單次受限 subprocess、相同唯讀 Instagram Cookie、CONNECT proxy、總期限與輸出上限，不逐則重新擷取、不新增重試。每則身分來自同筆 media_id，而非帳號 reel ID；依來源順序回傳每則一個主要媒體及 `instagram-<story-media-id>-1.*` 檔名。合法空清單回 `story_unavailable`／404，不推斷沒有發布、已過期或不可見的唯一原因；全部不可下載維持 `no_media`。第一筆 DataJob error 的分類與來源分離不變，不回傳部分成功清單；Cookie 已配置不代表 session 有效。
+
+清單預設及最高 20 則，較低的 `SNS_MEDIA_MEDIA_LIMIT` 仍生效。不同 Story 候選在可用性篩選及 token 核發前計數，重複畫質只計一則；超量為 422／`extraction_limit_exceeded`，整次拒絕且無新 token，不截斷、不自動拆批，請改貼單則連結。不提高 timeout、輸出大小或其他資源 budget。
+
+選用帳號清單 smoke：只使用 owner-controlled、當下有效且有權保存的內容，在 Web 貼上帳號 Stories URL，確認一個群組、來源順序、各自檔名與初始未選取；再勾選圖片／影片下載。原生「已開始下載」僅證明已交給瀏覽器，須另核對實際檔案大小／內容；資料夾路徑須等每檔 writable close 後才計為已儲存。自動化 picker／writable 使用替身，其通過不代表手機 Edge／Firefox 真機授權介面已驗證。清單與精確 Story live smoke 都是選用項目，不作 CI／release gate；不要將真實 URL、Cookie、token 或 raw output 寫入紀錄。
 
 ## Instagram Story Extraction Diagnostics
 

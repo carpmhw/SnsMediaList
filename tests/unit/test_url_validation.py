@@ -113,10 +113,6 @@ def test_exact_instagram_story_urls_are_canonical_targets(
 @pytest.mark.parametrize(
     "url",
     [
-        pytest.param(
-            "https://www.instagram.com/stories/example.user/",
-            id="account-wide",
-        ),
         pytest.param("https://www.instagram.com/stories/me/", id="own-account-wide"),
         pytest.param("https://www.instagram.com/stories/", id="stories-tray"),
         pytest.param(
@@ -206,10 +202,55 @@ def test_exact_instagram_story_urls_are_canonical_targets(
     ],
 )
 def test_reject_non_exact_or_unsafe_instagram_story_urls(url: str) -> None:
-    """Verify only an exact safe single-Story path passes validation."""
+    """驗證非法 Story 路徑不會取得可信目標身分。"""
     with pytest.raises(AppError) as exc_info:
         validate_post_url(url)
 
+    assert exc_info.value.code == "unsupported_url"
+
+
+@pytest.mark.parametrize("username", ["example.user", "_creator123", "A", "a" * 30])
+def test_story_list_urls_preserve_username_and_remove_query(username: str) -> None:
+    """驗證清單只依 path 分派，分享參數不改變範圍。"""
+    target = validate_post_url(
+        f"https://instagram.com:443/stories/{username}/?media_id=123&igsh=tracking"
+    )
+    assert target.platform == "instagram"
+    assert target.kind == "story_list"
+    assert target.target_id == username
+    assert target.canonical_url == f"https://www.instagram.com/stories/{username}/"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.instagram.com/stories/me/",
+        "https://www.instagram.com/stories/ME/",
+        "https://www.instagram.com/stories/highlights/",
+        "https://www.instagram.com/stories/id:123/",
+        "https://www.instagram.com/stories/.example/",
+        "https://www.instagram.com/stories/example./",
+        "https://www.instagram.com/stories/example..user/",
+        "https://www.instagram.com/stories/bad-user/",
+        "https://www.instagram.com/stories/exämple/",
+        "https://www.instagram.com/stories/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
+        "https://www.instagram.com/stories/example",
+        "https://www.instagram.com/stories/example//",
+        "https://www.instagram.com/stories/example/not-numeric/",
+        "https://www.instagram.com/stories/example/1/extra/",
+        "http://www.instagram.com/stories/example/",
+        "https://user:secret@www.instagram.com/stories/example/",
+        "https://www.instagram.com:8443/stories/example/",
+        "https://www.instagram.com/stories/example/#",
+        "https://evilinstagram.com/stories/example/",
+        "https://www.instagram.com/example/",
+        "@example",
+    ],
+)
+def test_story_list_rejects_unsafe_or_reserved_paths(url: str) -> None:
+    """驗證清單不放寬安全入口或把其他帳號入口當成 Stories。"""
+    with pytest.raises(AppError) as exc_info:
+        validate_post_url(url)
     assert exc_info.value.code == "unsupported_url"
 
 

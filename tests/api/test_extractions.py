@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -33,6 +34,161 @@ class FakeExtractor:
         """Return configured records and count invocations."""
         self.calls += 1
         return self.records
+
+
+def test_story_list_api_keeps_group_url_and_individual_media(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """真正 adapter 到 REST 保留帳號群組與逐則檔名及私有 token 關聯。"""
+    url = "https://www.instagram.com/stories/example.user/"
+    output = json.dumps(
+        [
+            [
+                3,
+                "https://cdn.example/image.jpg",
+                {
+                    "media_id": "202",
+                    "post_id": "999",
+                    "num": 1,
+                    "type": "story",
+                    "extension": "jpg",
+                },
+            ],
+            [
+                3,
+                "ytdl:synthetic",
+                {
+                    "media_id": "101",
+                    "post_id": "999",
+                    "num": 1,
+                    "type": "story",
+                    "video_url": "https://cdn.example/video.mp4",
+                    "extension": "mp4",
+                },
+            ],
+        ]
+    ).encode()
+    calls = install_synthetic_gallery_subprocess(monkeypatch, output)
+    settings = Settings()
+    store = TokenStore(capacity=20, ttl_seconds=600)
+    service = ExtractionService(settings, extractor=GalleryDlRunner(settings), token_store=store)
+    with TestClient(create_app(extraction_service=service)) as client:
+        response = client.post("/api/extractions", json={"url": url + "?igsh=tracking"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["post_url"] == url
+    assert [item["filename"] for item in payload["media"]] == [
+        "instagram-202-1.jpg",
+        "instagram-101-1.mp4",
+    ]
+    assert [item["media_type"] for item in payload["media"]] == ["image", "video"]
+    assert len(calls) == 1
+    assert "cdn.example" not in response.text
+    for item, source in zip(
+        payload["media"],
+        ["https://cdn.example/image.jpg", "https://cdn.example/video.mp4"],
+        strict=True,
+    ):
+        assert item["download_url"].startswith("/api/media/")
+        token = item["download_url"].split("/")[-2]
+        assert store.get(token, "download").source_url == source
+
+
+@pytest.mark.parametrize(
+    ("count", "limit", "unavailable", "status", "code"),
+    [
+        (1, 20, False, 200, None),
+        (20, 20, False, 200, None),
+        (21, 20, False, 422, "extraction_limit_exceeded"),
+        (21, 20, True, 422, "extraction_limit_exceeded"),
+        (3, 2, True, 422, "extraction_limit_exceeded"),
+        (1, 20, True, 422, "no_media"),
+    ],
+)
+def test_story_list_limits_precede_filtering_and_token_issuance(
+    monkeypatch: pytest.MonkeyPatch,
+    count: int,
+    limit: int,
+    unavailable: bool,
+    status: int,
+    code: str | None,
+) -> None:
+    """清單按不同身分計數，超量不因篩掉不可下載候選而部分成功。"""
+    records = [
+        [
+            3,
+            f"https://cdn.example/{index}.jpg",
+            {
+                "media_id": str(index + 101),
+                "post_id": "999",
+                "num": 1,
+                "type": "story",
+                "extension": "jpg",
+                "progressive": not (unavailable and index == count - 1),
+            },
+        ]
+        for index in range(count)
+    ]
+    records.append(deepcopy(records[0]))
+    install_synthetic_gallery_subprocess(monkeypatch, json.dumps(records).encode())
+    settings = Settings(media_limit=limit)
+    store = TokenStore(capacity=100, ttl_seconds=600)
+    service = ExtractionService(settings, extractor=GalleryDlRunner(settings), token_store=store)
+    with TestClient(create_app(extraction_service=service)) as client:
+        response = client.post(
+            "/api/extractions", json={"url": "https://www.instagram.com/stories/example.user/"}
+        )
+    assert response.status_code == status
+    if code:
+        assert response.json()["code"] == code
+        assert not store._records
+    else:
+        assert len(response.json()["media"]) == count
+        assert len(store._records) == count
+
+
+def test_story_list_capacity_failure_preserves_existing_tokens_and_privacy(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """清單容量不足不留下部分 token，既有 token 與安全日誌契約維持。"""
+    url = "https://www.instagram.com/stories/example.user/"
+    events = [
+        [
+            3,
+            "https://cdn.example/private-source.jpg",
+            {
+                "type": "story",
+                "media_id": str(index),
+                "num": 1,
+                "extension": "jpg",
+                "display_url": "https://scontent.cdninstagram.com/poster.jpg",
+                "cookies": "cookie-sentinel",
+                "raw": "raw-sentinel",
+            },
+        ]
+        for index in [101, 202]
+    ]
+    settings = Settings()
+    store = TokenStore(capacity=3, ttl_seconds=600)
+    service = ExtractionService(settings, extractor=GalleryDlRunner(settings), token_store=store)
+    caplog.set_level(logging.INFO, logger="sns_media_list")
+    with TestClient(create_app(extraction_service=service)) as client:
+        install_synthetic_gallery_subprocess(monkeypatch, json.dumps(events[:1]).encode())
+        first = client.post("/api/extractions", json={"url": url})
+        assert first.status_code == 200
+        saved = dict(store._records)
+        assert len(saved) == 2
+        install_synthetic_gallery_subprocess(monkeypatch, json.dumps(events).encode())
+        failed = client.post("/api/extractions", json={"url": url})
+    assert failed.status_code == 503
+    assert failed.json()["code"] == "capacity_exceeded"
+    assert store._records == saved
+    for token, private in saved.items():
+        assert store.get(token, private.purpose) == private
+    exposed = first.text + failed.text + caplog.text
+    for sentinel in ("private-source.jpg", "poster.jpg", "cookie-sentinel", "raw-sentinel"):
+        assert sentinel not in exposed
 
 
 class SyntheticGalleryProcess:
@@ -1058,9 +1214,9 @@ def test_unsupported_url_does_not_invoke_extractor() -> None:
     ("url", "expected_message"),
     [
         pytest.param(
-            "https://www.instagram.com/stories/example.user/",
+            "https://www.instagram.com/stories/me/",
             "Only supported single media target URLs are accepted.",
-            id="account-wide-story",
+            id="stories-tray",
         ),
         pytest.param(
             "https://www.instagram.com/stories/highlights/1234567890/",

@@ -166,14 +166,16 @@ def test_operations_guide_preserves_translated_safety_and_commands() -> None:
 
 
 def test_operations_guide_documents_story_scope_and_trusted_session_risk() -> None:
-    """Verify exact Story scope and operator-session visibility stay explicit."""
+    """確認單則與清單的邊界、空結果及共用工作階段風險明確。"""
     guide = (PROJECT_ROOT / "OPERATIONS.md").read_text(encoding="utf-8")
     cookie_section = guide.partition("## 平台 Cookie 驗證")[2].partition("\n## ")[0]
     anonymous_section = guide.partition("## 匿名平台限制")[2].partition("\n## ")[0]
 
     assert "`/stories/<username>/<numeric-media-id>/`" in anonymous_section
     assert "best effort" in anonymous_section
-    assert re.search(r"帳號(?:全部|範圍).*Stories", anonymous_section)
+    assert "`/stories/<username>/`" in anonymous_section
+    for text in ("20", "不截斷", "單次", "media_id", "story_unavailable", "reel ID"):
+        assert text in anonymous_section
     assert "Highlights" in anonymous_section
 
     assert re.search(r"任何.*服務使用者.*間接使用.*operator Instagram", cookie_section)

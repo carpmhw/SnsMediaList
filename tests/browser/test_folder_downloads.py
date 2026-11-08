@@ -69,6 +69,51 @@ def prepare(page: Page, base_url: str, *, count: int = 2, same_name: bool = Fals
     return requests
 
 
+def test_story_list_folder_keeps_distinct_filenames_and_exact_bytes(
+    page: Page, base_url: str
+) -> None:
+    """清單逐則檔名寫入各自檔案，picker／磁碟替身只在 close 後提交。"""
+    install_sink(page)
+    url = "https://www.instagram.com/stories/example.user/"
+    payload = {
+        **SUCCESS_PAYLOAD,
+        "platform": "instagram",
+        "post_url": url,
+        "media": [
+            {
+                **SUCCESS_PAYLOAD["media"][0],
+                "filename": f"instagram-{identity}-1.jpg",
+                "download_url": f"/api/media/story-{identity}/download",
+            }
+            for identity in [202, 101]
+        ],
+    }
+
+    def extraction(route: Route) -> None:
+        """回傳具有兩個獨立身分的帳號清單。"""
+        route.fulfill(content_type="application/json", body=json.dumps(payload))
+
+    def media(route: Route) -> None:
+        """依 token path 回傳不同合成 bytes 以捕捉檔案錯配。"""
+        body = b"story-202" if "202" in route.request.url else b"story-101"
+        route.fulfill(content_type="image/jpeg", body=body)
+
+    page.route("**/api/extractions", extraction)
+    page.route("**/api/media/**/download", media)
+    page.goto(base_url)
+    page.fill("#post-url", url)
+    page.click("#analyze-button")
+    expect(page.locator(".media-card")).to_have_count(2)
+    assert page.evaluate("window.files") == {}
+    page.get_by_role("button", name="全選", exact=True).click()
+    page.get_by_role("button", name="下載選取項目").click()
+    expect(page.locator(".download-summary")).to_contain_text("已儲存 2")
+    files = page.evaluate("window.files")
+    for identity in [202, 101]:
+        assert files[f"instagram-{identity}-1.jpg"]["bytes"] == list(f"story-{identity}".encode())
+        assert files[f"instagram-{identity}-1.jpg"]["closed"]
+
+
 @pytest.mark.parametrize("error_name", ["AbortError", "NotAllowedError", "SecurityError"])
 def test_picker_rejection_never_falls_back(page: Page, base_url: str, error_name: str) -> None:
     """捕捉誤用原生流程：取消／拒絕 picker 後不能出現任何媒體請求。"""
