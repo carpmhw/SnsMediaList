@@ -10,6 +10,7 @@ from starlette.routing import Route
 from sns_media_list.api import routes
 from sns_media_list.app import create_app
 from sns_media_list.config import Settings
+from sns_media_list.extractor.gallery_dl import GalleryDlRunner, _add_post_context
 from sns_media_list.network.media_client import MediaResponse
 from sns_media_list.security.tokens import TokenStore
 from sns_media_list.services.extraction_service import ExtractionService
@@ -24,7 +25,28 @@ class Extractor:
     """提供不接觸外部服務的 Instagram metadata。"""
 
     async def extract(self, target: ValidatedExtractionTarget) -> list[dict[str, Any]]:
-        """依測試設定回傳指定貼文、Reel 或單則 Story 的媒體。"""
+        """依測試設定回傳貼文、單則或經真實 adapter 映射的清單 metadata。"""
+        if target.kind == "story_list":
+            return _add_post_context(
+                [
+                    {
+                        "media_id": "101",
+                        "num": 1,
+                        "type": "story",
+                        "extension": "jpg",
+                        "url": f"https://scontent.cdninstagram.com/{SENTINEL}/101.jpg",
+                    },
+                    {
+                        "media_id": "202",
+                        "num": 1,
+                        "type": "story",
+                        "extension": "mp4",
+                        "url": "ytdl:synthetic",
+                        "video_url": f"https://scontent.cdninstagram.com/{SENTINEL}/202.mp4",
+                    },
+                ],
+                target,
+            )
         kind = os.environ.get("MEDIA_KIND", "image")
         return [
             {
@@ -91,9 +113,12 @@ class Client:
 
     async def fetch(self, _url: str, *, headers: Any, range_start: int | None = None) -> Any:
         """依環境配置建立原始上游或成功、截斷、無效的單次 Range response。"""
+        assert not any(key.lower() in {"cookie", "authorization"} for key in headers)
         self.fetches += 1
         self.ranges.append(range_start)
         kind = os.environ.get("MEDIA_KIND", "image")
+        if _url.endswith("/202.mp4"):
+            kind = "video"
         body = IMAGE if kind == "image" else VIDEO
         mode = os.environ.get("STREAM_MODE", "success")
         response_headers = {"content-type": "image/jpeg" if kind == "image" else "video/mp4"}
@@ -135,7 +160,9 @@ def factory() -> Any:
     )
     service = ExtractionService(
         settings,
-        extractor=Extractor(),
+        extractor=GalleryDlRunner(settings)
+        if os.environ.get("STORY_USER_RESOLUTION") == "1"
+        else Extractor(),
         token_store=TokenStore(capacity=100, ttl_seconds=300),
     )
     client = Client()

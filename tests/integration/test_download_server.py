@@ -17,7 +17,15 @@ from tests.integration.download_server import IMAGE, SENTINEL, VIDEO
 
 
 @contextmanager
-def running_server(tmp_path: Path, *, backend="h11", mode="success", known=True, kind="image"):
+def running_server(
+    tmp_path: Path,
+    *,
+    backend="h11",
+    mode="success",
+    known=True,
+    kind="image",
+    user_resolution=False,
+):
     """保留 socket 避免選埠競態，並有界停止獨立 Uvicorn 程序。"""
     with socket.socket() as listener, (tmp_path / "server.log").open("w+") as log:
         listener.bind(("127.0.0.1", 0))
@@ -27,7 +35,24 @@ def running_server(tmp_path: Path, *, backend="h11", mode="success", known=True,
             "STREAM_MODE": mode,
             "KNOWN_LENGTH": str(int(known)),
             "MEDIA_KIND": kind,
+            "STORY_USER_RESOLUTION": str(int(user_resolution)),
         }
+        if user_resolution:
+            fake_bin = tmp_path / "fake-bin"
+            fake_bin.mkdir()
+            executable = fake_bin / "gallery-dl"
+            executable.write_text(
+                f"#!{sys.executable}\nimport sys\n"
+                f"sys.path.insert(0, {str(Path(__file__).parents[2])!r})\n"
+                f"from tests.integration.story_gallery import main\nmain({kind!r})\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o700)
+            env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+            cookie_file = tmp_path / "synthetic-cookies.txt"
+            cookie_file.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+            cookie_file.chmod(0o600)
+            env["SNS_MEDIA_INSTAGRAM_COOKIE_FILE"] = str(cookie_file)
         process = subprocess.Popen(
             [
                 sys.executable,
@@ -76,6 +101,44 @@ def extract(origin: str, *, target_path: str = "/p/fixture/") -> dict[str, Any]:
     )
     assert response.status_code == 200, response.text
     return response.json()["media"][0]
+
+
+@pytest.mark.parametrize("mode", ["success", "error"])
+def test_story_list_distinct_downloads_and_cleanup(tmp_path: Path, mode: str) -> None:
+    """清單各 token 經真實 HTTP 取得對應完整檔案，失敗後釋放 upstream。"""
+    with running_server(tmp_path, mode=mode) as origin:
+        response = httpx.post(
+            origin + "/api/extractions",
+            json={"url": "https://www.instagram.com/stories/example.user/"},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["post_url"] == "https://www.instagram.com/stories/example.user/"
+        assert [item["filename"] for item in payload["media"]] == [
+            "instagram-101-1.jpg",
+            "instagram-202-1.mp4",
+        ]
+        for item, expected in zip(payload["media"], [IMAGE, VIDEO], strict=True):
+            assert httpx.head(origin + item["download_url"]).status_code == 204
+            if mode == "success":
+                download = httpx.get(origin + item["download_url"])
+                assert download.content == expected
+                assert item["filename"] in download.headers["content-disposition"]
+            else:
+                with pytest.raises(httpx.RemoteProtocolError):
+                    httpx.get(origin + item["download_url"])
+        stats = httpx.get(origin + "/fixture-stats").json()
+        assert stats["fetches"] == stats["closes"] == 2
+        assert stats["active"] == 0
+    lifecycle = [
+        event for event in events(tmp_path) if event["event"].startswith("media_download_")
+    ]
+    terminal = [event for event in lifecycle if event["event"] != "media_download_started"]
+    assert len(terminal) == 2
+    assert {event["event"] for event in terminal} == {
+        "media_download_completed" if mode == "success" else "media_download_failed"
+    }
+    assert SENTINEL not in (tmp_path / "server.log").read_text()
 
 
 def events(tmp_path: Path) -> list[dict[str, Any]]:
@@ -138,6 +201,49 @@ def test_default_process_emits_lifecycle(tmp_path: Path) -> None:
     assert records[1]["media_class"] == "image"
     assert records[1]["duration_ms"] >= 0
     assert records[1]["request_id"] == records[0]["request_id"]
+
+
+@pytest.mark.parametrize("kind", ["image", "video"])
+@pytest.mark.parametrize("mode", ["success", "error"])
+def test_pinned_story_user_resolution_downloads_exact_media_over_real_http(
+    tmp_path: Path,
+    kind: str,
+    mode: str,
+) -> None:
+    """串接實際套件帳號解析、DataJob、正式 runner 與 HTTP 完整／中斷下載。"""
+    with (
+        running_server(tmp_path, kind=kind, mode=mode, user_resolution=True) as origin,
+        httpx.Client() as client,
+    ):
+        response = httpx.post(
+            origin + "/api/extractions",
+            json={
+                "url": "https://www.instagram.com/stories/example.user/1234567890/",
+            },
+        )
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert len(result["media"]) == 1
+        assert result["post_url"] == "https://www.instagram.com/stories/example.user/1234567890/"
+        media = result["media"][0]
+        extension = "jpg" if kind == "image" else "mp4"
+        assert media["filename"] == f"instagram-1234567890-1.{extension}"
+        assert media["download_url"].startswith("/api/media/")
+        assert "scontent.cdninstagram.com" not in response.text
+        if mode == "success":
+            download = client.get(origin + media["download_url"])
+            assert download.content == (IMAGE if kind == "image" else VIDEO)
+        else:
+            with pytest.raises(httpx.RemoteProtocolError):
+                client.get(origin + media["download_url"])
+        stats = client.get(origin + "/fixture-stats").json()
+        assert stats["fetches"] == stats["closes"] == 1
+        assert stats["active"] == 0
+    records = [event for event in events(tmp_path) if event["event"].startswith("media_download")]
+    assert [event["event"] for event in records] == [
+        "media_download_started",
+        "media_download_completed" if mode == "success" else "media_download_failed",
+    ]
 
 
 @pytest.mark.parametrize("backend", ["h11", "httptools"])
@@ -211,16 +317,20 @@ def test_real_failure_boundaries(tmp_path: Path, mode) -> None:
 @pytest.mark.parametrize("mode", ["resume", "truncated", "resume-ignored", "resume-invalid-range"])
 def test_instagram_video_range_resume(tmp_path: Path, backend: str, mode: str) -> None:
     """真實 HTTP 驗證 Instagram 續傳的 bytes、framing、terminal event 與清理。"""
-    with running_server(tmp_path, backend=backend, mode=mode, kind="video") as origin:
+    # 成功案例保留連線直到伺服器完成回應；刻意中斷另由 disconnect 案例驗證。
+    with (
+        running_server(tmp_path, backend=backend, mode=mode, kind="video") as origin,
+        httpx.Client() as client,
+    ):
         media = extract(origin)
         if mode == "resume":
-            response = httpx.get(origin + media["download_url"])
+            response = client.get(origin + media["download_url"])
             assert response.content == VIDEO
             assert response.headers["content-length"] == str(len(VIDEO))
         else:
             with pytest.raises(httpx.RemoteProtocolError):
-                httpx.get(origin + media["download_url"])
-        assert httpx.get(origin + "/fixture-stats").json() == {
+                client.get(origin + media["download_url"])
+        assert client.get(origin + "/fixture-stats").json() == {
             "fetches": 2,
             "closes": 2,
             "ranges": [None, 65536],
@@ -250,10 +360,14 @@ def test_instagram_video_range_resume(tmp_path: Path, backend: str, mode: str) -
     assert ("StreamAborted" in stderr) == (not success)
 
 
-def test_real_disconnect_cleanup(tmp_path: Path) -> None:
+@pytest.mark.parametrize("user_resolution", [False, True])
+def test_real_disconnect_cleanup(tmp_path: Path, user_resolution: bool) -> None:
     """client 在首段後關閉 socket，server 有界釋放 lease 並只記錄 aborted。"""
-    with running_server(tmp_path, mode="disconnect") as origin:
-        media = extract(origin)
+    with running_server(tmp_path, mode="disconnect", user_resolution=user_resolution) as origin:
+        media = extract(
+            origin,
+            target_path="/stories/example.user/1234567890/" if user_resolution else "/p/fixture/",
+        )
         with httpx.stream("GET", origin + media["download_url"]) as response:
             assert next(response.iter_bytes())
         deadline = time.monotonic() + 3

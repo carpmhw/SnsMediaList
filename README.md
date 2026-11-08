@@ -10,7 +10,7 @@
 
 </div>
 
-SNS Media List 是一個低併發 Web 工具，可分析支援的 Instagram 貼文、Reel、精確單則 Story 與 X 狀態貼文，依來源順序列出可直接下載的圖片、漸進式影片與動畫 GIF。服務可匿名運作，也可由 operator 掛載平台 Cookie，存取該帳號可見的支援內容。
+SNS Media List 是一個低併發 Web 工具，可分析支援的 Instagram 貼文、Reel、精確單則 Story、帳號當下 Story 清單與 X 狀態貼文，依來源順序列出可直接下載的圖片、漸進式影片與動畫 GIF。服務可匿名運作，也可由 operator 掛載平台 Cookie，存取該帳號可見的支援內容。
 
 後端採 FastAPI 與受限的 `gallery-dl` 子程序，前端為原生 HTML、CSS、JavaScript，另提供選用的 MCP Server。部署使用單一 process／worker，無需資料庫。
 
@@ -19,9 +19,9 @@ SNS Media List 是一個低併發 Web 工具，可分析支援的 Instagram 貼�
 
 ## 功能特色
 
-- 支援 Instagram 單篇貼文、Reel、精確單則 Story，以及 X 單篇狀態貼文。
+- 支援 Instagram 單篇貼文、Reel、精確單則 Story、帳號當下 Story 清單，以及 X 單篇狀態貼文。
 - 保留 carousel 與多媒體貼文的來源順序，支援圖片、漸進式影片及 X 動畫 GIF。
-- 提供媒體多選、類型篩選、檔名複製與逐項啟動下載；瀏覽器可能要求多檔下載權限。
+- 提供媒體多選、類型篩選、檔名複製與逐項啟動下載；支援時選一次資料夾並串流儲存，不支援時保留原生下載，瀏覽器可能要求多檔下載權限。
 - 一般貼文、Reel 與 X 媒體使用含作者識別的智慧檔名。
 - 批次分析最多 5 個 URL，透過循序前端 queue 呼叫既有單筆 API，不建立後端工作佇列。
 - 使用短效、用途綁定的 opaque token 隱藏 upstream media URL。
@@ -36,18 +36,23 @@ SNS Media List 是一個低併發 Web 工具，可分析支援的 Instagram 貼�
 | --- | --- |
 | Instagram `/p/` 貼文與 `/reel/` Reel | 支援，但受平台匿名存取限制 |
 | Instagram `/stories/<username>/<numeric-media-id>/` 精確單則 Story | 支援；匿名擷取僅為 best effort，不保證成功 |
+| Instagram `/stories/<username>/` 帳號當下 Story 清單 | 支援，最多 20 則；匿名為 best effort |
 | X/Twitter `/status/` 單篇貼文 | 支援，但受平台匿名存取限制 |
 | 圖片、漸進式影片、X 動畫 GIF | 支援 |
 | Story 主要圖片或漸進式影片 | 支援，每則只回傳一個主要媒體 |
 | Carousel 與混合媒體 | 支援，依來源順序列出 |
 | 私人、Close Friends、受眾限定或登入後內容 | 匿名模式不支援；Cookie 模式限 operator 帳號可見範圍 |
-| 帳號全部 Stories、Stories tray、Highlights 與 Story 批次下載 | 不支援 |
+| Stories tray、Highlights、歷史／過期 Story、帳號首頁或裸帳號 | 不支援 |
 | 帳號頁、feed、搜尋、thread 批次、ZIP、轉碼與畫質選擇 | 不支援 |
 | HLS/DASH adaptive stream 合併 | 不支援 |
 
 公開可見不代表匿名模式一定能存取。Instagram、X 或 `gallery-dl` 可能要求登入、限制訪客 token 或套用 rate limit；未配置平台 Cookie 時，本服務不支援私人貼文，精確 Story 也只會嘗試匿名擷取。Instagram Story 通常需要 authenticated cookies；Cookie 部署與錯誤診斷請參閱[平台 Cookie 驗證](OPERATIONS.md#平台-cookie-驗證)及 [Story 擷取診斷](OPERATIONS.md#instagram-story-extraction-diagnostics)。
 
-圖片 Story 不會另外輸出音訊或 audio；不提供 Story 批次、ZIP 或轉碼。選取下載不提供 ZIP、帳號 feed 批次封存或歷史保存；「已開始下載」只表示檔案已交給瀏覽器，不代表瀏覽器或 OS 已完成檔案保存。
+Story 清單以一次擷取當下可見內容為準，每則保留自己的檔名並可個別勾選下載；帶數字 ID 的網址仍只取單則，分享 query 不改變範圍。清單預設及最高 20 則，operator 已設定較低上限時仍生效；超量整次拒絕並提醒改貼單則連結，不截斷成前 20 則、不核發部分 token。
+
+清單分析後預設不選取、不自動下載，可使用全選、只選圖片或只選影片，再啟動資料夾／原生下載。資料夾模式逐檔完成寫入與關閉後才顯示已儲存；原生下載仍須在瀏覽器確認檔案是否真正保存。
+
+圖片 Story 不會另外輸出音訊或 audio；不提供 ZIP 或轉碼。選取下載不提供 ZIP、帳號 feed 批次封存或歷史保存；「已開始下載」只表示檔案已交給瀏覽器，不代表瀏覽器或 OS 已完成檔案保存。
 
 ## 快速開始
 
@@ -81,7 +86,11 @@ docker compose down
 
 1. 在「單筆分析」貼上支援的 HTTPS 內容 URL；多個 URL 可切換「批次分析」，每行一個、最多 5 個。
 2. 分析後依媒體類型篩選、預覽，並選取要下載的項目；批次結果可切換不同來源群組。
-3. 逐項啟動下載，依瀏覽器提示允許多檔下載。連結預設有效 10 分鐘，到期或服務重啟後請重新分析。
+3. 點「下載選取項目」：安全環境（HTTPS 或 localhost）且能力支援時，每批選一次資料夾，逐檔串流寫入；不支援時逐項交給瀏覽器原生下載。個別「下載」按鈕維持原生方式。連結預設有效 10 分鐘，到期或服務重啟後請重新分析。
+
+資料夾模式顯示已接收大小、完成／失敗檔數，總大小已知時顯示單檔百分比；收到全部 bytes 後還需成功關閉檔案才計為已儲存，不保證 OS 實體落盤。未知大小不假造百分比。同名項目另加數字後綴、不覆寫既有檔案。取消資料夾選擇不會改用一般下載；下載中可停止，已完成檔案不撤回，失敗可能留下空白檔案。
+
+Firefox 或手機 Edge 的實際支援取決於能力與系統版本，不依品牌保證。原生下載的預設位置、逐檔詢問及多檔權限由瀏覽器設定決定，網頁不能強制略過；網頁只回報已啟動數量，實際傳輸進度請看瀏覽器。資料夾 handle 不保存，請保持頁面開啟，手機切換背景或鎖屏可能中斷。細節及手機人工驗收見 [OPERATIONS.md](OPERATIONS.md#資料夾下載與手機驗收)。
 
 `/healthz` 只確認服務仍在執行，不代表 Instagram／X 可用；下載完成請以瀏覽器與本機檔案為準。
 
@@ -116,6 +125,8 @@ REST 的媒體連結一律相對於服務 origin 根路徑。Preview 與 downloa
 ## MCP Server
 
 MCP Server **預設關閉**，啟用後透過同一 app 的 `/mcp` 提供 **Streamable HTTP**，僅公開 `extract_media` tool，與 REST 共用擷取服務、併發額度及短效 token。
+
+`extract_media` 同樣接受明確帳號 `/stories/<username>/` Story 清單，最多 20 則（較低 operator 上限仍有效）；超量回傳安全錯誤、不提供部分結果。每則保留自己的檔名，精確 Story 仍只取單則；工作階段可見範圍與 Web 相同，不提供個別使用者權限隔離。
 
 使用明確的 Compose override 啟用：
 
@@ -216,7 +227,7 @@ OPERATIONS.md         部署、設定、診斷與驗證指南
 | `unsupported_url` | 400 | URL host、scheme 或媒體 path 不受支援 |
 | `post_unavailable` | 404 | 貼文不存在、需要登入，或匿名 extractor 無法讀取 |
 | `story_auth_required` | 403 | 未配置 Instagram Cookie，或匿名 Story 擷取需要登入驗證；請聯絡服務管理者 |
-| `story_unavailable` | 404 | 精確 Story 不可取得；不細分或推斷已過期、刪除或不可見 |
+| `story_unavailable` | 404 | 精確 Story 或帳號清單目前無可取得的內容；不細分或推斷已過期、刪除或不可見 |
 | `local_rate_limited` | 429 | 本機請求額度用盡或 extraction/download slot 已滿，依 `Retry-After` 等待 |
 | `upstream_rate_limited` | 429 | 平台暫時限制請求，請稍後再試 |
 | `platform_authentication_failed` | 503 | 平台 session／驗證要求無法使用；不代表已確認 Cookie 過期 |
@@ -225,5 +236,7 @@ OPERATIONS.md         部署、設定、診斷與驗證指南
 | `token_expired` | 410 | Token 已超過 TTL，請重新分析 |
 
 API 不會回傳 upstream media URL、Cookie、credentials、raw extractor output 或 stack trace。請勿在 issue、log 或錯誤回報中貼出 media token、Cookie 或敏感 URL。管理者可依[故障排除](OPERATIONS.md#故障排除)查詢安全事件；Story 的公開錯誤與內部診斷分層見 [Story 診斷](OPERATIONS.md#instagram-story-extraction-diagnostics)。
+
+Story 的帳號解析可能先於 Story 清單查詢失敗。明確 `Requested user could not be found` 會回傳 `extraction_failed`／502，而非表示 Story 已失效；真正 Story 不存在或未辨明對象的 NotFound／404 仍依既有 `story_unavailable` 契約處理。同帳號在瀏覽器可見或已配置 Cookie，不能證明服務使用的 API 工作階段有效，也不能只由 `not_found` 日誌判定 Story 已過期。
 
 本專案使用 pinned [`gallery-dl`](https://github.com/mikf/gallery-dl) 執行 extraction；其 GPL-2.0-only notice 位於 [`LICENSES/gallery-dl.txt`](LICENSES/gallery-dl.txt)。FFmpeg notice 位於 [`LICENSES/ffmpeg.txt`](LICENSES/ffmpeg.txt)，專案程式碼採 [MIT License](LICENSE)。

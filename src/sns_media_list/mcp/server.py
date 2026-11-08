@@ -48,7 +48,10 @@ def create_mcp_server(
     configure_mcp_logging()
     tool = Tool(
         name="extract_media",
-        description="分析一個支援的 Instagram／X 單篇 URL，回傳 metadata 與短效媒體連結。",
+        description=(
+            "分析一個支援的 Instagram／X 單篇或 Instagram 帳號當下 Story 清單 URL"
+            "（最多 20 則），回傳 metadata 與短效媒體連結。"
+        ),
         input_schema=McpExtractionInput.model_json_schema(),
         output_schema=McpExtractionResult.model_json_schema(),
     )

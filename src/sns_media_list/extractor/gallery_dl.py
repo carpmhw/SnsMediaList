@@ -183,7 +183,7 @@ def build_gallery_command(
         "--proxy",
         proxy_url,
     ]
-    if target_kind != "story":
+    if target_kind not in {"story", "story_list"}:
         command.extend(["-o", "extractor.instagram.videos=merged"])
     command.extend(
         [
@@ -298,7 +298,7 @@ class GalleryDlRunner:
         records = list(parsed.media_records)
         if not records:
             if parsed.literal_empty:
-                if target.kind == "story":
+                if target.kind in {"story", "story_list"}:
                     raise AppError(
                         "story_unavailable",
                         "This Story is unavailable.",
@@ -622,8 +622,9 @@ def _record_from_message_tuple(
 def _add_post_context(
     records: list[dict[str, object]], target: ValidatedExtractionTarget
 ) -> list[dict[str, object]]:
-    """加入可信目標 context，並只轉換精確 Story 同筆 record 的影片來源。"""
+    """加入可信目標與逐則身分，僅從同筆 Story record 轉換影片來源。"""
     contextualized: list[dict[str, object]] = []
+    story_indices: dict[str, int] = {}
     for record in records:
         if "error" in record:
             contextualized.append(record)
@@ -633,14 +634,29 @@ def _add_post_context(
         video_url = item.get("video_url")
         if (
             target.platform == "instagram"
-            and target.kind == "story"
+            and target.kind in {"story", "story_list"}
             and isinstance(source_url, str)
             and source_url.startswith("ytdl:")
             and isinstance(video_url, str)
             and video_url
         ):
             item["url"] = video_url
-        if target.kind == "story":
+        if target.kind == "story_list":
+            media_id = item.get("media_id")
+            if (
+                isinstance(media_id, bool)
+                or not isinstance(media_id, str | int)
+                or re.fullmatch(r"[0-9]+", str(media_id)) is None
+            ):
+                raise AppError(
+                    "extraction_failed", "The extractor returned invalid Story identity."
+                )
+            story_id = str(media_id)
+            item["platform"] = target.platform
+            item["post_id"] = story_id
+            item["post_url"] = f"{target.canonical_url}{story_id}/"
+            item["num"] = story_indices.setdefault(story_id, len(story_indices) + 1)
+        elif target.kind == "story":
             item["platform"] = target.platform
             item["post_url"] = target.canonical_url
             item["post_id"] = target.target_id
@@ -767,7 +783,7 @@ def _classify_extractor_error(
             "The source platform is rate limiting requests.",
             failure_stage="extractor_platform_error",
         )
-    if target_kind == "story":
+    if target_kind in {"story", "story_list"}:
         return _map_story_extractor_error(
             normalized_type,
             diagnostic,
@@ -837,6 +853,16 @@ def _map_story_extractor_error(
     authenticated: bool,
 ) -> AppError:
     """依明確 diagnostic 證據與 Cookie 配置狀態分類單則 Story 錯誤。"""
+    if normalized_type in {None, _NOT_FOUND_ERROR_TYPE} and re.search(
+        r"^(?:\[instagram\]\[error\]\s*)?Requested user could not be found[.!]?\s*$",
+        diagnostic,
+        re.IGNORECASE | re.MULTILINE,
+    ):
+        return AppError(
+            "extraction_failed",
+            "The source platform could not be extracted.",
+            failure_stage="extractor_process_unclassified",
+        )
     if normalized_type == _NOT_FOUND_ERROR_TYPE or 404 in statuses:
         return AppError(
             "story_unavailable",

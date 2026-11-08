@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+from types import SimpleNamespace
 
 import pytest
 from mcp import Client
@@ -10,9 +11,57 @@ from mcp import Client
 from sns_media_list.api.limits import RequestLimiter
 from sns_media_list.config import Settings
 from sns_media_list.errors import AppError
+from sns_media_list.extractor.gallery_dl import GalleryDlRunner
 from sns_media_list.logging_config import configure_logging
+from sns_media_list.security.tokens import TokenStore
 from sns_media_list.services.extraction_coordinator import ExtractionCoordinator
+from sns_media_list.services.extraction_service import ExtractionService
 from tests.mcp_helpers import PRIVATE_SOURCE, X_URL, FakeExtractor, make_service
+
+
+async def test_story_user_lookup_failure_uses_shared_runner_and_safe_mcp_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """以正式 runner 驗證 MCP 帳號查詢失敗為 generic，而非 Story availability。"""
+    from sns_media_list.mcp.server import create_mcp_server
+
+    async def communicate() -> tuple[bytes, bytes]:
+        """僅提供合成 DataJob，保留正式 parser 與 classifier。"""
+        return json.dumps(
+            [
+                [
+                    -1,
+                    {
+                        "error": "NotFoundError",
+                        "message": "Requested user could not be found",
+                    },
+                ]
+            ]
+        ).encode(), b""
+
+    async def create(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        """替代外部程序，不替代共用擷取流程。"""
+        return SimpleNamespace(stdout=b"", stderr=b"", returncode=0, communicate=communicate)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+    settings = Settings()
+    store = TokenStore(capacity=20, ttl_seconds=600)
+    service = ExtractionService(settings, extractor=GalleryDlRunner(settings), token_store=store)
+    coordinator = ExtractionCoordinator(
+        service, limiter=RequestLimiter(max_extractions=1, max_downloads=1)
+    )
+    async with Client(create_mcp_server(coordinator, settings=settings), cache=None) as client:
+        result = await client.call_tool(
+            "extract_media",
+            {
+                "url": "https://www.instagram.com/stories/example.user/1234567890/",
+            },
+        )
+    assert result.is_error
+    assert json.loads(result.content[0].text)["code"] == "extraction_failed"
+    assert "Requested user" not in result.model_dump_json()
+    assert "failure_stage" not in result.model_dump_json()
+    assert store.size == 0
 
 
 @pytest.mark.parametrize("base", [None, "http://192.168.50.14:8000", "https://public.example"])
@@ -44,6 +93,7 @@ async def test_tool_projects_links_in_text_and_structured_content(base: str | No
         "https://www.instagram.com/p/example/",
         "https://www.instagram.com/reel/example/",
         "https://www.instagram.com/stories/example/123/",
+        "https://www.instagram.com/stories/example/",
     ],
 )
 async def test_tool_uses_existing_pipeline_with_public_schema(url: str, mode: str) -> None:
@@ -63,6 +113,7 @@ async def test_tool_uses_existing_pipeline_with_public_schema(url: str, mode: st
         tools = await client.list_tools()
         assert [tool.name for tool in tools.tools] == ["extract_media"]
         tool = tools.tools[0]
+        assert "Story 清單" in tool.description
         assert tool.input_schema["additionalProperties"] is False
         assert tool.output_schema["additionalProperties"] is False
         result = await client.call_tool("extract_media", {"url": url})
@@ -72,7 +123,9 @@ async def test_tool_uses_existing_pipeline_with_public_schema(url: str, mode: st
     assert result.is_error is False
     assert result.structured_content["post_url"] == url
     assert result.structured_content["media"][0]["download_url"].startswith("/api/media/")
-    assert len(result.structured_content["media"]) == (1 if "/stories/" in url else 2)
+    assert len(result.structured_content["media"]) == (
+        1 if url.endswith("/123/") and "/stories/" in url else 2
+    )
     assert PRIVATE_SOURCE not in result.model_dump_json()
 
 
@@ -133,7 +186,7 @@ async def test_invalid_arguments_emit_started_and_one_terminal_event(
         "http://127.0.0.1/",
         "http://169.254.169.254/",
         "https://localhost/",
-        "https://www.instagram.com/stories/example/",
+        "https://www.instagram.com/stories/me/",
         "https://x.com/example/",
     ],
 )

@@ -33,15 +33,15 @@ def _png_corner_rgba(payload: bytes) -> tuple[int, int, int, int]:
 
 
 def test_home_page_contains_contact_sheet_workflow() -> None:
-    """Verify the served page contains the accessible submission structure."""
+    """驗證頁面包含無障礙表單與 Story 清單支援邊界。"""
     response = TestClient(create_app()).get("/")
 
     assert response.status_code == 200
     assert '<html lang="zh-Hant">' in response.text
     assert "把媒體來源轉成可控的下載清單。" in response.text
     assert "貼上內容 URL" in response.text
-    assert "Instagram 貼文、Reel、單則 Story 與 X 狀態貼文" in response.text
-    assert "帳號目前全部 Stories 與 Highlights 不支援" in response.text
+    assert "Instagram 貼文、Reel、單則 Story、帳號當下 Story 清單與 X 狀態貼文" in response.text
+    assert "帳號首頁、Stories tray 與 Highlights 不支援" in response.text
     assert "可信部署若使用服務管理者的 Instagram 工作階段" in response.text
     assert "任何服務使用者都可能間接存取該帳號可見的私人或受眾限定 Story" in response.text
     assert "X status" not in response.text
@@ -77,13 +77,15 @@ def test_home_page_contains_bounded_batch_url_input() -> None:
 
 
 def test_home_page_describes_selected_downloads_without_batch_archive_claims() -> None:
-    """驗證首頁說明逐項下載限制而非 ZIP、帳號封存或落盤完成。"""
+    """驗證首頁說明雙模式限制，而非 ZIP、帳號封存或無條件落盤完成。"""
     response = TestClient(create_app()).get("/")
 
     assert response.status_code == 200
     assert "選取多個媒體後逐項啟動下載" in response.text
     assert "不提供 ZIP 或帳號批次封存" in response.text
     assert "已開始下載不代表檔案已完成保存" in response.text
+    assert "資料夾" in response.text
+    assert "瀏覽器設定" in response.text
 
 
 def test_home_page_advertises_same_origin_favicon_formats() -> None:
@@ -281,7 +283,7 @@ def test_stylesheet_has_grid_mobile_focus_and_motion_rules() -> None:
 
 
 def test_javascript_has_same_origin_extraction_and_recovery_hooks() -> None:
-    """Verify client code exposes the API workflow and stable error states."""
+    """驗證前端保留同源復原流程且錯誤提示不否定已支援清單。"""
     response = TestClient(create_app()).get("/app.js")
 
     assert response.status_code == 200
@@ -290,9 +292,9 @@ def test_javascript_has_same_origin_extraction_and_recovery_hooks() -> None:
     assert "token_not_found" in response.text
     assert "平台暫時限制存取" in response.text
     assert "story_unavailable" in response.text
-    assert "此 Instagram Story 已無法取得，可能已過期、刪除或無權限存取。" in response.text
+    assert "目前無可取得的 Instagram Story" in response.text
     assert "X 狀態貼文" in response.text
-    assert "帳號目前全部 Stories 與 Highlights 不支援" in response.text
+    assert "帳號首頁、Stories tray 與 Highlights 不支援" in response.text
     assert "X status" not in response.text
     assert "X STATUS" not in response.text
     assert "正在分析內容..." in response.text

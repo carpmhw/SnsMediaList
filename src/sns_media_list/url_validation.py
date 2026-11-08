@@ -11,10 +11,10 @@ _INSTAGRAM_HOSTS = {"instagram.com", "www.instagram.com"}
 _X_HOSTS = {"x.com", "www.x.com", "twitter.com", "www.twitter.com"}
 _TRACKING_KEYS = {"ref", "s", "t", "cxt", "src"}
 _INSTAGRAM_STORY_PATH = re.compile(
-    r"/stories/(?P<username>[A-Za-z0-9._]{1,30})/(?P<target_id>[0-9]+)/"
+    r"/stories/(?P<username>[A-Za-z0-9._]{1,30})/(?:(?P<target_id>[0-9]+)/)?"
 )
 
-type TargetKind = Literal["post", "story"]
+type TargetKind = Literal["post", "story", "story_list"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,7 +28,7 @@ class ValidatedExtractionTarget:
 
 
 def validate_post_url(url: str) -> ValidatedExtractionTarget:
-    """Validate and canonicalize one supported public media target URL."""
+    """驗證支援的媒體目標，依明確路徑區分清單與單則。"""
     try:
         parsed = urlsplit(url)
         port = parsed.port
@@ -48,8 +48,7 @@ def validate_post_url(url: str) -> ValidatedExtractionTarget:
     if hostname in _INSTAGRAM_HOSTS:
         platform = "instagram"
         if parsed.path.startswith("/stories/"):
-            target_id = _match_instagram_story(parsed.path)
-            kind: TargetKind = "story"
+            kind, target_id = _match_instagram_story(parsed.path)
             canonical_url = urlunsplit(("https", "www.instagram.com", parsed.path, "", ""))
         else:
             target_id = _match_instagram_post(parsed.path)
@@ -134,11 +133,11 @@ def _match_instagram_post(path: str) -> str | None:
     return None
 
 
-def _match_instagram_story(path: str) -> str | None:
-    """Extract an identifier from an exact single-Story Instagram path."""
+def _match_instagram_story(path: str) -> tuple[TargetKind, str | None]:
+    """驗證 Story 帳號與路徑，清單以帳號、單則以數字作為目標身分。"""
     match = _INSTAGRAM_STORY_PATH.fullmatch(path)
     if match is None:
-        return None
+        return "story", None
     username = match.group("username")
     if (
         username.lower() == "highlights"
@@ -146,8 +145,13 @@ def _match_instagram_story(path: str) -> str | None:
         or username.endswith(".")
         or ".." in username
     ):
-        return None
-    return match.group("target_id")
+        return "story", None
+    target_id = match.group("target_id")
+    if target_id is not None:
+        return "story", target_id
+    if username.lower() == "me":
+        return "story_list", None
+    return "story_list", username
 
 
 def _match_x_post(path: str) -> str | None:

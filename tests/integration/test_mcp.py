@@ -25,6 +25,46 @@ from tests.mcp_helpers import (
 )
 
 
+@pytest.mark.parametrize("count", [20, 21])
+@pytest.mark.parametrize("base", [None, "https://public.example"])
+async def test_story_list_mcp_http_contract_and_atomic_limit(count: int, base: str | None) -> None:
+    """真實 MCP HTTP 清單維持二十項 schema、逐則順序及超量原子失敗。"""
+    url = "https://www.instagram.com/stories/example/"
+    settings = Settings(mcp_enabled=True, public_base_url=base)
+    service, extractor = make_service(
+        settings=settings, extractor=FakeExtractor(media_types=("image",) * count)
+    )
+    app = create_app(
+        settings=settings,
+        extraction_service=service,
+        extraction_proxy=cast(ConnectProxy, FakeProxy([])),
+    )
+    async with running_app(app) as origin:
+        async with Client(f"{origin}/mcp", cache=None) as client:
+            result = await client.call_tool("extract_media", {"url": url})
+    assert extractor.calls == 1
+    assert PRIVATE_SOURCE not in result.model_dump_json()
+    if count == 21:
+        assert result.is_error
+        assert json.loads(result.content[0].text)["code"] == "extraction_limit_exceeded"
+        assert not result.structured_content
+        assert service.token_store.size == 0
+    else:
+        assert not result.is_error
+        assert json.loads(result.content[0].text) == result.structured_content
+        assert result.structured_content["post_url"] == url
+        media = result.structured_content["media"]
+        assert len(media) == 20
+        assert [item["filename"] for item in media] == [
+            f"instagram-{index}-1.jpg" for index in range(1, 21)
+        ]
+        for item in media:
+            assert item["download_url"].startswith(f"{base or ''}/api/media/")
+            assert item["preview_url"].startswith(f"{base or ''}/api/media/")
+        assert len({item["download_url"] for item in media}) == 20
+        assert service.token_store.size == 40
+
+
 @pytest.mark.parametrize("mode", ["legacy", "2026-07-28"])
 @pytest.mark.parametrize("base", [None, "http://192.168.50.14:8000", "https://public.example"])
 async def test_official_http_client_and_existing_token_api(mode: str, base: str | None) -> None:

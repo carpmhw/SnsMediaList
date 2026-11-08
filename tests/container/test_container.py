@@ -1,7 +1,12 @@
 """Contract tests for the hardened container deployment."""
 
+import subprocess
 import tomllib
 from pathlib import Path
+
+import pytest
+
+from scripts import container_smoke
 
 PROJECT_ROOT = Path(__file__).parents[2]
 
@@ -13,7 +18,7 @@ def test_dockerfile_uses_pinned_runtime_and_non_root_entrypoint() -> None:
     assert (
         "python:3.12-alpine@sha256:4c47124a8391cb7a9f571164147d154777cf012a4ece5f86097130d7a4478111"
     ) in dockerfile
-    assert "ARG FFMPEG_VERSION=8.1.2-r0" in dockerfile
+    assert "ARG FFMPEG_VERSION=8.1.3-r0" in dockerfile
     assert "ghcr.io/astral-sh/uv:" in dockerfile
     assert "COPY --from=uv" in dockerfile
     assert "UV_PROJECT_ENVIRONMENT=/opt/venv" in dockerfile
@@ -37,6 +42,44 @@ def test_dockerfile_uses_pinned_runtime_and_non_root_entrypoint() -> None:
     assert "COPY LICENSES" in dockerfile
 
 
+def test_runtime_apk_pins_apply_only_the_approved_security_remediation() -> None:
+    """確認 runtime 明確安裝核准修復版本，不依浮動全面升級掩蓋 gate。"""
+    dockerfile = (PROJECT_ROOT / "Dockerfile").read_text()
+    runtime = dockerfile.split("FROM ${PYTHON_IMAGE}")[-1]
+    for package in (
+        "brotli-libs=1.2.1-r0",
+        "libexpat=2.10.0-r0",
+        "libx11=1.8.14-r0",
+        "musl=1.2.6-r3",
+        "musl-utils=1.2.6-r3",
+        "zlib=1.4-r0",
+        "pcre2=10.49-r0",
+    ):
+        assert f'"{package}"' in runtime
+    assert "apk upgrade" not in dockerfile
+    assert "/edge/" not in dockerfile
+
+
+@pytest.mark.parametrize("version", ["8.1.3", "8.1.2"])
+def test_ffmpeg_runtime_check_rejects_the_previous_patch(
+    monkeypatch: pytest.MonkeyPatch,
+    version: str,
+) -> None:
+    """確認 smoke 真正接受新 FFmpeg runtime，而不再接受舊候選版本。"""
+
+    def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        """提供指定版本的外部命令結果，保留正式版本判斷邏輯。"""
+        assert command == ["docker", "exec", "fixture-container", "ffmpeg", "-version"]
+        return subprocess.CompletedProcess(command, 0, f"ffmpeg version {version} Copyright\n", "")
+
+    monkeypatch.setattr(container_smoke, "run_command", run_command)
+    if version == "8.1.3":
+        container_smoke.verify_ffmpeg("fixture-container")
+    else:
+        with pytest.raises(RuntimeError, match="does not match"):
+            container_smoke.verify_ffmpeg("fixture-container")
+
+
 def test_dockerignore_excludes_cookie_material_from_build_context() -> None:
     """Verify Docker builds cannot send local credential files to a builder."""
     dockerignore = (PROJECT_ROOT / ".dockerignore").read_text()
@@ -54,7 +97,7 @@ def test_ffmpeg_license_notice_is_shipped() -> None:
 
     assert "FFmpeg" in notice
     assert "Alpine 3.24" in notice
-    assert "8.1.2-r0" in notice
+    assert "8.1.3-r0" in notice
     assert "GPL-2.0-or-later" in notice
     assert "LGPL-2.1-or-later" in notice
     assert "ffmpeg.org" in notice
@@ -273,7 +316,7 @@ def test_container_smoke_script_checks_runtime_boundaries() -> None:
         "State.Health.Status",
         "expected 10001",
         '"ffmpeg", "-version"',
-        "8.1.2",
+        "8.1.3",
         '"uvicorn", "--version"',
         "read-only root filesystem check failed",
         "NetworkSettings.Ports",

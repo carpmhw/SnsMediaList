@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from ..errors import AppError
+from ..url_validation import ValidatedExtractionTarget
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,11 +67,19 @@ def normalize_gallery_output(
     lines: Iterable[str | Mapping[str, object]],
     *,
     media_limit: int = 20,
+    target: ValidatedExtractionTarget | None = None,
 ) -> NormalizedExtraction:
-    """Parse and normalize sanitized gallery-dl JSON records."""
+    """正規化媒體，清單群組使用可信目標、各媒體保持逐則身分。"""
     records = [_parse_record(line) for line in lines]
     if not records:
         raise AppError("extraction_failed", "The extractor returned no metadata.")
+
+    if (
+        target
+        and target.kind == "story_list"
+        and len({item.post_id for item in records}) > media_limit
+    ):
+        raise AppError("extraction_limit_exceeded", "The Story list contains too many media items.")
 
     unavailable = 0
     candidates: list[GalleryItem] = []
@@ -82,6 +91,8 @@ def normalize_gallery_output(
         candidates.append(item)
 
     selected = select_best_variants(candidates)
+    if target and target.kind == "story_list":
+        unavailable = len({item.post_id for item in records} - {item.post_id for item in selected})
     if len(selected) > media_limit:
         raise AppError("extraction_limit_exceeded", "The post contains too many media items.")
 
@@ -89,8 +100,8 @@ def normalize_gallery_output(
     items = tuple(_to_normalized_media(item) for item in selected)
     return NormalizedExtraction(
         platform=first.platform,
-        post_url=first.post_url,
-        post_id=first.post_id,
+        post_url=target.canonical_url if target and target.kind == "story_list" else first.post_url,
+        post_id=target.target_id if target and target.kind == "story_list" else first.post_id,
         author=_optional_text(records, "author"),
         description=_optional_text(records, "description"),
         unavailable_media_count=unavailable,

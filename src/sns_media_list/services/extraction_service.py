@@ -37,11 +37,13 @@ class ExtractionService:
         self.token_store = token_store
 
     async def extract(self, url: str) -> ExtractionResponse:
-        """Extract one validated media target and atomically issue its media tokens."""
+        """擷取可信媒體目標，傳遞群組 context 並原子核發所有 token。"""
         validated = validate_post_url(url)
         raw_records = await self.extractor.extract(validated)
         normalized = ensure_downloadable_media(
-            normalize_gallery_output(raw_records, media_limit=self.settings.media_limit)
+            normalize_gallery_output(
+                raw_records, media_limit=self.settings.media_limit, target=validated
+            )
         )
 
         drafts: list[MediaTokenDraft] = []

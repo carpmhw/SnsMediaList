@@ -33,15 +33,16 @@ const previewRetryTimers = new Set();
 let activeBatchRun = null;
 let activeExtraction = null;
 let activeResultGroupIndex = 0;
+const activeDownloadRuns = new Set();
 
 const ERROR_MESSAGES = {
-  invalid_url: '請輸入 HTTPS Instagram 貼文、Reel、單則 Story 或 X 狀態貼文 URL。',
-  unsupported_url: '僅支援 Instagram 貼文、Reel、單則 Story 與 X 狀態貼文 URL；帳號目前全部 Stories 與 Highlights 不支援。',
+  invalid_url: '請輸入 HTTPS Instagram 貼文、Reel、單則 Story、帳號當下 Story 清單或 X 狀態貼文 URL。',
+  unsupported_url: '僅支援 Instagram 貼文、Reel、單則 Story、帳號當下 Story 清單與 X 狀態貼文 URL；帳號首頁、Stories tray 與 Highlights 不支援。',
   post_unavailable: '此貼文無法使用、已刪除，或目前帳號無法讀取。',
   story_auth_required: '此 Instagram Story 需要登入驗證，服務目前未設定 Instagram 工作階段。請聯絡服務管理者。',
-  story_unavailable: '此 Instagram Story 已無法取得，可能已過期、刪除或無權限存取。',
+  story_unavailable: '目前無可取得的 Instagram Story，可能沒有可見內容、已過期、刪除或無權限存取。',
   no_media: '此內容沒有可直接串流的媒體。',
-  extraction_limit_exceeded: '此內容的媒體數量超過服務可列出的上限。',
+  extraction_limit_exceeded: '此內容的媒體數量超過服務上限（最高 20 項，依管理者設定可能更低），不會截取部分結果。Story 請改貼單則連結。',
   request_too_large: '提交的請求太大，請只貼上一個內容 URL。',
   unsupported_media_type: '請使用未壓縮的 JSON 請求提交內容 URL。',
   local_rate_limited: '服務目前忙碌中，請稍候再試。',
@@ -283,8 +284,11 @@ function setStatus(message, state = 'info', canReanalyze = false) {
   }
 }
 
-/** 清除全部結果群組與其預覽工作，供單筆分析取代舊結果使用。 */
+/** 清除全部結果群組與其預覽及下載工作，供單筆分析取代舊結果使用。 */
 function clearResults() {
+  for (const run of activeDownloadRuns) {
+    stopDownloadRun(run);
+  }
   cancelPreviewLoading();
   results.hidden = true;
   resultGroups.replaceChildren();
@@ -626,10 +630,31 @@ function createSelectionToolbar(group) {
   downloadSummary.className = 'download-summary';
   downloadSummary.setAttribute('role', 'status');
   downloadSummary.setAttribute('aria-live', 'polite');
-  toolbar.append(summary, downloadSelected, downloadSummary);
+  const downloadDetail = document.createElement('p');
+  downloadDetail.className = 'download-detail';
+  const downloadProgress = document.createElement('progress');
+  downloadProgress.className = 'download-progress';
+  downloadProgress.max = 100;
+  downloadProgress.hidden = true;
+  downloadProgress.setAttribute('aria-label', '目前檔案傳輸進度');
+  const stopDownload = document.createElement('button');
+  stopDownload.type = 'button';
+  stopDownload.textContent = '停止下載';
+  stopDownload.hidden = true;
+  /** 只停止這個群組目前受控的資料夾下載。 */
+  stopDownload.addEventListener('click', () => {
+    if (group.downloadRun) {
+      stopDownloadRun(group.downloadRun);
+      stopDownload.disabled = true;
+    }
+  });
+  toolbar.append(summary, downloadSelected, stopDownload, downloadSummary, downloadDetail, downloadProgress);
   group.selectionSummary = summary;
   group.downloadSelectedButton = downloadSelected;
   group.downloadSummary = downloadSummary;
+  group.downloadDetail = downloadDetail;
+  group.downloadProgress = downloadProgress;
+  group.stopDownloadButton = stopDownload;
   return toolbar;
 }
 
@@ -649,7 +674,7 @@ function setGroupError(group, message) {
 function updateSelectionUi(group) {
   const selected = group.selectedIndices.size;
   group.selectionSummary.textContent = `${selected} / ${group.payload.media.length} 已選取`;
-  group.downloadSelectedButton.disabled = selected === 0;
+  group.downloadSelectedButton.disabled = selected === 0 || Boolean(group.downloadRun);
   for (const checkbox of group.root.querySelectorAll('.media-selection')) {
     checkbox.checked = group.selectedIndices.has(Number(checkbox.dataset.mediaIndex));
   }
@@ -663,15 +688,24 @@ function replaceSelection(group, predicate) {
   updateSelectionUi(group);
 }
 
-/** 在不讀取媒體 body 的前提下預檢 token 並啟動原生下載。 */
-async function preflightAndStartDownload(media) {
+/** 在不接觸上游媒體 body 的前提下檢查同源下載 token。 */
+async function preflightDownload(media, signal) {
   const preflight = await fetch(media.download_url, {
     method: 'HEAD',
     credentials: 'same-origin',
     cache: 'no-store',
+    signal,
   });
   if (!preflight.ok) {
     throw await readApiError(preflight);
+  }
+}
+
+/** 在預檢成功後啟動原生下載；受控批次失效時不再建立連結。 */
+async function preflightAndStartDownload(media, run = null) {
+  await preflightDownload(media, run?.controller?.signal);
+  if (run) {
+    assertDownloadActive(run);
   }
   const anchor = document.createElement('a');
   anchor.href = media.download_url;
@@ -682,31 +716,252 @@ async function preflightAndStartDownload(media) {
   anchor.remove();
 }
 
-/** 依來源順序安全啟動目前群組內被選取的多個下載。 */
+/** 在入口一次判斷資料夾選擇、寫入及串流必要能力，不依瀏覽器品牌推測。 */
+function supportsFolderDownloads() {
+  return window.isSecureContext
+    && typeof window.showDirectoryPicker === 'function'
+    && typeof window.FileSystemFileHandle?.prototype.createWritable === 'function'
+    && typeof window.ReadableStream === 'function'
+    && 'body' in Response.prototype
+    && Object.getOwnPropertyDescriptor(Response.prototype, 'body')?.get !== undefined
+    && typeof window.AbortController === 'function';
+}
+
+/** 防止已停止、被替換或脫離頁面的批次繼續產生檔案與更新結果。 */
+function assertDownloadActive(run) {
+  if (run.stopped || run.group.downloadRun !== run || !run.group.root.isConnected) {
+    throw new DOMException('下載已停止', 'AbortError');
+  }
+}
+
+/** 停止受控網路工作；已交給瀏覽器或已關閉的檔案不會被撤回。 */
+function stopDownloadRun(run) {
+  run.stopped = true;
+  run.controller?.abort();
+}
+
+/** 低頻更新單檔傳輸資訊，逐 chunk bytes 不送入 live status 造成重複朗讀。 */
+function renderDownloadProgress(run, received, length, force = false) {
+  assertDownloadActive(run);
+  const now = performance.now();
+  if (!force && now - run.lastProgressUpdate < 200) {
+    return;
+  }
+  run.lastProgressUpdate = now;
+  const progress = run.group.downloadProgress;
+  progress.hidden = false;
+  const size = received < 1024 ? `${received} bytes` : `${(received / 1048576).toFixed(2)} MB`;
+  let detail = `第 ${run.index + 1} / ${run.total} 個檔案，已接收 ${size}`;
+  if (length > 0) {
+    const percent = Math.min(100, Math.floor(received / length * 100));
+    progress.value = percent;
+    detail += ` / ${length} bytes（${percent}%）`;
+  } else {
+    progress.removeAttribute('value');
+  }
+  run.group.downloadDetail.textContent = detail;
+}
+
+/** 在選定資料夾尋找有界的非覆寫名稱，查詢失敗不當成檔案不存在。 */
+async function createDownloadFile(run, filename) {
+  const suffixAt = filename.lastIndexOf('.');
+  const base = suffixAt > 0 ? filename.slice(0, suffixAt) : filename;
+  const extension = suffixAt > 0 ? filename.slice(suffixAt) : '';
+  for (let index = 0; index < 1000; index += 1) {
+    assertDownloadActive(run);
+    const name = index === 0 ? filename : `${base} (${index})${extension}`;
+    if (run.names.has(name)) {
+      continue;
+    }
+    let exists = true;
+    try {
+      await run.directory.getFileHandle(name);
+    } catch (error) {
+      if (error.name === 'NotFoundError') {
+        exists = false;
+      } else if (error.name !== 'TypeMismatchError') {
+        throw error;
+      }
+    }
+    assertDownloadActive(run);
+    if (!exists) {
+      run.names.add(name);
+      return await run.directory.getFileHandle(name, { create: true });
+    }
+  }
+  throw new Error('無可用檔名');
+}
+
+/** 將一個同源媒體逐段寫入檔案；失敗中止未提交內容並釋放串流。 */
+async function downloadToFolder(run, media) {
+  let reader = null;
+  let writable = null;
+  let closed = false;
+  let ended = false;
+  let diskOperation = false;
+  try {
+    await preflightDownload(media, run.controller.signal);
+    assertDownloadActive(run);
+    const response = await fetch(media.download_url, {
+      credentials: 'same-origin', cache: 'no-store', signal: run.controller.signal,
+    });
+    if (!response.ok) {
+      throw await readApiError(response);
+    }
+    reader = response.body.getReader();
+    assertDownloadActive(run);
+    const lengthHeader = response.headers.get('content-length');
+    const length = lengthHeader !== null && /^[0-9]+$/.test(lengthHeader)
+      && Number.isSafeInteger(Number(lengthHeader)) ? Number(lengthHeader) : null;
+    renderDownloadProgress(run, 0, length, true);
+    diskOperation = true;
+    const file = await createDownloadFile(run, media.filename || 'media-file');
+    assertDownloadActive(run);
+    writable = await file.createWritable();
+    assertDownloadActive(run);
+    diskOperation = false;
+    let received = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      assertDownloadActive(run);
+      if (done) {
+        ended = true;
+        break;
+      }
+      received += value.byteLength;
+      if (length !== null && received > length) {
+        throw new Error('媒體長度不符');
+      }
+      renderDownloadProgress(run, received, length, received === value.byteLength);
+      diskOperation = true;
+      await writable.write(value);
+      assertDownloadActive(run);
+      diskOperation = false;
+    }
+    if (length !== null && received !== length) {
+      throw new Error('媒體長度不符');
+    }
+    renderDownloadProgress(run, received, length, true);
+    run.group.downloadDetail.textContent = '正在完成儲存...';
+    diskOperation = true;
+    await writable.close();
+    closed = true;
+    // close 成功即已提交；即使此時停止，仍回報本檔成功，由 caller 決定是否繼續。
+  } catch (error) {
+    run.fatal ||= diskOperation && !run.stopped;
+    throw error;
+  } finally {
+    if (reader) {
+      if (!ended) {
+        try {
+          await reader.cancel();
+        } catch (_error) {
+          // 已中斷的網路串流可能再次拒絕 cancel，不覆蓋原始失敗。
+        }
+      }
+      reader.releaseLock();
+    }
+    if (writable && !closed) {
+      try {
+        await writable.abort();
+      } catch (_error) {
+        run.fatal = true;
+      }
+    }
+  }
+}
+
+/** 依能力選擇資料夾或原生模式，固定快照、來源順序與群組狀態。 */
 async function downloadSelectedMedia(group) {
+  if (group.downloadRun) {
+    return;
+  }
   const selectedMedia = group.payload.media.filter((_media, index) => group.selectedIndices.has(index));
-  group.downloadSelectedButton.disabled = true;
+  if (selectedMedia.length === 0) {
+    return;
+  }
+  const run = {
+    group, stopped: false, fatal: false, names: new Set(), directory: null,
+    index: 0, total: selectedMedia.length, lastProgressUpdate: 0,
+    controller: typeof AbortController === 'function' ? new AbortController() : null,
+  };
+  group.downloadRun = run;
+  activeDownloadRuns.add(run);
+  setGroupStatus(group, '');
+  group.downloadSummary.dataset.state = 'info';
+  updateSelectionUi(group);
   let started = 0;
   let unavailable = 0;
   let needsRecovery = false;
-  for (const media of selectedMedia) {
-    try {
-      await preflightAndStartDownload(media);
-      started += 1;
-      await new Promise(resolve => window.setTimeout(resolve, BATCH_DOWNLOAD_DELAY_MS));
-    } catch (error) {
-      unavailable += 1;
-      needsRecovery ||= error.code === 'token_expired' || error.code === 'token_not_found';
+  try {
+    if (supportsFolderDownloads()) {
+      group.downloadSummary.textContent = '正在選擇資料夾...';
+      // 必須在點擊的使用者啟動期間呼叫 picker，不得先 await 預檢。
+      run.directory = await window.showDirectoryPicker({ mode: 'readwrite' });
+      assertDownloadActive(run);
+      group.stopDownloadButton.hidden = false;
+      group.stopDownloadButton.disabled = false;
+    }
+    for (const [index, media] of selectedMedia.entries()) {
+      assertDownloadActive(run);
+      run.index = index;
+      if (run.directory) {
+        group.downloadSummary.textContent = `資料夾模式：已儲存 ${started} / ${selectedMedia.length}，失敗 ${unavailable}。`;
+      }
+      try {
+        if (run.directory) {
+          await downloadToFolder(run, media);
+        } else {
+          await preflightAndStartDownload(media, run);
+        }
+        started += 1;
+        assertDownloadActive(run);
+        group.downloadSummary.textContent = run.directory
+          ? `已儲存 ${started} / ${selectedMedia.length}，失敗 ${unavailable}。`
+          : `${started} / ${selectedMedia.length} 個下載已啟動。`;
+        if (!run.directory) {
+          await new Promise(resolve => window.setTimeout(resolve, BATCH_DOWNLOAD_DELAY_MS));
+        }
+      } catch (error) {
+        if (run.stopped) {
+          break;
+        }
+        unavailable += 1;
+        needsRecovery ||= error.code === 'token_expired' || error.code === 'token_not_found';
+        if (run.fatal) {
+          break;
+        }
+      }
+    }
+    assertDownloadActive(run);
+    const summary = run.directory
+      ? `已儲存 ${started} / ${selectedMedia.length}，失敗 ${unavailable}，未處理 ${selectedMedia.length - started - unavailable}。${unavailable ? '可能留下空白檔案。' : ''}`
+      : `${started} 個下載已開始，${unavailable} 個無法啟動。${selectedMedia.length > 1 ? '瀏覽器可能需要允許多檔下載。' : ''}儲存位置及詢問依瀏覽器設定，實際進度請查看瀏覽器下載。`;
+    group.downloadSummary.textContent = summary;
+    group.downloadSummary.dataset.state = unavailable ? 'error' : 'success';
+  } catch (error) {
+    if (group.downloadRun === run && group.root.isConnected) {
+      group.downloadSummary.textContent = error.name === 'AbortError'
+        ? run.directory
+          ? `已停止下載。已儲存 ${started}，失敗 ${unavailable}，未處理 ${selectedMedia.length - started - unavailable}。可能留下空白檔案。`
+          : '已停止下載，未繼續啟動項目。'
+        : '無法使用所選資料夾，請檢查瀏覽器權限後重試。';
+    }
+  } finally {
+    activeDownloadRuns.delete(run);
+    if (group.downloadRun === run) {
+      group.downloadRun = null;
+      if (group.root.isConnected) {
+        if (needsRecovery) {
+          offerGroupRecovery(group);
+        }
+        group.stopDownloadButton.hidden = true;
+        group.downloadProgress.hidden = true;
+        group.downloadDetail.textContent = '';
+        updateSelectionUi(group);
+      }
     }
   }
-  const permissionNotice = selectedMedia.length > 1 ? '瀏覽器可能需要允許多檔下載。' : '';
-  const summary = `${started} 個下載已開始，${unavailable} 個無法啟動。${permissionNotice}`;
-  group.downloadSummary.textContent = summary;
-  setGroupStatus(group, summary, started ? 'success' : 'error');
-  if (needsRecovery) {
-    offerGroupRecovery(group);
-  }
-  updateSelectionUi(group);
 }
 
 /** 顯示僅屬於指定群組的安全 token recovery 操作。 */
@@ -761,6 +1016,10 @@ function renderResults(payload, isSingleResult = false, existingGroup = null) {
     recoveryGeneration: 0,
   };
   if (existingGroup) {
+    if (group.downloadRun) {
+      stopDownloadRun(group.downloadRun);
+      group.downloadRun = null;
+    }
     invalidateGroupPreviews(group);
   }
   group.payload = payload;
@@ -927,4 +1186,11 @@ stopBatchButton.addEventListener('click', stopBatch);
 previousResultGroupButton.addEventListener('click', () => moveResultGroup(-1));
 nextResultGroupButton.addEventListener('click', () => moveResultGroup(1));
 resultGroups.addEventListener('scroll', syncResultGroupNavigation);
+
+/** 頁面離開時取消受控下載，不保證背景或跨重載持續執行。 */
+window.addEventListener('pagehide', () => {
+  for (const run of activeDownloadRuns) {
+    stopDownloadRun(run);
+  }
+});
 input.focus();

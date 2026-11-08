@@ -262,6 +262,8 @@ Host／Origin 防護不是身份驗證。MCP 只適合本人／可信網路或�
 
 `media_type` 為 `image` 或 `video`，X 動畫 GIF 以 `video` 表示；缺少的作者、描述、尺寸或時長可為 null。媒體維持來源順序、最多 20 項，精確 Story 只輸出一個主要媒體。
 
+MCP `extract_media` 共用 `/stories/<username>/` 帳號 Story 清單：群組 post_url 為帳號 Stories canonical URL，逐則 filename／token 保持獨立，最多 20 項且較低設定仍生效。超量安全 isError、無部分 structured content 或 token；Cookie 仍為 operator 共用工作階段，並非 Client 個別授權。不改 public origin、Host／Origin allowlist 或 REST／MCP 共用 budget。
+
 ### 結果、錯誤與排錯
 
 Tool 成功回傳 metadata；未設定 public origin 時為 root-relative 相對 preview／download URL，Client 依明確的服務 origin 解析。設定後兩種 path 會投影為絕對連結，placeholder 亦為 `{origin}/placeholder.svg`，null preview 保持 null。文字 JSON 與 structured content 使用同一份結果；REST API、TTL／purpose／capacity、HEAD／GET、預覽與到期 410 均沿用原契約。沒有 media binary、upstream URL、headers 或 raw output，不新增 public origin、media URL 或 token 日誌。
@@ -315,6 +317,25 @@ batch UI 不會改變 `SNS_MEDIA_MAX_EXTRACTIONS`；最多五個 URL 由瀏覽�
 長時間下載會持續占用 process-wide 與 per-client slot；read idle timeout、client disconnect 或取消都會關閉 upstream connection 並釋放 lease。`SNS_MEDIA_DOWNLOAD_TIMEOUT_SECONDS` 已移除，舊環境中的同名變數會被忽略，升級時應刪除。
 
 瀏覽器可能要求多檔下載權限；「已開始下載」不代表瀏覽器或 OS 已完成檔案保存，必要時請在 client 端確認實際檔案。
+
+### 資料夾下載與手機驗收
+
+「下載選取項目」依必要能力判斷模式，不依品牌：HTTPS／localhost 安全環境支援資料夾 picker、檔案寫入與串流時，每批選一次資料夾；缺少能力時使用原生 fallback。手機 Edge 需核對實際版本及系統能力，Firefox 缺少能力時仍可原生下載，但儲存位置、逐檔詢問與多檔權限依瀏覽器設定，網頁不能強制預設下載位置或略過詢問。個別下載始終維持原生方式。
+
+- 資料夾取消、拒絕權限或 picker 錯誤不會自動改用原生下載；全批不保存目錄 handle、權限或本機路徑至持久儲存／後端／日誌，每批重新選擇。
+- HEAD 只驗證 token 並回 204，不連上游或預取檔案大小。每項 GET 才取得可用 Content-Length，逐段讀取、等待寫入、遵守背壓，不以 Blob 或完整 ArrayBuffer 緩衝影片。
+- 顯示目前檔案及已接收 bytes；已知正整數大小才有單檔百分比，未知／零大小用不定進度。整批顯示已儲存、失敗及未處理數，不虛構總 bytes 百分比。100% 傳輸不等於成功；body 完整、長度相符（若有）且 close 成功才計為已儲存，不代表 OS 保證實體落盤。
+- 同名檔案／目錄另取保留副檔名的數字後綴，例如 `media (1).jpg`，預設不覆寫；不承諾跨應用程式同時寫入時原子保留名稱。失敗／取消中止未提交寫入、不刪既有檔案，瀏覽器可能留下空白檔案，可由使用者檢查後自行移除。
+- token／HTTP／傳輸單項失敗會繼續後續媒體；磁碟寫入、close、清理或目錄權限失敗停止該批。不自動重試、不新增前端 Range resume、不延長 token；過期時使用群組重新分析。後端原有 video resume 及 timeout／byte limit／rate limit 不變。
+- 「停止下載」、清空或替換結果會取消受控工作，不撤回已完成檔案；原生模式已交給 browser download manager 的項目不受網頁控制。保持頁面開啟，手機切背景、鎖屏或離開頁面可能中斷；不保證背景執行或跨重載續傳，pagehide 清理屬 best effort。
+
+人工 smoke（不屬一般 CI gate，不需真實平台 Cookie）：
+
+1. 記錄手機系統、瀏覽器與版本、是否安全環境；在 Edge／Firefox 各檢查一遍。只使用合成 fixture 或 owner-controlled 授權內容，不記錄真實 token／URL／Cookie／本機路徑。
+2. 若裝置能力支援，勾選圖片及影片，確認一次 picker 後依順序寫入；檢查進度及最後檔案可開啟、大小／內容正確。同名檔原內容應不變。
+3. 分別取消 picker、拒絕權限、串流途中停止，確認沒有意外原生下載、後續項目不再開始、已完成檔案不刪除。檢查可能空檔；不要以「已開始」或 server completed 當成本機完成。
+4. 能力不支援時，確認原生 HEAD／GET、瀏覽器設定的詢問及下載面板可正常使用，網頁只顯示啟動數。切換背景／鎖屏只觀察裝置實際行為，不承諾保活。
+5. 證據分開列出：自動化 picker／writable **替身**、**真實 HTTP** body 與 server 清理、真機系統 picker／檔案驗收。沒有可用手機或相應能力就標「未執行」及原因，不能以 Chromium 模擬手機取代真機驗收。
 
 ## 安全下載診斷
 
@@ -390,6 +411,14 @@ docker compose -f docker-compose.yaml \
 
 每次替換或重新啟動 container 都會清除記憶體 token／狀態，使用者須重新分析貼文。部署紀錄保存 source、image ID／digest、gate 結果與 rollback reference，不把單次版本紀錄寫入通用指南。
 
+### Alpine runtime 修補與版本核對
+
+目前 runtime 沿用 Dockerfile 的 Python base immutable digest 與 Alpine 3.24 repository，僅以精確 APK pins 安裝修補：`brotli-libs=1.2.1-r0`、`libexpat=2.10.0-r0`、`libx11=1.8.14-r0`、`musl=1.2.6-r3`、`musl-utils=1.2.6-r3`、`zlib=1.4-r0`；FFmpeg `8.1.3-r0` 與既有 PCRE2 pin 亦由 Dockerfile 控制。Python lock、UV digest 及 hardening 不因此改變；不使用一般 `apk upgrade`、edge repository、漏洞忽略或新增例外取代修復。精確版本不可取得或相依衝突時停止建置，不自動切換 release 或放寬版本。
+
+每個修補後 candidate 均須核對實際 APK inventory、`ffmpeg -version`、gallery-dl runtime、health 與容器限制，並對其 image ID／digest 重跑 security gate、container smoke、受限縮圖與媒體交付回歸；不得沿用修補前的掃描結果或其他 smoke image 作為該 candidate 通過的證據。FFmpeg notice 與 smoke 的版本檢查須同步維護，generated preview 仍預設關閉。
+
+正式替換仍需另外授權，沿用實際 Compose project／完整 overlays。Rollback 只指向部署紀錄中先前已驗證的不可變映像；已知安全 gate 失敗的候選不可冒充合格 rollback。一次建置成功或相容性測試通過不等於安全 gate 已通過。
+
 ## 預覽與縮圖
 
 優先使用可信 CDN raster，缺少時顯示 `/placeholder.svg`。Generated preview 預設關閉；candidate 通過 decoder vulnerability policy 或具有效的 narrow risk acceptance 後，才可設定 `SNS_MEDIA_GENERATED_PREVIEWS_ENABLED=true`。
@@ -419,7 +448,13 @@ Proxy 必須覆寫 forwarded client header，不可附加內容；不要信任�
 
 ## 匿名平台限制
 
-僅支援 Instagram `/p/`、`/reel/`、精確 `/stories/<username>/<numeric-media-id>/` 與 X status URL。Story 匿名擷取是 best effort；帳號全部 Stories、Stories tray 與 Highlights 不支援。配置 Cookie 後仍只處理精確 URL 及帳號可見內容。本服務不會接受平台 Cookie 或 credentials 由 request 傳入，也不合併 HLS/DASH stream。
+僅支援 Instagram `/p/`、`/reel/`、精確 `/stories/<username>/<numeric-media-id>/`、帳號當下 `/stories/<username>/` 清單與 X status URL。Story 匿名擷取是 best effort；Stories tray、Highlights、歷史／過期 Story、帳號首頁與裸帳號不支援。配置 Cookie 後只處理明確 URL 及帳號可見內容。本服務不會接受平台 Cookie 或 credentials 由 request 傳入，也不合併 HLS/DASH stream。
+
+清單沿用單次受限 subprocess、相同唯讀 Instagram Cookie、CONNECT proxy、總期限與輸出上限，不逐則重新擷取、不新增重試。每則身分來自同筆 media_id，而非帳號 reel ID；依來源順序回傳每則一個主要媒體及 `instagram-<story-media-id>-1.*` 檔名。合法空清單回 `story_unavailable`／404，不推斷沒有發布、已過期或不可見的唯一原因；全部不可下載維持 `no_media`。第一筆 DataJob error 的分類與來源分離不變，不回傳部分成功清單；Cookie 已配置不代表 session 有效。
+
+清單預設及最高 20 則，較低的 `SNS_MEDIA_MEDIA_LIMIT` 仍生效。不同 Story 候選在可用性篩選及 token 核發前計數，重複畫質只計一則；超量為 422／`extraction_limit_exceeded`，整次拒絕且無新 token，不截斷、不自動拆批，請改貼單則連結。不提高 timeout、輸出大小或其他資源 budget。
+
+選用帳號清單 smoke：只使用 owner-controlled、當下有效且有權保存的內容，在 Web 貼上帳號 Stories URL，確認一個群組、來源順序、各自檔名與初始未選取；再勾選圖片／影片下載。原生「已開始下載」僅證明已交給瀏覽器，須另核對實際檔案大小／內容；資料夾路徑須等每檔 writable close 後才計為已儲存。自動化 picker／writable 使用替身，其通過不代表手機 Edge／Firefox 真機授權介面已驗證。清單與精確 Story live smoke 都是選用項目，不作 CI／release gate；不要將真實 URL、Cookie、token 或 raw output 寫入紀錄。
 
 ## Instagram Story Extraction Diagnostics
 
@@ -441,6 +476,10 @@ docker compose logs --no-log-prefix --since 10m app
 | `upstream_rate_limited` | 429 | 降低請求頻率並等待平台解除限制。 |
 | `extraction_timeout` | 504 | extractor 超過期限；查 network／CONNECT proxy，不直接提高 timeout。 |
 | `extraction_failed` | 502 | 無法細分的失敗，包含僅有 5xx 或 configured Story 僅有 HTTP 401/403；不能據此判定 Cookie 或 Story 狀態。 |
+
+帳號解析可能在 Story 清單查詢前失敗。Pinned gallery-dl 的固定 `Requested user could not be found` 診斷，在 DataJob `NotFoundError` 或等價 stderr 形式會保守回傳 `extraction_failed`／502、`extractor_process_unclassified`，而非 `story_unavailable`。同來源的帳號查詢 HTTP 404 不等於精確 Story 的 404；真正 Story 對象或未辨明對象的 NotFound／404 仍沿用既有 availability 分類，429 仍優先。第一筆合法 error 的分類不借用後續 error 或 stderr。
+
+`extractor_error_type=not_found` 本身不能區分 user 與 Story；系統不新增 raw diagnostic、帳號或 endpoint 日誌。管理者先核對實際 runtime、pinned gallery-dl 的個人頁＋GraphQL 解析流程與 session／平台相容性；不要僅由此欄位判定內容已失效。同帳號瀏覽器可見、Cookie 檔案存在或同步均不能證明服務的 Story API session 有效；不要求使用者上傳 Cookie，也不放寬 proxy 或增加重試。
 
 ### Failure stage
 
@@ -497,7 +536,7 @@ Stage 不改變公開錯誤；未提供時省略，無效值正規化為 `unknow
    ```
 
 2. **驗證 contract。** 執行 `uv run python scripts/verify_gallery_contract.py`，核對已安裝套件、`--resolve-json`、離線 DataJob 格式及 adapter；不使用真實 Cookie 作 fixture。
-3. **核對 Instagram Story 相容性。** 在 pinned `gallery-dl` 1.32.14 中，精確 Story 使用套件預設 video mode，不強制 `extractor.instagram.videos=merged`；Instagram Post／Reel 繼續使用 merged。若 Story URL event 是 `ytdl:` pseudo URL，adapter 僅在 validated Instagram Story context 中，將同一 URL media record 的 top-level 非空 `video_url` 作為 source 候選，再交由既有驗證流程處理。
+3. **核對 Instagram Story 相容性。** 在 pinned `gallery-dl` 1.32.19 中，精確 Story 使用套件預設 video mode，不強制 `extractor.instagram.videos=merged`；Instagram Post／Reel 繼續使用 merged。`user-strategy` 已在 1.32.17 移除，精確 Story 的帳號解析改為個人頁 `profile_id` 加 `PolarisProfilePageContentQuery` GraphQL。若 Story URL event 是 `ytdl:` pseudo URL，adapter 僅在 validated Instagram Story context 中，將同一 URL media record 的 top-level 非空 `video_url` 作為 source 候選，再交由既有驗證流程處理。
 4. **維持來源安全邊界。** `video_url` 搬移只是候選轉換，不是安全授權：既有 HTTPS URL 形狀檢查與 downstream host／port／DNS A／AAAA／IP／redirect／MIME／byte-limit 政策都必須通過。missing／unsafe source fail closed；不 unwrap `ytdl:`、不向其他 record／directory／queue／nested metadata 借 URL，也不新增 generic downloader 或 retry。
 5. **查官方 release notes。** 比對觀察到的行為與候選版本修正，再決定是否升級，不以版本更新本身宣稱修復。
 6. **驗證 candidate image。** 依[升級與 rollback](#升級與-rollback)及[自動化檢查](#自動化檢查)完成隔離驗證與 gate。
@@ -507,6 +546,8 @@ Stage 不改變公開錯誤；未提供時省略，無效值正規化為 `unknow
 
 ### Story GraphQL 靜態資源與 CONNECT proxy
 
+精確 Story 的帳號解析由 pinned gallery-dl 1.32.19 執行：先請求目標帳號的個人頁，從 `profile_id` 取得帳號 ID，再以 `PolarisProfilePageContentQuery` GraphQL 取得帳號資料。這是同一次受限 subprocess 內的解析，不是第二次擷取，也不加入匿名 preflight；若個人頁缺少 `profile_id` 或 GraphQL 失敗，套件回報固定 `NotFoundError("user")`，服務依 user-not-found 規則回 502。仍受既有總期限、HTTP timeout、retries=0、唯讀 Cookie 與 CONNECT proxy 政策限制。Post／Reel／X 不套用 Story 專用流程；`user-strategy` 已於 1.32.17 移除，不得再加回 command。個人頁或 GraphQL 也可能受平台、session 或限流影響，不能以流程存在本身證明恢復。
+
 Pinned gallery-dl 的 Story 流程會先取得使用者資訊與頁面，再從 `static.cdninstagram.com` 讀取靜態 JavaScript，以尋找 GraphQL `doc_id`。Extractor 的精確 host 白名單包含此單一網域；不授權整個 `*.cdninstagram.com`，仍須通過 HTTPS CONNECT、443 port、完整 DNS A／AAAA 公開 IP 檢查與目的地 pinning。此授權用於擷取期間的靜態資源，不改變 preview／download 的媒體政策或 Cookie 邊界。
 
 若使用者查詢與頁面讀取皆為 HTTP 200，但靜態資源請求出現 `ProxyError`／CONNECT tunnel 403，應先核對執行中映像的 extractor 白名單。本機 CONNECT proxy 拒絕目的地時也會回覆 403，不能僅由此認定 Instagram 拒絕 session 或 Story GraphQL 請求。診斷只保留固定請求類別、狀態碼與是否攜帶 Cookie 的布林旗標，不記錄實際資源 URL、Cookie 值或原始例外。
@@ -514,6 +555,10 @@ Pinned gallery-dl 的 Story 流程會先取得使用者資訊與頁面，再從 
 原始碼白名單更新須經映像建置及部署替換才會生效；重新啟動舊映像不會取得修正。更新後以仍有效的 owner-controlled Story 確認流程可繼續到 GraphQL，再驗證分析與完整下載；解除靜態資源阻擋不代表後續平台請求必然成功。
 
 Cookie 檔案存在、同步、格式／權限檢查通過、瀏覽器可見或一般貼文成功，都不能證明 Story API 的 session 有效。Deterministic fake-extractor／container 結果與 owner-controlled live Story 重試分開記錄；合成測試通過不代表原事件已修復。
+
+Story 帳號解析的離線證據見 `tests/unit/test_gallery_dl_contract.py`；`tests/integration/test_download_server.py::test_pinned_story_user_resolution_downloads_exact_media_over_real_http` 將真實套件帳號解析與 DataJob 接到 runner、單則正規化、token 及本機 HTTP 完整／中斷下載，但平台回應與 CDN bytes 都是合成資料。報告須分列合成路徑、指定 candidate image 的 gate、有效授權 Story 實測；無合法有效 live 案例時記錄「實際恢復未確認」，不把 fixture 通過當成原 Story 已恢復。
+
+Live 驗收沿用下方受保護檔案輸入與敏感資料排除規則。核對單一主要媒體、正確檔名、實際完整下載與清理；generated preview 關閉且沒有 poster 時，placeholder 是正常預覽結果，不要求新增縮圖服務。UI「已開始下載」不等於完成保存，服務的 completed／bytes_streamed 也不代表瀏覽器落盤。不要保存真實 URL、帳號、Story ID、Cookie、token 或 raw output 以證明成功。
 
 ## 故障排除
 
