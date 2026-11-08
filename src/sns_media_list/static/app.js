@@ -887,6 +887,8 @@ async function downloadSelectedMedia(group) {
   };
   group.downloadRun = run;
   activeDownloadRuns.add(run);
+  setGroupStatus(group, '');
+  group.downloadSummary.dataset.state = 'info';
   updateSelectionUi(group);
   let started = 0;
   let unavailable = 0;
@@ -936,7 +938,7 @@ async function downloadSelectedMedia(group) {
       ? `已儲存 ${started} / ${selectedMedia.length}，失敗 ${unavailable}，未處理 ${selectedMedia.length - started - unavailable}。${unavailable ? '可能留下空白檔案。' : ''}`
       : `${started} 個下載已開始，${unavailable} 個無法啟動。${selectedMedia.length > 1 ? '瀏覽器可能需要允許多檔下載。' : ''}儲存位置及詢問依瀏覽器設定，實際進度請查看瀏覽器下載。`;
     group.downloadSummary.textContent = summary;
-    setGroupStatus(group, summary, unavailable ? 'error' : 'success');
+    group.downloadSummary.dataset.state = unavailable ? 'error' : 'success';
   } catch (error) {
     if (group.downloadRun === run && group.root.isConnected) {
       group.downloadSummary.textContent = error.name === 'AbortError'

@@ -259,11 +259,13 @@ button:hover:not(:disabled) {
   color: var(--accent);
 }
 
-.group-status[data-state="success"] {
+.group-status[data-state="success"],
+.download-summary[data-state="success"] {
   color: var(--success);
 }
 
 .group-status[data-state="error"],
+.download-summary[data-state="error"],
 .group-error {
   border-left: 3px solid var(--danger);
   padding-left: 9px;

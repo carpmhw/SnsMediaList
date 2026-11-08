@@ -582,3 +582,38 @@ def test_stop_preserves_earlier_expired_token_recovery(page: Page, base_url: str
     expect(page.locator(".download-summary")).to_contain_text("已停止")
     expect(page.locator(".download-summary")).to_contain_text("失敗 1，未處理 1")
     expect(page.get_by_role("button", name="重新分析此項")).to_be_visible()
+
+
+@pytest.mark.parametrize("folder", [False, True], ids=["native", "folder"])
+@pytest.mark.parametrize("partial", [False, True], ids=["success", "partial-failure"])
+def test_batch_summary_is_displayed_and_announced_once(
+    page: Page, base_url: str, folder: bool, partial: bool
+) -> None:
+    """捕捉批次摘要同時寫入兩個 live status，並清除先前個別下載的舊訊息。"""
+    if folder:
+        install_sink(page)
+    prepare(page, base_url)
+    group = page.locator(".result-group")
+    group.get_by_role("button", name="下載", exact=True).first.click()
+    expect(group.locator(".group-status")).to_have_text("已開始下載。")
+
+    if partial:
+
+        def expire_first(route: Route) -> None:
+            """使批次第一項過期，仍保留後續媒體正常下載。"""
+            if "item-0" in route.request.url:
+                route.fulfill(status=410, json={"code": "token_expired"})
+            else:
+                route.fallback()
+
+        page.route("**/api/media/**/download", expire_first)
+
+    group.get_by_role("button", name="下載選取項目").click()
+    expect(group.get_by_role("button", name="下載選取項目")).to_be_enabled()
+    summary = group.locator(".download-summary")
+    expect(summary).to_contain_text("已儲存" if folder else "個下載已開始")
+    expect(group.get_by_text(summary.inner_text(), exact=True)).to_have_count(1)
+    expect(group.locator(".group-status")).to_have_text("")
+    expect(summary).to_have_attribute("role", "status")
+    expect(summary).to_have_attribute("aria-live", "polite")
+    expect(summary).to_have_attribute("data-state", "error" if partial else "success")
