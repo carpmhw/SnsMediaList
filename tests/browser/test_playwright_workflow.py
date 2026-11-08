@@ -397,7 +397,7 @@ def base_url(download_request_methods: list[str]) -> Generator[str, None, None]:
 
 @pytest.fixture
 def page() -> Generator[Page, None, None]:
-    """Launch a headless Chromium page for one isolated browser test."""
+    """啟動隔離 Chromium 頁面並明確驗證原生下載 fallback。"""
     with sync_playwright() as playwright:
         browser = None
         try:
@@ -406,6 +406,7 @@ def page() -> Generator[Page, None, None]:
             pytest.skip(f"Chromium is unavailable: {error}")
         assert browser is not None
         browser_page = browser.new_page(accept_downloads=True)
+        browser_page.add_init_script("window.showDirectoryPicker = undefined;")
         try:
             yield browser_page
         finally:

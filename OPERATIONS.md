@@ -316,6 +316,25 @@ batch UI 不會改變 `SNS_MEDIA_MAX_EXTRACTIONS`；最多五個 URL 由瀏覽�
 
 瀏覽器可能要求多檔下載權限；「已開始下載」不代表瀏覽器或 OS 已完成檔案保存，必要時請在 client 端確認實際檔案。
 
+### 資料夾下載與手機驗收
+
+「下載選取項目」依必要能力判斷模式，不依品牌：HTTPS／localhost 安全環境支援資料夾 picker、檔案寫入與串流時，每批選一次資料夾；缺少能力時使用原生 fallback。手機 Edge 需核對實際版本及系統能力，Firefox 缺少能力時仍可原生下載，但儲存位置、逐檔詢問與多檔權限依瀏覽器設定，網頁不能強制預設下載位置或略過詢問。個別下載始終維持原生方式。
+
+- 資料夾取消、拒絕權限或 picker 錯誤不會自動改用原生下載；全批不保存目錄 handle、權限或本機路徑至持久儲存／後端／日誌，每批重新選擇。
+- HEAD 只驗證 token 並回 204，不連上游或預取檔案大小。每項 GET 才取得可用 Content-Length，逐段讀取、等待寫入、遵守背壓，不以 Blob 或完整 ArrayBuffer 緩衝影片。
+- 顯示目前檔案及已接收 bytes；已知正整數大小才有單檔百分比，未知／零大小用不定進度。整批顯示已儲存、失敗及未處理數，不虛構總 bytes 百分比。100% 傳輸不等於成功；body 完整、長度相符（若有）且 close 成功才計為已儲存，不代表 OS 保證實體落盤。
+- 同名檔案／目錄另取保留副檔名的數字後綴，例如 `media (1).jpg`，預設不覆寫；不承諾跨應用程式同時寫入時原子保留名稱。失敗／取消中止未提交寫入、不刪既有檔案，瀏覽器可能留下空白檔案，可由使用者檢查後自行移除。
+- token／HTTP／傳輸單項失敗會繼續後續媒體；磁碟寫入、close、清理或目錄權限失敗停止該批。不自動重試、不新增前端 Range resume、不延長 token；過期時使用群組重新分析。後端原有 video resume 及 timeout／byte limit／rate limit 不變。
+- 「停止下載」、清空或替換結果會取消受控工作，不撤回已完成檔案；原生模式已交給 browser download manager 的項目不受網頁控制。保持頁面開啟，手機切背景、鎖屏或離開頁面可能中斷；不保證背景執行或跨重載續傳，pagehide 清理屬 best effort。
+
+人工 smoke（不屬一般 CI gate，不需真實平台 Cookie）：
+
+1. 記錄手機系統、瀏覽器與版本、是否安全環境；在 Edge／Firefox 各檢查一遍。只使用合成 fixture 或 owner-controlled 授權內容，不記錄真實 token／URL／Cookie／本機路徑。
+2. 若裝置能力支援，勾選圖片及影片，確認一次 picker 後依順序寫入；檢查進度及最後檔案可開啟、大小／內容正確。同名檔原內容應不變。
+3. 分別取消 picker、拒絕權限、串流途中停止，確認沒有意外原生下載、後續項目不再開始、已完成檔案不刪除。檢查可能空檔；不要以「已開始」或 server completed 當成本機完成。
+4. 能力不支援時，確認原生 HEAD／GET、瀏覽器設定的詢問及下載面板可正常使用，網頁只顯示啟動數。切換背景／鎖屏只觀察裝置實際行為，不承諾保活。
+5. 證據分開列出：自動化 picker／writable **替身**、**真實 HTTP** body 與 server 清理、真機系統 picker／檔案驗收。沒有可用手機或相應能力就標「未執行」及原因，不能以 Chromium 模擬手機取代真機驗收。
+
 ## 安全下載診斷
 
 Application logger 預設以 INFO 將每筆事件寫成一行 JSON 至 stderr，Docker 可直接收集；不需開啟 debug 或 access log。沿用[擷取診斷的日誌查詢](#instagram-story-extraction-diagnostics)，以 `request_id` 串接事件。

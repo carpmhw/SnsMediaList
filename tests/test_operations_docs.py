@@ -6,6 +6,36 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parents[1]
 
 
+def test_folder_download_guidance_preserves_browser_and_stream_boundaries() -> None:
+    """確保 operator 不誤將資料夾進度、fallback 或自動化視為真機完成保證。"""
+    guide = (PROJECT_ROOT / "OPERATIONS.md").read_text(encoding="utf-8")
+    section = guide.partition("### 資料夾下載與手機驗收")[2].partition("\n## ")[0]
+    for text in (
+        "HTTPS",
+        "localhost",
+        "能力",
+        "Firefox",
+        "Edge",
+        "背景",
+        "鎖屏",
+        "HEAD",
+        "GET",
+        "close",
+        "空白",
+        "不覆寫",
+        "權限",
+        "取消",
+        "不保存",
+        "不自動重試",
+        "原生",
+        "單檔百分比",
+        "未執行",
+        "替身",
+        "真實 HTTP",
+    ):
+        assert text in section
+
+
 def test_alpine_runtime_remediation_documents_exact_build_and_revalidation() -> None:
     """核對操作指南的 runtime 修補 pins 與新映像必須重新驗證的邊界。"""
     guide = (PROJECT_ROOT / "OPERATIONS.md").read_text(encoding="utf-8")

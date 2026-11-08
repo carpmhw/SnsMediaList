@@ -89,6 +89,12 @@ def test_readme_documents_bounded_client_side_batch_workflow() -> None:
         "循序前端 queue",
         "不提供 ZIP、帳號 feed 批次封存或歷史保存",
         "不代表瀏覽器或 OS 已完成檔案保存",
+        "資料夾",
+        "HTTPS",
+        "取消",
+        "單檔百分比",
+        "原生下載",
+        "背景",
     ):
         assert required_text in readme
 

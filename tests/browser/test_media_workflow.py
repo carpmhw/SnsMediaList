@@ -77,13 +77,15 @@ def test_home_page_contains_bounded_batch_url_input() -> None:
 
 
 def test_home_page_describes_selected_downloads_without_batch_archive_claims() -> None:
-    """驗證首頁說明逐項下載限制而非 ZIP、帳號封存或落盤完成。"""
+    """驗證首頁說明雙模式限制，而非 ZIP、帳號封存或無條件落盤完成。"""
     response = TestClient(create_app()).get("/")
 
     assert response.status_code == 200
     assert "選取多個媒體後逐項啟動下載" in response.text
     assert "不提供 ZIP 或帳號批次封存" in response.text
     assert "已開始下載不代表檔案已完成保存" in response.text
+    assert "資料夾" in response.text
+    assert "瀏覽器設定" in response.text
 
 
 def test_home_page_advertises_same_origin_favicon_formats() -> None:
