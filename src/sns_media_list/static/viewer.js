@@ -143,7 +143,8 @@ export function createMediaViewer({ onSelection, onRecover, focusFallback }) {
       if (media.media_type !== 'image') {
         const video = document.createElement('video');
         video.controls = true;
-        video.playsInline = true;
+        // 明確設定屬性，避免未支援 playsInline property 的引擎僅建立自訂欄位。
+        video.setAttribute('playsinline', '');
         video.preload = 'none';
         video.setAttribute('aria-label', media.filename);
         const poster = media.preview_url;

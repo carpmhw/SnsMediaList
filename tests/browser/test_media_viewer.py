@@ -301,6 +301,21 @@ def test_viewer_backdrop_focus_fallback_and_long_name(page: Page, base_url: str)
     assert page.evaluate("document.body.style.overflow") == ""
 
 
+def test_viewer_marks_inline_playback_without_property_support(page: Page, base_url: str) -> None:
+    """沒有 playsInline property 的引擎仍保留內嵌播放宣告，且不預載影片。"""
+    page.add_init_script("delete HTMLVideoElement.prototype.playsInline;")
+    calls = open_results(page, base_url, video=True)
+    assert not page.evaluate(
+        "/** 確認此頁未提供內嵌播放 property。 */ () => 'playsInline' in HTMLVideoElement.prototype"
+    )
+    page.locator(".media-view").first.click()
+    expect(page.get_by_role("button", name="播放影片", exact=True)).to_be_enabled()
+    video = page.locator("#viewer-content video")
+    expect(video).to_have_attribute("playsinline", "")
+    assert video.get_attribute("src") is None
+    assert [method for method, _ in calls] == ["HEAD"]
+
+
 def test_viewer_video_manual_play_and_seek(page: Page, base_url: str) -> None:
     """真正 WebM 手動開始後時間前進，原生控制可暫停並完成定位。"""
     calls = open_results(page, base_url, video=True)
