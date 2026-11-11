@@ -14,6 +14,144 @@
   --shadow: 0 18px 55px rgb(0 0 0 / 25%);
 }
 
+.media-viewer {
+  width: min(96vw, 1400px);
+  height: min(92dvh, 1100px);
+  max-width: calc(100vw - 1rem);
+  max-height: calc(100dvh - 1rem);
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  overflow: auto;
+}
+
+.media-viewer[open] {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: 0.75rem;
+}
+
+.media-viewer::backdrop {
+  background: rgb(0 0 0 / 80%);
+}
+
+.viewer-heading,
+.viewer-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.viewer-heading {
+  grid-row: 1;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.viewer-heading > div {
+  min-width: 0;
+}
+
+.viewer-heading h2 {
+  margin: 0 0 0.25rem;
+  font-size: 1.125rem;
+}
+
+.viewer-filename {
+  overflow-wrap: anywhere;
+  margin: 0;
+}
+
+.viewer-details,
+.viewer-message {
+  color: var(--muted);
+  margin: 0;
+}
+
+.viewer-message {
+  grid-row: 2;
+}
+
+.viewer-details {
+  font-variant-numeric: tabular-nums;
+}
+
+.viewer-content {
+  grid-row: 3;
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  overflow: auto;
+  background: var(--canvas);
+  overscroll-behavior: contain;
+  scrollbar-color: var(--line) var(--canvas);
+}
+
+.viewer-content img,
+.viewer-content video {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+}
+
+.viewer-content.actual-size {
+  display: block;
+}
+
+.viewer-content.actual-size img {
+  position: static;
+  max-width: none;
+  max-height: none;
+  margin: auto;
+}
+
+.viewer-actions {
+  grid-row: 4;
+  flex-wrap: wrap;
+}
+
+.viewer-selection {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+}
+
+.viewer-selection input {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--accent);
+}
+
+@media (max-width: 600px), (max-height: 460px) {
+  .media-viewer {
+    width: calc(100vw - 1rem);
+    height: calc(100dvh - 1rem);
+    padding: 0.75rem;
+  }
+
+  .viewer-heading,
+  .viewer-actions {
+    gap: 0.5rem;
+  }
+
+  .viewer-filename {
+    font-size: 0.875rem;
+    max-height: 3em;
+    overflow: auto;
+  }
+}
+
 * {
   box-sizing: border-box;
 }
@@ -632,6 +770,7 @@ button:hover:not(:disabled) {
   font-size: 0.76rem;
 }
 
+.media-view,
 .copy-filename {
   width: 100%;
   margin-bottom: 9px;

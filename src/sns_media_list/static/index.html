@@ -78,6 +78,26 @@
     </main>
 
     <footer class="site-footer">選取多個媒體後逐項啟動下載；支援時選一次資料夾並顯示儲存進度，不支援時使用原生下載。儲存位置與詢問依瀏覽器設定，瀏覽器可能要求多檔下載權限。已開始下載不代表檔案已完成保存。不提供 ZIP 或帳號批次封存，也不保留歷史記錄。</footer>
+    <dialog id="media-viewer" class="media-viewer" aria-labelledby="viewer-heading">
+      <header class="viewer-heading">
+        <div>
+          <h2 id="viewer-heading">原始媒體檢視</h2>
+          <p id="viewer-filename" class="viewer-filename"></p>
+          <p class="viewer-details"><span id="viewer-kind"></span> · <span id="viewer-position" aria-live="polite"></span></p>
+        </div>
+        <button id="viewer-close" type="button" autofocus>關閉</button>
+      </header>
+      <p id="viewer-message" class="viewer-message" role="status" aria-live="polite"></p>
+      <div id="viewer-content" class="viewer-content"></div>
+      <div class="viewer-actions" aria-label="媒體檢視操作">
+        <button id="viewer-previous" type="button">上一則</button>
+        <button id="viewer-next" type="button">下一則</button>
+        <label class="viewer-selection"><input id="viewer-selected" type="checkbox">選取此項</label>
+        <button id="viewer-size" type="button">原始大小</button>
+        <button id="viewer-play" type="button" hidden>播放影片</button>
+        <button id="viewer-recovery" type="button" hidden>重新分析此群組</button>
+      </div>
+    </dialog>
     <script type="module" src="/app.js"></script>
   </body>
 </html>

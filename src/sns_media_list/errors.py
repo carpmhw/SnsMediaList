@@ -171,6 +171,7 @@ ERROR_STATUS: dict[str, int] = {
     "story_unavailable": 404,
     "story_auth_required": 403,
     "token_not_found": 404,
+    "view_range_not_satisfiable": 416,
     "no_media": 422,
     "extraction_limit_exceeded": 422,
     "request_too_large": 413,

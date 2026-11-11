@@ -83,6 +83,7 @@ SNS Media List 是低併發、自架式媒體整理、預覽與下載工具，�
 - **下載與預覽期限分開：** Attachment download 使用 connect／read idle timeout 與 byte limit，不套用整檔期限；`media_response_timeout_seconds` 用於 CDN preview 與 generated thumbnail。X 與 Instagram 漸進式影片在 initial `200`、合法非 chunked `Content-Length`、部分 bytes 已交付且明確提前 EOF 時，最多嘗試一次經驗證的 Range resume；不對圖片、preview、未知／chunked 長度、timeout、驗證失敗或取消增加續傳或一般重試。
 - **中斷與完成語意：** Headers 已送出而 body 未完成時，保留固定 `StreamAborted` 中止流程，不補送成功結尾或第二份錯誤 response。下載僅在最後 body 與 cleanup 均成功後記錄 completed；保留唯一 terminal event，且 `bytes_streamed` 不代表瀏覽器落盤 bytes。
 - **預覽有界限：** 優先使用可信 CDN poster，缺少時預設使用 `/placeholder.svg`。Generated preview 預設關閉；啟用時保留輸入／輸出大小、時間、併發及快取上限。
+- **原始檢視獨立：** `/api/media/{token}/view` 沿用有效 download token，不新增 purpose／token 或改 extraction schema；HEAD 204 僅驗當下授權且不連外，不證明可顯示或播放。僅 view 影片接受 typed single Range，不能放寬 download／preview caller Range。只允許 signature 相符的 JPEG、PNG、GIF、WebP、MP4、WebM；非零／短片段的最多 512-byte prefix probe 與片段共用一個 lease、完整 `media_response_timeout_seconds` 與累計 byte budget，不重試、續傳、轉碼或快取完整來源。保留 passive inline headers、view token 日誌遮蔽與既有網路政策，檢視不算 attachment completed。
 - **部署限制：** 維持 UID/GID 10001、唯讀 root filesystem、bounded tmpfs、loopback port 與無永久媒體 volume 的設計。
 
 `secrets/` 與真實 Cookie 檔不是一般探索資料；不要將其內容加入程式、測試 fixture、文件或建置 context。平台實測依 `OPERATIONS.md` 使用 owner-controlled 內容。

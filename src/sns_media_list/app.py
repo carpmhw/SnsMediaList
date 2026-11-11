@@ -27,6 +27,7 @@ from .models import ErrorResponse
 from .network.connect_proxy import ConnectProxy
 from .network.dns import DestinationPolicy, resolve_system
 from .network.media_client import MediaClient, MediaDestinationPolicy
+from .network.media_viewing import ViewRangeError
 from .security.tokens import TokenStore
 from .services.extraction_coordinator import ExtractionCoordinator
 from .services.extraction_service import ExtractionService
@@ -190,7 +191,7 @@ def create_app(
 
     @application.exception_handler(AppError)
     async def handle_app_error(request: Request, error: AppError) -> JSONResponse:
-        """Convert an application error into the public JSON error envelope."""
+        """將應用錯誤轉為安全契約，僅投影經驗證的檢視範圍長度。"""
         payload = ErrorResponse(
             code=error.code,
             message=error.message,
@@ -201,6 +202,8 @@ def create_app(
         response.headers["Referrer-Policy"] = "no-referrer"
         if error.retry_after is not None:
             response.headers["Retry-After"] = str(error.retry_after)
+        if isinstance(error, ViewRangeError) and error.total is not None:
+            response.headers["Content-Range"] = f"bytes */{error.total}"
         response.headers["X-SNS-Error-Code"] = error.code
         return response
 

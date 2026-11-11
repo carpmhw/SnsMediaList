@@ -337,6 +337,20 @@ batch UI 不會改變 `SNS_MEDIA_MAX_EXTRACTIONS`；最多五個 URL 由瀏覽�
 4. 能力不支援時，確認原生 HEAD／GET、瀏覽器設定的詢問及下載面板可正常使用，網頁只顯示啟動數。切換背景／鎖屏只觀察裝置實際行為，不承諾保活。
 5. 證據分開列出：自動化 picker／writable **替身**、**真實 HTTP** body 與 server 清理、真機系統 picker／檔案驗收。沒有可用手機或相應能力就標「未執行」及原因，不能以 Chromium 模擬手機取代真機驗收。
 
+## 原始媒體檢視政策
+
+`GET /api/media/{token}/view` 與 token-only HEAD 沿用有效 download token，不核發新 token、不刷新 TTL、不改 REST／MCP extraction schema；preview token 不得取得原始媒體。HEAD 204 只表示授權當下有效，完全不連外，不能證明來源可顯示或影片可播放。未知／用途錯配為 404，仍在記憶體中的過期 token 為 410；服務重啟後原 token 不存在。
+
+原始檢視與 attachment 下載、卡片 preview 是不同契約。檢視只允許 JPEG、PNG、GIF、WebP、MP4、WebM；MIME 必須符合 token 的媒體類型，且來源開頭最多 512 bytes 必須有相符 signature。容器 signature 不保證瀏覽器可解碼其中 codec；未支援檢視的媒體仍可使用原有 attachment 下載，不轉碼、不啟動 FFmpeg。
+
+只有影片檢視接受單一 `Range: bytes=start-end`、`bytes=start-` 或 `bytes=-suffix`；header 上限為 128 ASCII bytes。重複 header、多段、反向、零 suffix、未知單位與圖片 Range 以 `416 view_range_not_satisfiable` 拒絕。僅已驗證來源總長度時才產生 `Content-Range: bytes */N`，不以猜測填入長度。
+
+合法片段必須取得相符的 `206` 與已知、受大小上限約束的 total；來源忽略 Range 回 `200`、錯位或長度衝突會以 `502 upstream_media_invalid` 安全失敗，不讀完整來源後切片。Inline 回應使用安全檔名、nosniff、no-store、no-referrer 與禁止主動內容的 CSP，不轉送來源 Cookie、Location 或 ETag。既有 `/download`、`/preview` 不開放 caller Range，attachment 的單次截斷續傳條件不變。
+
+非零或不足檔頭的片段可能額外取得一次同來源開頭，最多讀 512 bytes 後關閉。Probe 與實際片段共用一個媒體 lease、累計 `max_download_bytes` 與完整 `media_response_timeout_seconds`，不重試、不續傳、不保存完整檔案。每次檢視 GET／seek 都重新計入原有媒體 window 與全域／client 併發上限，可能與下載競爭而回 429；不因此提高設定。
+
+`/view` 使用完整 response deadline，attachment 仍只使用 connect／read idle timeout 與大小上限。關閉或切換時應取消受控載入；伺服器觀察 disconnect 後清理來源並釋放 slot，不能宣稱瀏覽器在同一瞬間已停止所有網路 bytes。`/view` token path 必須遮蔽，維持 Uvicorn `--no-access-log` 與 Nginx `/api/media/` 的 access log／buffering 保護；檢視成功不記為 attachment 已下載或已保存。原始碼變更不會更新現行映像，建置與部署仍須另行授權。
+
 ## 安全下載診斷
 
 Application logger 預設以 INFO 將每筆事件寫成一行 JSON 至 stderr，Docker 可直接收集；不需開啟 debug 或 access log。沿用[擷取診斷的日誌查詢](#instagram-story-extraction-diagnostics)，以 `request_id` 串接事件。
@@ -632,3 +646,17 @@ owner-controlled Story URL 須當下有效，通常約 24 小時內失效。不�
 工具預設驗證 extraction 與下載首個 byte；加 `--verify-previews` 可檢查 raster preview，預設 placeholder 不符合此檢查。這不等於整檔下載驗證，完整保存仍須依[下載診斷](#安全下載診斷)核對。非預設服務位址用 `--base-url` 指定。
 
 輸出只保留 case label、status、item count 與 outcome，不得記錄 URL、token、Cookie 或 upstream media URL。Cookie 輪替後先確認新的 extractor process 已讀取新檔，再做人工檢查；preview／download 仍不得攜帶 Cookie。
+
+### 檢視器人工驗收
+
+`manual_smoke.py` 的首個 byte／raster preview 檢查不證明原圖尺寸或影片可播放。先以本機合成資料執行 `uv run pytest -q tests/browser/test_media_viewer.py tests/integration/test_viewing_server.py`；測試中的可解碼 VP8／WebM fixture 為本專案自產，來源與再生方式見 `tests/fixtures/viewer-video.md`。引擎 runtime 不可用時須記錄 skipped，不能稱為該引擎通過；Playwright WebKit 亦不等於真機 Safari 驗收。
+
+部署及 owner-controlled 內容的選用人工檢查：
+
+1. 在桌面與手機直／橫向開啟圖片檢視，確認自然尺寸／適合視窗、長檔名、前後切換、首尾停用與選取同步；不讓媒體推走關閉與操作列。
+2. 開啟影片但不按播放，確認沒有原始影片 GET；按播放後確認時間確實前進、可暫停，來源支援時可定位。保留 native controls／playsinline；不自動播放下一則、不預載相鄰原始媒體。
+3. 播放中切換、Esc／關閉、群組重新分析與離頁，確認舊聲音／畫面停止；檢查可控的 src 已解除，server 觀察 disconnect 後 slot 可再次使用。不要宣稱此時所有在途網路 bytes 已瞬間歸零。
+4. 檢查鍵盤 Tab 不移到背景、關閉回有效入口、影片原生左右鍵不切換項目。以有效／過期參照分別確認一般安全錯誤及明確的群組重新分析；新結果清空舊選取，其他群組不變。
+5. 分別記錄實際使用的 Chromium、Firefox、WebKit／Safari 與真機結果。Codec 不可解碼、CDN 拒絕正確 Range、完整 deadline 或 429 都不是 token 過期證據；保留原下載途徑，不為 smoke 放寬安全限制。
+
+人工檢查仍不得保存來源 URL、token、Cookie、upstream URL、含敏感畫面的 screenshot 或 raw response；不因本機測試通過而宣稱原平台／所有手機已驗收。建置映像、更新部署及真實平台 smoke 必須另行確認範圍。

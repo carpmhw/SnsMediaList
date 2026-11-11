@@ -2,9 +2,11 @@
 
 import asyncio
 import os
+from pathlib import Path
+from time import monotonic
 from typing import Any
 
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from sns_media_list.api import routes
@@ -12,9 +14,11 @@ from sns_media_list.app import create_app
 from sns_media_list.config import Settings
 from sns_media_list.extractor.gallery_dl import GalleryDlRunner, _add_post_context
 from sns_media_list.network.media_client import MediaResponse
+from sns_media_list.network.media_viewing import ViewRange
 from sns_media_list.security.tokens import TokenStore
 from sns_media_list.services.extraction_service import ExtractionService
 from sns_media_list.url_validation import ValidatedExtractionTarget
+from tests.media_fixtures import original_png
 
 SENTINEL = "PRIVATE_SENTINEL_URL_TOKEN_COOKIE_AUTH_ETAG"
 IMAGE = b"\xff\xd8\xff" + b"image-data" * 10000
@@ -48,6 +52,9 @@ class Extractor:
                 target,
             )
         kind = os.environ.get("MEDIA_KIND", "image")
+        extension = "jpg" if kind == "image" else "mp4"
+        if os.environ.get("VIEWER_ASSETS") == "1":
+            extension = "png" if kind == "image" else "webm"
         return [
             {
                 "platform": "instagram",
@@ -56,7 +63,7 @@ class Extractor:
                 "num": 1,
                 "type": kind,
                 "url": f"https://scontent.cdninstagram.com/{SENTINEL}?token={SENTINEL}",
-                "extension": "jpg" if kind == "image" else "mp4",
+                "extension": extension,
                 "progressive": True,
             }
         ]
@@ -73,6 +80,8 @@ class Reader:
 
     async def read(self, size: int) -> bytes:
         """首段正常，後續可截斷、洩密例外或 read timeout。"""
+        if self.mode == "probe-disconnect":
+            await asyncio.Event().wait()
         self.reads += 1
         if self.reads > 1:
             if self.mode == "truncated":
@@ -107,21 +116,35 @@ class Client:
         """初始化可觀測的上游統計。"""
         self.fetches = 0
         self.closes = 0
-        self.ranges: list[int | None] = []
+        self.ranges: list[int | str | None] = []
         self.methods: list[str] = []
         self.read_timeout = 0.2
 
-    async def fetch(self, _url: str, *, headers: Any, range_start: int | None = None) -> Any:
-        """依環境配置建立原始上游或成功、截斷、無效的單次 Range response。"""
+    async def fetch(
+        self,
+        _url: str,
+        *,
+        headers: Any,
+        range_start: int | None = None,
+        view_range: ViewRange | None = None,
+    ) -> Any:
+        """依環境配置建立原始、檢視片段或下載單次續傳 response。"""
         assert not any(key.lower() in {"cookie", "authorization"} for key in headers)
         self.fetches += 1
-        self.ranges.append(range_start)
+        self.ranges.append(view_range.header if view_range else range_start)
         kind = os.environ.get("MEDIA_KIND", "image")
         if _url.endswith("/202.mp4"):
             kind = "video"
         body = IMAGE if kind == "image" else VIDEO
         mode = os.environ.get("STREAM_MODE", "success")
         response_headers = {"content-type": "image/jpeg" if kind == "image" else "video/mp4"}
+        if os.environ.get("VIEWER_ASSETS") == "1":
+            body = (
+                original_png()
+                if kind == "image"
+                else (Path(__file__).parents[1] / "fixtures/viewer-video.webm").read_bytes()
+            )
+            response_headers["content-type"] = "image/png" if kind == "image" else "video/webm"
         status = 403 if mode == "reject" else 200
         reader_mode = mode
         if kind == "video" and mode.startswith("resume"):
@@ -139,6 +162,21 @@ class Client:
                 body = body[range_start:]
                 status = 206
             reader_mode = "success"
+        if view_range is not None:
+            assert range_start is None and kind == "video"
+            if view_range.start is None:
+                assert view_range.end is not None
+                start, end = max(0, len(body) - view_range.end), len(body) - 1
+            else:
+                start = view_range.start
+                end = (
+                    min(view_range.end, len(body) - 1)
+                    if view_range.end is not None
+                    else len(body) - 1
+                )
+            response_headers["content-range"] = f"bytes {start}-{end}/{len(body)}"
+            body = body[start : end + 1]
+            status = 206
         if os.environ.get("KNOWN_LENGTH", "1") == "1":
             response_headers["content-length"] = str(len(body))
         if range_start is not None and mode == "truncated":
@@ -149,7 +187,7 @@ class Client:
             Reader(body, reader_mode),
             Writer(self),
             max_bytes=1000000,
-            read_timeout=10 if mode == "disconnect" else self.read_timeout,
+            read_timeout=10 if mode in {"disconnect", "probe-disconnect"} else self.read_timeout,
         )
 
 
@@ -204,6 +242,14 @@ def factory() -> Any:
         return JSONResponse(await stats())
 
     app.router.routes.insert(0, Route("/fixture-stats", stats_response))
+    if os.environ.get("VIEWER_ASSETS") == "1":
+
+        async def expire_tokens(_request: Any) -> Response:
+            """只在本機測試應用推進 token clock，不影響正式應用。"""
+            service.token_store.clock = lambda: monotonic() + 3600
+            return Response(status_code=204)
+
+        app.router.routes.insert(0, Route("/fixture-expire", expire_tokens, methods=["POST"]))
     return app
 
 

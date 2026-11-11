@@ -8,12 +8,15 @@ import ssl
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urljoin, urlsplit
 
 from ..errors import AppError
 from ..extractor.normalizer import normalize_request_headers, sanitize_filename
 from .dns import IPAddress, Resolver
+
+if TYPE_CHECKING:
+    from .media_viewing import ViewRange
 
 _PREVIEW_SIGNATURES: dict[str, tuple[bytes, ...]] = {
     "image/jpeg": (b"\xff\xd8\xff",),
@@ -351,10 +354,15 @@ class MediaClient:
         headers: Mapping[str, str] | None = None,
         *,
         range_start: int | None = None,
+        view_range: ViewRange | None = None,
     ) -> MediaResponse:
         """取得 URL，並對每次允許的 redirect 重新執行驗證。"""
         current_url = url
+        if range_start is not None and view_range is not None:
+            raise AppError("upstream_media_invalid", "不可混用檢視與下載續傳範圍。")
         request_headers = normalize_request_headers(headers or {})
+        if view_range is not None:
+            request_headers = {**request_headers, "Range": view_range.header}
         if range_start is not None:
             if isinstance(range_start, bool) or not isinstance(range_start, int) or range_start < 0:
                 raise AppError("upstream_media_invalid", "The media range offset is invalid.")
