@@ -3,13 +3,20 @@
 import re
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).parents[1]
 
 
 def test_operations_documents_bookmarklet_limits() -> None:
-    """部署驗收不得把合成瀏覽器證據誤寫成所有平台皆可用。"""
+    """僅檢查書籤驗收章節，確認其保留合成證據與實際部署的限制。"""
     guide = (PROJECT_ROOT / "OPERATIONS.md").read_text(encoding="utf-8")
-    section = guide.partition("### 桌面書籤工具驗收")[2].partition("\n## ")[0]
+    section = re.split(
+        r"^#{1,3}[ \t]+",
+        guide.partition("### 桌面書籤工具驗收")[2],
+        maxsplit=1,
+        flags=re.MULTILINE,
+    )[0]
     for text in (
         "#source=",
         "2048",
@@ -27,6 +34,28 @@ def test_operations_documents_bookmarklet_limits() -> None:
         "未執行",
     ):
         assert text in section
+
+
+@pytest.mark.parametrize(
+    ("heading", "reject"), [("#", True), ("##", True), ("###", True), ("####", False)]
+)
+def test_bookmarklet_guidance_respects_section_boundaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, heading: str, reject: bool
+) -> None:
+    """缺少的必要說明不能由後續同層或更高層章節補足，但允許子章節。"""
+    guide = (
+        "### 桌面書籤工具驗收\n"
+        "#source= noopener noreferrer Referer query 歷史同步 擴充套件 登入 反向代理 "
+        "手動貼上 不自動重試 owner-controlled 未執行\n"
+        f"{heading} 另一段說明\n2048\n"
+    )
+    (tmp_path / "OPERATIONS.md").write_text(guide, encoding="utf-8")
+    monkeypatch.setitem(globals(), "PROJECT_ROOT", tmp_path)
+    if reject:
+        with pytest.raises(AssertionError):
+            test_operations_documents_bookmarklet_limits()
+    else:
+        test_operations_documents_bookmarklet_limits()
 
 
 def test_folder_download_guidance_preserves_browser_and_stream_boundaries() -> None:
