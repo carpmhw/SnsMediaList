@@ -1,4 +1,7 @@
 import { createMediaViewer } from './viewer.js';
+import { buildBookmarklet, consumeSourceFragment } from './bookmarklet.js';
+
+const sourceEntry = consumeSourceFragment(window.location, window.history);
 
 const form = document.querySelector('#extraction-form');
 const input = document.querySelector('#post-url');
@@ -1221,4 +1224,13 @@ window.addEventListener('pagehide', () => {
     stopDownloadRun(run);
   }
 });
+const bookmarklet = buildBookmarklet(location.origin + location.pathname);
+document.querySelector('#bookmarklet-link').href = bookmarklet;
+document.querySelector('#bookmarklet-code').value = bookmarklet;
+if (sourceEntry.kind === 'valid') {
+  input.value = sourceEntry.source;
+  setStatus('已帶入來源網址，請確認後按「分析」。');
+} else if (sourceEntry.kind === 'invalid') {
+  setStatus('無法帶入來源網址，請手動貼上支援的 Instagram 或 X 內容 URL。', 'error');
+}
 input.focus();

@@ -6,6 +6,29 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parents[1]
 
 
+def test_operations_documents_bookmarklet_limits() -> None:
+    """部署驗收不得把合成瀏覽器證據誤寫成所有平台皆可用。"""
+    guide = (PROJECT_ROOT / "OPERATIONS.md").read_text(encoding="utf-8")
+    section = guide.partition("### 桌面書籤工具驗收")[2].partition("\n## ")[0]
+    for text in (
+        "#source=",
+        "2048",
+        "noopener",
+        "noreferrer",
+        "Referer",
+        "query",
+        "歷史同步",
+        "擴充套件",
+        "登入",
+        "反向代理",
+        "手動貼上",
+        "不自動重試",
+        "owner-controlled",
+        "未執行",
+    ):
+        assert text in section
+
+
 def test_folder_download_guidance_preserves_browser_and_stream_boundaries() -> None:
     """確保 operator 不誤將資料夾進度、fallback 或自動化視為真機完成保證。"""
     guide = (PROJECT_ROOT / "OPERATIONS.md").read_text(encoding="utf-8")

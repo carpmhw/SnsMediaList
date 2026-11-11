@@ -11,6 +11,7 @@
 | 更新與回復版本 | [升級與 rollback](#升級與-rollback) |
 | 分析、下載或預覽異常 | [故障排除](#故障排除)、[下載診斷](#安全下載診斷)、[Story 診斷](#instagram-story-extraction-diagnostics)、[縮圖](#預覽與縮圖) |
 | 驗證修改與部署 | [自動化檢查](#自動化檢查)、[人工驗證](#owner-controlled-manual-smoke-tests) |
+| 從來源頁帶入網址 | [桌面書籤工具驗收](#桌面書籤工具驗收) |
 
 ## 部署
 
@@ -646,6 +647,26 @@ owner-controlled Story URL 須當下有效，通常約 24 小時內失效。不�
 工具預設驗證 extraction 與下載首個 byte；加 `--verify-previews` 可檢查 raster preview，預設 placeholder 不符合此檢查。這不等於整檔下載驗證，完整保存仍須依[下載診斷](#安全下載診斷)核對。非預設服務位址用 `--base-url` 指定。
 
 輸出只保留 case label、status、item count 與 outcome，不得記錄 URL、token、Cookie 或 upstream media URL。Cookie 輪替後先確認新的 extractor process 已讀取新檔，再做人工檢查；preview／download 仍不得攜帶 Cookie。
+
+### 桌面書籤工具驗收
+
+安裝及手動安裝碼見 [README](README.md#桌面書籤工具)。書籤入口固定於安裝當下服務頁的 origin 與 pathname，不包含服務頁 query 或 fragment；地址變更後須重新安裝，不新增後端設定或擴大 ingress allowlist。沿用既有 root-relative 靜態資源及 API，不新增 path-prefix 部署支援。
+
+來源透過 `#source=<編碼網址>` 傳遞，上限 2048 字元；首次載入先移除自有 fragment，再解碼及驗證。只預填，不自動分析。空白、過長、解碼失敗、重複 source、混入其他參數或不支援來源均固定報錯，仍可手動貼上。普通頁內錨點不清除；載入後 hashchange 不再次預填。
+
+書籤以 `noopener,noreferrer` 開新分頁，不保留 opener，也不帶來源 Referer。Fragment 不隨 HTTP 主文件請求送到服務，不把來源寫入 query、localStorage／sessionStorage 或後端歷史；這不代表瀏覽器歷史同步、擴充套件或驗證跳轉從未觀察到帶 fragment 的網址。書籤不讀 Cookie、登入資料或 DOM，按「分析」後才沿用原 REST body 傳送來源；operator 的平台 Cookie 權限不變。
+
+網站 CSP、企業政策、瀏覽器的 javascript 書籤限制或新分頁阻擋皆可能使工具不可用；不要因此放寬服務 CSP、CORS 或驗證。部署登入／反向代理跳轉可能不保留 fragment，書籤也不會自動恢復來源或繞過登入；失敗時手動貼上，不自動重試。手機分享與瀏覽器擴充套件不在此功能範圍。
+
+選用人工 smoke（僅使用 owner-controlled、本人有權存取及分析的內容）：
+
+1. 記錄瀏覽器／版本與實際服務入口；分別驗證拖曳至書籤列及手動新增書籤，不以在服務頁直接點安裝連結取代。
+2. 在 Instagram 與 X 各選一個受控來源點書籤，確認固定服務新分頁、來源預填與聚焦、地址列立即移除 fragment，按「分析」前沒有擷取／媒體請求。
+3. 檢查新分頁 `window.opener === null`、`document.referrer === ''`，主文件沒有來源 Referer／source query；不記錄真實來源 URL、Cookie 或 token。
+4. 對實際部署驗證已登入及需登入兩種情況，包含反向代理驗證跳轉；確認是否仍能預填。若跳轉遺失來源，記錄限制並回到手動貼上，不視為平台擷取失敗。
+5. 按「分析」才沿用原流程；重新整理不再次帶入舊來源。服務地址變更後確認舊書籤仍固定原位置，重新安裝才使用新入口。
+
+自動化只以本機服務與合成來源頁執行真正 Chromium 的新分頁、opener／Referer 隔離及只預填測試，不證明 Instagram／X 政策、實際書籤列操作或部署登入相容。未執行上述人工 smoke 時應明列「未執行／未驗證」，不宣稱所有瀏覽器皆可用；不作 CI／release gate。
 
 ### 檢視器人工驗收
 

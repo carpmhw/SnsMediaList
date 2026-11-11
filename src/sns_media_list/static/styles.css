@@ -209,6 +209,49 @@ textarea:focus-visible {
   outline-offset: 3px;
 }
 
+.bookmarklet-tools {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+  min-width: 0;
+}
+
+.bookmarklet-tools summary {
+  width: fit-content;
+  padding: 0.5rem 0;
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.bookmarklet-tools summary:hover,
+.bookmarklet-tools[open] summary {
+  color: var(--text);
+}
+
+.bookmarklet-tools summary:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.bookmarklet-link {
+  display: inline-block;
+  padding: 0.625rem 0;
+  text-underline-offset: 0.25em;
+  cursor: grab;
+}
+
+.bookmarklet-link:active {
+  cursor: grabbing;
+}
+
+.bookmarklet-tools textarea {
+  display: block;
+  margin-top: 0.5rem;
+  font-family: ui-monospace, monospace;
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+}
+
 button:disabled {
   cursor: wait;
   opacity: 0.62;
