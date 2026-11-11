@@ -7,6 +7,7 @@
   --text: #f3eee6;
   --muted: #aab3ad;
   --accent: #edb37c;
+  --accent-hover: #f5c493;
   --accent-ink: #20170e;
   --line: #3b4741;
   --danger: #ffb4ab;
@@ -355,6 +356,15 @@ h2 {
   color: var(--accent-ink);
 }
 
+.analysis-mode-switch button[aria-pressed="true"]:where(:hover:not(:disabled)) {
+  background: var(--accent-hover);
+}
+
+.analysis-mode-switch button[aria-pressed="false"]:where(:hover:not(:disabled)) {
+  background: var(--surface-raised);
+  color: var(--text);
+}
+
 label {
   display: block;
   margin-bottom: 9px;
@@ -388,8 +398,8 @@ button {
   transition: transform 160ms ease, background 160ms ease;
 }
 
-button:hover:not(:disabled) {
-  background: #f5c493;
+button:where(:hover:not(:disabled)) {
+  background: var(--accent-hover);
   transform: translateY(-1px);
 }
 
@@ -838,7 +848,7 @@ button:hover:not(:disabled) {
   transition: border-color 160ms ease, background 160ms ease;
 }
 
-.download-action:hover {
+.download-action:where(:hover:not(:disabled)) {
   border-color: var(--accent);
   background: #27342f;
 }
@@ -921,6 +931,7 @@ button:hover:not(:disabled) {
   --text: #edf4ff;
   --muted: #96a4b8;
   --accent: #79b8ff;
+  --accent-hover: #a3cfff;
   --accent-ink: #08111e;
   --line: #2b3a50;
   --danger: #ffb4ab;
@@ -1069,8 +1080,9 @@ input {
   background: var(--surface-raised);
 }
 
-.download-action:hover,
-.copy-filename:hover {
+.media-view:where(:hover:not(:disabled)),
+.download-action:where(:hover:not(:disabled)),
+.copy-filename:where(:hover:not(:disabled)) {
   border-color: var(--accent);
   background: #1b2b41;
 }
