@@ -213,14 +213,15 @@ def test_build_event_omits_failure_stage_for_success() -> None:
     }.intersection(event)
 
 
-def test_privacy_filter_removes_token_bearing_access_paths() -> None:
-    """Verify access log records do not retain media tokens or query strings."""
+@pytest.mark.parametrize("endpoint", ["preview", "download", "view"])
+def test_privacy_filter_removes_token_bearing_access_paths(endpoint: str) -> None:
+    """所有媒體用途的 access 記錄都不得保留 token 或 query。"""
     record = logging.LogRecord(
         name="uvicorn.access",
         level=logging.INFO,
         pathname="test",
         lineno=1,
-        msg='"GET /api/media/secret-token/download?x=1 HTTP/1.1" 200',
+        msg=f'"GET /api/media/secret-token/{endpoint}?x=1 HTTP/1.1" 200',
         args=(),
         exc_info=None,
     )

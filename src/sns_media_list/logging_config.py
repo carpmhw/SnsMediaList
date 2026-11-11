@@ -14,7 +14,7 @@ from .errors import (
     normalize_failure_stage,
 )
 
-_TOKEN_PATH = re.compile(r"(/api/media/)[^/?\s]+(/(?:preview|download))")
+_TOKEN_PATH = re.compile(r"(/api/media/)[^/?\s]+(/(?:preview|download|view))")
 _REQUEST_ID = re.compile(r"(?:[0-9a-f]{32}|unknown)")
 _EXTRACTION_EVENTS = frozenset({"extraction_complete", "extraction_failed"})
 _MCP_OUTCOMES = {

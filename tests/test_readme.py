@@ -6,6 +6,23 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parents[1]
 
 
+def test_readme_documents_desktop_bookmarklet() -> None:
+    """書籤安裝說明須保留使用者確認、重裝與隱私限制。"""
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    section = readme.partition("### 桌面書籤工具")[2].partition("\n## ")[0]
+    for text in (
+        "拖到書籤列",
+        "手動安裝碼",
+        "只預填",
+        "重新安裝",
+        "fragment",
+        "手機分享",
+        "擴充套件",
+    ):
+        assert text in section
+    assert "本次不新增從來源頁快速啟動分析的書籤／分享入口" not in readme
+
+
 def test_readme_documents_supported_operation_and_limits() -> None:
     """Verify the README preserves critical setup, safety, and license guidance."""
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")

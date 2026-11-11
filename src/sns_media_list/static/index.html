@@ -55,6 +55,16 @@
               </section>
             </div>
           </form>
+          <details id="bookmarklet-tools" class="bookmarklet-tools">
+            <summary>桌面書籤工具</summary>
+            <p class="field-help">把下方連結拖到書籤列，不要直接點它。在 Instagram 或 X 來源頁點書籤，即可在新分頁帶入網址；確認後再按「分析」。</p>
+            <a id="bookmarklet-link" class="bookmarklet-link" draggable="true">送到 SNS Media List</a>
+            <p class="field-help">無法拖曳時，手動新增書籤，命名為「送到 SNS Media List」，將下方完整安裝碼貼入書籤的網址欄位。</p>
+            <label for="bookmarklet-code">手動安裝碼</label>
+            <textarea id="bookmarklet-code" rows="4" readonly spellcheck="false"
+              aria-describedby="bookmarklet-help"></textarea>
+            <p id="bookmarklet-help" class="field-help">服務地址變更後請重新安裝。只讀來源網址，不讀 Cookie 或頁面內容；若瀏覽器或網站政策阻擋，請改用手動貼上。</p>
+          </details>
           <div id="analysis-loading" class="analysis-loading" role="status" aria-live="polite" hidden>
             <span class="skeleton-line skeleton-line--title"></span>
             <span class="skeleton-line"></span>
@@ -78,6 +88,26 @@
     </main>
 
     <footer class="site-footer">選取多個媒體後逐項啟動下載；支援時選一次資料夾並顯示儲存進度，不支援時使用原生下載。儲存位置與詢問依瀏覽器設定，瀏覽器可能要求多檔下載權限。已開始下載不代表檔案已完成保存。不提供 ZIP 或帳號批次封存，也不保留歷史記錄。</footer>
+    <dialog id="media-viewer" class="media-viewer" aria-labelledby="viewer-heading">
+      <header class="viewer-heading">
+        <div>
+          <h2 id="viewer-heading">原始媒體檢視</h2>
+          <p id="viewer-filename" class="viewer-filename"></p>
+          <p class="viewer-details"><span id="viewer-kind"></span> · <span id="viewer-position" aria-live="polite"></span></p>
+        </div>
+        <button id="viewer-close" type="button" autofocus>關閉</button>
+      </header>
+      <p id="viewer-message" class="viewer-message" role="status" aria-live="polite"></p>
+      <div id="viewer-content" class="viewer-content"></div>
+      <div class="viewer-actions" aria-label="媒體檢視操作">
+        <button id="viewer-previous" type="button">上一則</button>
+        <button id="viewer-next" type="button">下一則</button>
+        <label class="viewer-selection"><input id="viewer-selected" type="checkbox">選取此項</label>
+        <button id="viewer-size" type="button">原始大小</button>
+        <button id="viewer-play" type="button" hidden>播放影片</button>
+        <button id="viewer-recovery" type="button" hidden>重新分析此群組</button>
+      </div>
+    </dialog>
     <script type="module" src="/app.js"></script>
   </body>
 </html>

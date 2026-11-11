@@ -1,3 +1,8 @@
+import { createMediaViewer } from './viewer.js';
+import { buildBookmarklet, consumeSourceFragment } from './bookmarklet.js';
+
+const sourceEntry = consumeSourceFragment(window.location, window.history);
+
 const form = document.querySelector('#extraction-form');
 const input = document.querySelector('#post-url');
 const button = document.querySelector('#analyze-button');
@@ -34,6 +39,18 @@ let activeBatchRun = null;
 let activeExtraction = null;
 let activeResultGroupIndex = 0;
 const activeDownloadRuns = new Set();
+const viewer = createMediaViewer({
+  /** 使用同一群組選取集合更新所有卡片與摘要。 */
+  onSelection(group, index, checked) {
+    if (checked) group.selectedIndices.add(index);
+    else group.selectedIndices.delete(index);
+    updateSelectionUi(group);
+  },
+  /** 沿用群組 recovery，不建立另一套擷取流程。 */
+  onRecover: (group, recoveryButton) => reAnalyzeGroup(group, recoveryButton),
+  /** 無有效觸發入口時回到分析欄位。 */
+  focusFallback: () => input.focus(),
+});
 
 const ERROR_MESSAGES = {
   invalid_url: '請輸入 HTTPS Instagram 貼文、Reel、單則 Story、帳號當下 Story 清單或 X 狀態貼文 URL。',
@@ -286,6 +303,7 @@ function setStatus(message, state = 'info', canReanalyze = false) {
 
 /** 清除全部結果群組與其預覽及下載工作，供單筆分析取代舊結果使用。 */
 function clearResults() {
+  viewer.close();
   for (const run of activeDownloadRuns) {
     stopDownloadRun(run);
   }
@@ -319,6 +337,7 @@ function moveResultGroup(offset) {
     return;
   }
   activeResultGroupIndex = nextIndex;
+  viewer.close();
   groups[activeResultGroupIndex].scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'start' });
   updateResultGroupNavigation();
 }
@@ -330,12 +349,14 @@ function syncResultGroupNavigation() {
     return;
   }
   const trackLeft = resultGroups.getBoundingClientRect().left;
+  const previousIndex = activeResultGroupIndex;
   activeResultGroupIndex = groups.reduce((nearestIndex, group, index) => (
     Math.abs(group.getBoundingClientRect().left - trackLeft)
       < Math.abs(groups[nearestIndex].getBoundingClientRect().left - trackLeft)
       ? index
       : nearestIndex
   ), 0);
+  if (previousIndex !== activeResultGroupIndex) viewer.close();
   updateResultGroupNavigation();
 }
 
@@ -521,7 +542,7 @@ function pumpPreviewQueue() {
   entry.image.src = entry.url;
 }
 
-/** Create one ordered media card and queue only its opaque preview URL. */
+/** 建立來源順序卡片，分離檢視、選取、複製與下載入口。 */
 function renderMediaCard(group, media, index) {
   const card = document.createElement('article');
   card.className = 'media-card';
@@ -592,7 +613,13 @@ function renderMediaCard(group, media, index) {
   downloadButton.className = 'download-action';
   downloadButton.textContent = '下載';
   downloadButton.addEventListener('click', () => downloadMedia(group, media, downloadButton));
-  body.append(filename, copyButton, downloadButton);
+  const viewButton = document.createElement('button');
+  viewButton.type = 'button';
+  viewButton.className = 'media-view';
+  viewButton.textContent = '檢視';
+  viewButton.setAttribute('aria-label', `檢視項目 ${String(index + 1).padStart(2, '0')}`);
+  viewButton.addEventListener('click', () => viewer.open(group, index, viewButton));
+  body.append(filename, viewButton, copyButton, downloadButton);
   card.append(visual, body);
   return card;
 }
@@ -672,6 +699,7 @@ function setGroupError(group, message) {
 
 /** 以群組本地的媒體索引集合更新選取控制項狀態。 */
 function updateSelectionUi(group) {
+  viewer.sync(group);
   const selected = group.selectedIndices.size;
   group.selectionSummary.textContent = `${selected} / ${group.payload.media.length} 已選取`;
   group.downloadSelectedButton.disabled = selected === 0 || Boolean(group.downloadRun);
@@ -982,6 +1010,7 @@ async function reAnalyzeGroup(group, recoveryButton) {
   if (activeExtraction || activeBatchRun) {
     return;
   }
+  viewer.invalidate(group);
   const recoveryGeneration = ++group.recoveryGeneration;
   recoveryButton.disabled = true;
   setGroupStatus(group, '正在重新分析此項...', 'loading');
@@ -1008,6 +1037,7 @@ function replaceResultGroup(group, payload) {
 
 /** 建立或原地更新一個獨立結果群組，並選擇性保留單筆流程的既有 DOM ID。 */
 function renderResults(payload, isSingleResult = false, existingGroup = null) {
+  if (existingGroup) viewer.invalidate(existingGroup);
   const root = existingGroup?.root || document.createElement('section');
   const group = existingGroup || {
     selectedIndices: new Set(),
@@ -1189,8 +1219,18 @@ resultGroups.addEventListener('scroll', syncResultGroupNavigation);
 
 /** 頁面離開時取消受控下載，不保證背景或跨重載持續執行。 */
 window.addEventListener('pagehide', () => {
+  viewer.close(false);
   for (const run of activeDownloadRuns) {
     stopDownloadRun(run);
   }
 });
+const bookmarklet = buildBookmarklet(location.origin + location.pathname);
+document.querySelector('#bookmarklet-link').href = bookmarklet;
+document.querySelector('#bookmarklet-code').value = bookmarklet;
+if (sourceEntry.kind === 'valid') {
+  input.value = sourceEntry.source;
+  setStatus('已帶入來源網址，請確認後按「分析」。');
+} else if (sourceEntry.kind === 'invalid') {
+  setStatus('無法帶入來源網址，請手動貼上支援的 Instagram 或 X 內容 URL。', 'error');
+}
 input.focus();

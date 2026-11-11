@@ -26,8 +26,10 @@ from ..network.media_client import (
     iter_validated_body,
     validate_resume_response,
 )
+from ..network.media_viewing import ViewRange, ViewRangeError, build_view_headers, parse_view_range
 from ..services.extraction_coordinator import ExtractionCoordinator
 from ..services.extraction_service import ExtractionService
+from ..services.media_viewing import prepare_view
 from ..services.thumbnail import ThumbnailGenerator, validate_thumbnail_media_class
 from ..services.thumbnail_cache import ThumbnailCoordinator
 from ..url_validation import platform_for_url
@@ -411,7 +413,139 @@ def build_router(
             response_timeout=media_response_timeout_seconds,
         )
 
+    @router.head("/media/{token}/view")
+    async def view_media_head(token: str) -> Response:
+        """只驗證既有下載授權，不存取媒體或處理 Range。"""
+        service.token_store.get(token, "download")
+        return Response(status_code=204)
+
+    @router.get("/media/{token}/view")
+    async def view_media(request: Request, token: str) -> Response:
+        """以既有下載授權提供受限原始媒體 inline 檢視。"""
+        record = service.token_store.get(token, "download")
+        requested = parse_view_range(request.headers.getlist("range"))
+        if requested is not None and record.media_class != "video":
+            raise ViewRangeError()
+        lease = limiter.acquire_download(_request_client_identity(request, trusted_proxy_cidrs))
+        return await _stream_view(
+            record,
+            media_client,
+            requested=requested,
+            lease=lease,
+            response_timeout=media_response_timeout_seconds,
+            max_bytes=service.settings.max_download_bytes,
+            receive=request.receive,
+        )
+
     return router
+
+
+async def _stream_view(
+    record: PrivateMediaRecord,
+    media_client: MediaClient,
+    *,
+    requested: ViewRange | None,
+    lease: Lease,
+    response_timeout: float,
+    max_bytes: int,
+    receive: Receive | None = None,
+) -> StreamingResponse:
+    """將檢視服務接入既有完整期限、受限清理與安全 ASGI 串流。"""
+    deadline = monotonic() + response_timeout
+    responses: list[MediaResponse] = []
+    closed: set[int] = set()
+    cleaned = False
+    disconnected = False
+
+    async def watch_disconnect() -> None:
+        """只在預檢階段觀察斷線，交付串流前停止唯一 receive consumer。"""
+        nonlocal disconnected
+        assert receive is not None
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                disconnected = True
+                return
+
+    async def close(response: MediaResponse) -> None:
+        """以共用完整期限恰好關閉每個 probe 或片段 response 一次。"""
+        if id(response) not in closed:
+            closed.add(id(response))
+            await _close_response_with_timeout(response, timeout=max(0.0, deadline - monotonic()))
+
+    async def fetch(view_range: ViewRange | None) -> MediaResponse:
+        """限制每次來源請求並清理取消後才完成的連線。"""
+        if disconnected:
+            raise ClientDisconnect()
+        response = await _await_with_deadline(
+            media_client.fetch(
+                record.source_url, headers=record.request_headers, view_range=view_range
+            ),
+            deadline,
+            detached_result_cleanup=close,
+        )
+        responses.append(response)
+        return response
+
+    async def cleanup() -> None:
+        """關閉所有對應來源並在任何清理結果下釋放唯一 lease。"""
+        nonlocal cleaned
+        if cleaned:
+            return
+        cleaned = True
+        errors: list[BaseException] = []
+        for response in responses:
+            try:
+                await close(response)
+            except BaseException as error:
+                errors.append(error)
+        try:
+            await lease.release()
+        except BaseException as error:
+            errors.append(error)
+        if errors:
+            raise errors[0]
+
+    try:
+        preparation = _await_with_deadline(
+            prepare_view(record, requested, fetch=fetch, close=close, max_bytes=max_bytes),
+            deadline,
+        )
+        if receive is None:
+            prepared = await preparation
+        else:
+            prepare_task = asyncio.create_task(preparation)
+            disconnect_task = asyncio.create_task(watch_disconnect())
+            try:
+                done, _pending = await asyncio.wait(
+                    {prepare_task, disconnect_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if disconnect_task in done:
+                    await disconnect_task
+                    raise ClientDisconnect()
+                prepared = await prepare_task
+            finally:
+                if not prepare_task.done():
+                    _cancel_task_without_waiting(prepare_task)
+                disconnect_task.cancel()
+                await asyncio.gather(disconnect_task, return_exceptions=True)
+            if disconnected:
+                raise ClientDisconnect()
+    except BaseException:
+        try:
+            await cleanup()
+        except BaseException:
+            pass
+        raise
+    return DeadlineStreamingResponse(
+        prepared.body,
+        status_code=206 if requested is not None else 200,
+        headers=build_view_headers(record.filename, prepared.content_type, prepared.metadata),
+        deadline=deadline,
+        send_timeout=media_client.read_timeout,
+        cleanup=cleanup,
+    )
 
 
 def _request_client_identity(request: Request, trusted_proxy_cidrs: Iterable[str]) -> str:

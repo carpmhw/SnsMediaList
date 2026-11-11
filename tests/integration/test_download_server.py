@@ -25,6 +25,7 @@ def running_server(
     known=True,
     kind="image",
     user_resolution=False,
+    viewer_assets=False,
 ):
     """保留 socket 避免選埠競態，並有界停止獨立 Uvicorn 程序。"""
     with socket.socket() as listener, (tmp_path / "server.log").open("w+") as log:
@@ -36,6 +37,7 @@ def running_server(
             "KNOWN_LENGTH": str(int(known)),
             "MEDIA_KIND": kind,
             "STORY_USER_RESOLUTION": str(int(user_resolution)),
+            "VIEWER_ASSETS": str(int(viewer_assets)),
         }
         if user_resolution:
             fake_bin = tmp_path / "fake-bin"
