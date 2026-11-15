@@ -86,10 +86,12 @@
 
       <section id="results" class="results result-workspace" aria-labelledby="results-heading" hidden>
         <h2 id="results-heading" class="visually-hidden">找到的媒體</h2>
-        <div id="result-group-navigation" class="result-group-navigation" aria-label="結果群組導覽" hidden>
-          <button id="previous-result-group" type="button" aria-label="上一組結果">上一組</button>
+        <div id="result-group-navigation" class="result-group-navigation" role="group" aria-label="結果群組導覽" hidden>
+          <button id="previous-result-group" type="button" aria-label="上一組結果"
+            aria-controls="result-groups">上一組</button>
           <p id="result-group-position" role="status" aria-live="polite" aria-label="結果群組位置"></p>
-          <button id="next-result-group" type="button" aria-label="下一組結果">下一組</button>
+          <button id="next-result-group" type="button" aria-label="下一組結果"
+            aria-controls="result-groups">下一組</button>
         </div>
         <div id="result-groups"></div>
       </section>
@@ -107,7 +109,7 @@
       </header>
       <p id="viewer-message" class="viewer-message" role="status" aria-live="polite"></p>
       <div id="viewer-content" class="viewer-content"></div>
-      <div class="viewer-actions" aria-label="媒體檢視操作">
+      <div class="viewer-actions" role="group" aria-label="媒體檢視操作">
         <button id="viewer-previous" type="button">上一則</button>
         <button id="viewer-next" type="button">下一則</button>
         <label class="viewer-selection"><input id="viewer-selected" type="checkbox">選取此項</label>

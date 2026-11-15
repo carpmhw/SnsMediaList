@@ -48,7 +48,9 @@ async def test_instagram_native_download(
                 payload = await (await extraction.value).json()
                 filename = payload["media"][0]["filename"]
                 async with page.expect_download() as pending:
-                    await page.get_by_role("button", name="下載", exact=True).click()
+                    await page.get_by_role(
+                        "button", name="下載項目 01，第 1 組", exact=True
+                    ).click()
                 download = await pending.value
                 failure = await asyncio.wait_for(download.failure(), timeout=10)
                 assert download.suggested_filename == filename

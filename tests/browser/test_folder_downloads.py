@@ -639,7 +639,7 @@ def test_batch_summary_is_displayed_and_announced_once(
         install_sink(page)
     prepare(page, base_url)
     group = page.locator(".result-group")
-    group.get_by_role("button", name="下載", exact=True).first.click()
+    group.get_by_role("button", name="下載項目 01，第 1 組", exact=True).click()
     expect(group.locator(".group-status")).to_have_text("已開始下載。")
 
     if partial:

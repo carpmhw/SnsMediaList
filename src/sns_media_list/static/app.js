@@ -598,8 +598,8 @@ function pumpPreviewQueue() {
   entry.image.src = entry.url;
 }
 
-/** 建立來源順序卡片，分離檢視、選取、複製與下載入口。 */
-function renderMediaCard(group, media, index) {
+/** 建立來源順序卡片，讓個別下載依項目及群組編號命名。 */
+function renderMediaCard(group, media, index, groupNumber) {
   const card = document.createElement('article');
   card.className = 'media-card';
 
@@ -670,6 +670,7 @@ function renderMediaCard(group, media, index) {
   downloadButton.type = 'button';
   downloadButton.className = 'download-action';
   downloadButton.textContent = '下載';
+  downloadButton.setAttribute('aria-label', `下載項目 ${String(index + 1).padStart(2, '0')}，第 ${groupNumber} 組`);
   downloadButton.addEventListener('click', () => downloadMedia(group, media, downloadButton));
   const viewButton = document.createElement('button');
   viewButton.type = 'button';
@@ -1181,7 +1182,7 @@ function renderResults(payload, isSingleResult = false, existingGroup = null) {
   group.recovery = recovery;
   group.status = groupStatus;
   group.error = groupError;
-  mediaGrid.replaceChildren(...payload.media.map((media, index) => renderMediaCard(group, media, index)));
+  mediaGrid.replaceChildren(...payload.media.map((media, index) => renderMediaCard(group, media, index, groupNumber)));
   root.append(heading, resultsSummary, toolbar, recovery, groupStatus, groupError, unavailableWarning, mediaGrid);
 
   if (payload.unavailable_media_count > 0) {
