@@ -468,6 +468,8 @@ button:where(:hover:not(:disabled)) {
 
 .media-selection-label {
   display: flex;
+  min-inline-size: 44px;
+  min-block-size: 44px;
   position: absolute;
   z-index: 2;
   top: 10px;

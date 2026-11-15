@@ -641,7 +641,6 @@ function renderMediaCard(group, media, index) {
   selection.type = 'checkbox';
   selection.className = 'media-selection';
   selection.dataset.mediaIndex = String(index);
-  selection.setAttribute('aria-label', `選取項目 ${String(index + 1).padStart(2, '0')}`);
   selection.addEventListener('change', () => {
     if (selection.checked) {
       group.selectedIndices.add(index);
@@ -682,11 +681,11 @@ function renderMediaCard(group, media, index) {
   return card;
 }
 
-/** Render normalized extraction metadata and replace the previous card grid. */
-/** 建立僅作用於單一結果群組的媒體選取與批次下載工具列。 */
+/** 建立具命名群組語意的選取操作區，維持原生逐項 Tab 與群組本地動作。 */
 function createSelectionToolbar(group) {
   const toolbar = document.createElement('div');
   toolbar.className = 'selection-toolbar';
+  toolbar.setAttribute('role', 'group');
   toolbar.setAttribute('aria-label', '媒體選取操作');
   const actions = [
     ['全選', () => true],
