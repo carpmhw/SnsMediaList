@@ -244,18 +244,8 @@ export function createMediaViewer({ onSelection, onRecover, focusFallback }) {
     if (event.clientX < rect.left || event.clientX > rect.right
       || event.clientY < rect.top || event.clientY > rect.bottom) close();
   });
+  /** Tab 與背景焦點隔離交由原生模態處理，方向鍵避開媒體及輸入控制。 */
   dialog.addEventListener('keydown', event => {
-    if (event.key === 'Tab') {
-      const controls = [...dialog.querySelectorAll('button:not(:disabled), input:not(:disabled), video[controls]')]
-        .filter(control => control.getClientRects().length > 0);
-      const target = event.shiftKey ? controls.at(-1) : controls[0];
-      if ((!event.shiftKey && event.target === controls.at(-1))
-        || (event.shiftKey && event.target === controls[0])) {
-        event.preventDefault();
-        target?.focus();
-      }
-      return;
-    }
     if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey
       || event.target.closest('video, input, textarea, select, [contenteditable]')) return;
     if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {

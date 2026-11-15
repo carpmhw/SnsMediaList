@@ -26,6 +26,7 @@
   background: var(--surface);
   color: var(--text);
   overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .media-viewer[open] {
@@ -36,6 +37,8 @@
 
 .media-viewer::backdrop {
   background: rgb(0 0 0 / 80%);
+  overflow: hidden;
+  overscroll-behavior: contain;
 }
 
 .viewer-heading,
