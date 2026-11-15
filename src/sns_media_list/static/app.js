@@ -11,6 +11,8 @@ const batchModeButton = document.querySelector('#batch-mode-button');
 const singleInputPanel = document.querySelector('#single-input-panel');
 const batchInputPanel = document.querySelector('#batch-input-panel');
 const batchInput = document.querySelector('#batch-post-urls');
+const singleInputError = document.querySelector('#post-url-error');
+const batchInputError = document.querySelector('#batch-post-urls-error');
 const batchButton = document.querySelector('#analyze-batch-button');
 const stopBatchButton = document.querySelector('#stop-batch-button');
 const queueStatus = document.querySelector('#queue-status');
@@ -91,6 +93,19 @@ function parseBatchUrls(value) {
     return { urls: [], error: '最多只能分析 5 個 URL。' };
   }
   return { urls, error: '' };
+}
+
+/** 同步欄位錯誤文字與可存取狀態，只在錯誤顯示時加入其描述。 */
+function setFieldError(field, errorElement, message) {
+  const descriptions = (field.getAttribute('aria-describedby') || '')
+    .split(/\s+/).filter(
+      /** 保留既有提示並移除這次待更新的錯誤關聯。 */
+      id => id && id !== errorElement.id);
+  if (message) descriptions.push(errorElement.id);
+  field.setAttribute('aria-invalid', String(Boolean(message)));
+  field.setAttribute('aria-describedby', descriptions.join(' '));
+  errorElement.textContent = message;
+  errorElement.hidden = !message;
 }
 
 /** 依目前 extraction 與 batch 狀態，統一鎖定或恢復可啟動分析的控制項。 */
@@ -195,7 +210,9 @@ function setAnalysisMode(mode) {
   batchModeButton.setAttribute('aria-pressed', String(!single));
   singleInputPanel.hidden = !single;
   batchInputPanel.hidden = single;
-  (single ? input : document.querySelector('#batch-post-urls')).focus();
+  input.disabled = !single;
+  batchInput.disabled = single;
+  (single ? input : batchInput).focus();
 }
 
 /** 依序執行已解析的批次 URL，並保留每筆獨立生命週期與結果。 */
@@ -205,9 +222,12 @@ async function analyzeBatch() {
   }
   const parsed = parseBatchUrls(batchInput.value);
   if (parsed.error) {
+    setFieldError(batchInput, batchInputError, parsed.error);
     setStatus(parsed.error, 'error');
+    batchInput.focus();
     return;
   }
+  setFieldError(batchInput, batchInputError, '');
   const run = {
     generation: ++extractionGeneration,
     stopped: false,
@@ -1151,6 +1171,7 @@ async function analyze(event, preserveResults = false) {
   }
   const requestGeneration = ++extractionGeneration;
   submittedUrl = input.value.trim();
+  setFieldError(input, singleInputError, '');
   if (!preserveResults) {
     clearResults();
   }
@@ -1172,6 +1193,11 @@ async function analyze(event, preserveResults = false) {
     }
     const canReanalyze = error.code === 'token_expired' || error.code === 'token_not_found';
     setStatus(error.message || '目前無法分析此內容。', 'error', canReanalyze);
+    if ((error.code === 'invalid_url' || error.code === 'unsupported_url')
+      && !input.disabled && input.value.trim() === submittedUrl) {
+      setFieldError(input, singleInputError, ERROR_MESSAGES[error.code]);
+      input.focus();
+    }
   } finally {
     setAnalysisLoading(false);
   }
@@ -1208,6 +1234,22 @@ function reAnalyze() {
   form.requestSubmit();
 }
 
+/** 原生 constraints 拒絕提交時補上固定提示，聚焦仍交給瀏覽器。 */
+input.addEventListener('invalid', () => {
+  setFieldError(input, singleInputError, input.validity.valueMissing
+    ? '請輸入內容 URL。'
+    : '請輸入完整的內容 URL，例如 https://x.com/creator/status/1。');
+});
+/** 只清除已修正的錯誤，不在首次輸入或每次按鍵時新增錯誤公告。 */
+input.addEventListener('input', () => {
+  if (input.validity.valid) setFieldError(input, singleInputError, '');
+});
+/** 批次輸入有效後清除欄位錯誤，仍需使用者明確啟動分析。 */
+batchInput.addEventListener('input', () => {
+  if (!batchInputError.hidden && !parseBatchUrls(batchInput.value).error) {
+    setFieldError(batchInput, batchInputError, '');
+  }
+});
 form.addEventListener('submit', analyze);
 singleModeButton.addEventListener('click', () => setAnalysisMode('single'));
 batchModeButton.addEventListener('click', () => setAnalysisMode('batch'));
@@ -1233,4 +1275,3 @@ if (sourceEntry.kind === 'valid') {
 } else if (sourceEntry.kind === 'invalid') {
   setStatus('無法帶入來源網址，請手動貼上支援的 Instagram 或 X 內容 URL。', 'error');
 }
-input.focus();

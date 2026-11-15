@@ -489,6 +489,18 @@ button:where(:hover:not(:disabled)) {
   margin: 10px 0 0;
 }
 
+.field-error {
+  margin: 0.5rem 0 0;
+  color: var(--danger);
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
+#post-url[aria-invalid="true"],
+#batch-post-urls[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
 .privacy-note {
   max-width: 650px;
   margin: 20px 0 0;
