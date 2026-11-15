@@ -822,6 +822,12 @@ button:where(:hover:not(:disabled)) {
   opacity: 1;
 }
 
+@media (hover: none) {
+  .media-metadata {
+    opacity: 1;
+  }
+}
+
 .media-metadata dt {
   color: var(--muted);
   font-weight: 700;
