@@ -677,7 +677,7 @@ function renderMediaCard(group, media, index, groupNumber) {
   viewButton.type = 'button';
   viewButton.className = 'media-view';
   viewButton.textContent = '檢視';
-  viewButton.setAttribute('aria-label', `檢視項目 ${String(index + 1).padStart(2, '0')}`);
+  viewButton.setAttribute('aria-label', `檢視項目 ${String(index + 1).padStart(2, '0')}，第 ${groupNumber} 組`);
   viewButton.addEventListener('click', () => viewer.open(group, index, viewButton));
   body.append(filename, viewButton, copyButton, copyFeedback, downloadButton);
   card.append(visual, body);
