@@ -121,6 +121,7 @@ function updateExtractionControls() {
 /** 切換分析工作台的骨架與可存取忙碌狀態。 */
 function setAnalysisLoading(loading) {
   analysisWorkbench.setAttribute('aria-busy', String(loading));
+  analysisLoading.setAttribute('aria-live', activeBatchRun ? 'off' : 'polite');
   analysisLoading.hidden = !loading;
 }
 
@@ -140,12 +141,42 @@ function queueStateLabel(state) {
   }[state] || '等待中';
 }
 
-/** 以目前批次狀態更新可存取的整體進度與每筆生命週期。 */
+/** 由項目狀態衍生進度及終態，僅由工作台外的狀態區公告批次生命週期。 */
 function renderBatchQueue(run) {
-  const completed = run.items.filter(item => item.state === 'success').length;
-  const stopped = run.items.filter(item => item.state === 'stopped').length;
+  const counts = { pending: 0, running: 0, success: 0, error: 0, stopped: 0 };
+  for (const item of run.items) counts[item.state] += 1;
+  const total = run.items.length;
+  const processed = counts.success + counts.error;
+  const summary = `已處理 ${processed} / ${total}，成功 ${counts.success}、失敗 ${counts.error}、已停止 ${counts.stopped}。`;
+  let state = 'loading';
+  let message = '正在準備批次分析。';
+  if (counts.running) {
+    const runningIndex = run.items.findIndex(
+      /** 只公告執行中項目的來源序號，不將來源 URL 加入狀態訊息。 */
+      item => item.state === 'running');
+    message = run.stopped
+      ? `正在停止批次分析，等待第 ${runningIndex + 1} 項完成。`
+      : `正在分析第 ${runningIndex + 1} 項。`;
+  } else if (!counts.pending) {
+    if (run.stopped) {
+      state = 'info';
+      message = '批次已停止。';
+    } else if (counts.error === total) {
+      state = 'error';
+      message = '批次全部失敗，請查看各項錯誤後重試。';
+    } else {
+      state = counts.error ? 'info' : 'success';
+      message = counts.error ? '批次已完成，部分項目失敗。' : '批次已完成。';
+    }
+    if (counts.success) message += '可下載成功項目的媒體。';
+  }
+  message += summary;
+  if (status.textContent !== message || status.dataset.state !== state) {
+    setStatus(message, state);
+  }
   queueStatus.hidden = false;
-  queueProgress.textContent = `${completed} / ${run.items.length} 已完成，${stopped} 項已停止。`;
+  queueProgress.textContent = summary;
+  /** 清單保留可閱讀的逐項結果，但不另作整份 live announcement。 */
   queueItems.replaceChildren(...run.items.map((item, index) => {
     const row = document.createElement('li');
     row.className = 'queue-item';
@@ -238,7 +269,6 @@ async function analyzeBatch() {
   stopBatchButton.hidden = false;
   stopBatchButton.disabled = false;
   renderBatchQueue(run);
-  setStatus('正在循序分析內容...', 'loading');
   setAnalysisLoading(true);
   try {
     for (const item of run.items) {
@@ -276,9 +306,6 @@ async function analyzeBatch() {
         stopPendingBatchItems(run);
         break;
       }
-    }
-    if (isCurrentBatchRun(run)) {
-      setStatus('準備就緒，請選擇個別下載。', 'success');
     }
   } finally {
     setAnalysisLoading(false);
@@ -349,7 +376,7 @@ function updateResultGroupNavigation() {
   nextResultGroupButton.disabled = activeResultGroupIndex === total - 1;
 }
 
-/** 捲動至相鄰結果群組，讓鍵盤使用者能操作同一個水平軌道。 */
+/** 捲動至相鄰群組，由軌道 CSS 依使用者動態偏好決定是否平滑。 */
 function moveResultGroup(offset) {
   const groups = [...resultGroups.querySelectorAll('.result-group')];
   const nextIndex = activeResultGroupIndex + offset;
@@ -358,7 +385,7 @@ function moveResultGroup(offset) {
   }
   activeResultGroupIndex = nextIndex;
   viewer.close();
-  groups[activeResultGroupIndex].scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'start' });
+  groups[activeResultGroupIndex].scrollIntoView({ block: 'nearest', inline: 'start' });
   updateResultGroupNavigation();
 }
 

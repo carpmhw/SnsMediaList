@@ -90,6 +90,10 @@ docker compose down
 
 輸入驗證失敗時，欄位旁會顯示提示並將焦點移回該欄位；修正後提示會清除，不會自動提交。單筆與批次切換會保留各自的輸入內容；批次欄位按 Enter 仍是換行。開啟頁面或書籤帶入來源不會自動聚焦輸入欄位。
 
+批次進度的「已處理」包含成功與失敗，未開始就停止的項目另計；結束時分別顯示成功、失敗、已停止數，全部失敗不會顯示下載就緒。停止批次會等待執行中項目完成，不啟動剩餘項目。進度與結果摘要由同一狀態區公告，逐項清單仍可閱讀，但不再整份重複公告。
+
+多組結果可用「上一組／下一組」切換，只有一組時不顯示群組導覽。群組切換遵守系統「減少動態效果」偏好，啟用時立即切換，一般偏好保留平滑捲動；不影響媒體選取或逐項下載。
+
 資料夾模式顯示已接收大小、完成／失敗檔數，總大小已知時顯示單檔百分比；收到全部 bytes 後還需成功關閉檔案才計為已儲存，不保證 OS 實體落盤。未知大小不假造百分比。同名項目另加數字後綴、不覆寫既有檔案。取消資料夾選擇不會改用一般下載；下載中可停止，已完成檔案不撤回，失敗可能留下空白檔案。
 
 Firefox 或手機 Edge 的實際支援取決於能力與系統版本，不依品牌保證。原生下載的預設位置、逐檔詢問及多檔權限由瀏覽器設定決定，網頁不能強制略過；網頁只回報已啟動數量，實際傳輸進度請看瀏覽器。資料夾 handle 不保存，請保持頁面開啟，手機切換背景或鎖屏可能中斷。細節及手機人工驗收見 [OPERATIONS.md](OPERATIONS.md#資料夾下載與手機驗收)。
@@ -206,11 +210,13 @@ uv run uvicorn sns_media_list.app:create_app --factory --host 127.0.0.1 --port 8
 
 應用程式啟動時會在 `127.0.0.1:8765` 建立內部 extractor CONNECT proxy；請勿同時啟動另一個使用相同 port 的 instance。
 
-前端直接由 `src/sns_media_list/static/` 提供，沒有 Node.js 打包步驟。只有執行瀏覽器測試時才需安裝 Chromium：
+前端直接由 `src/sns_media_list/static/` 提供，沒有 Node.js 打包步驟。執行瀏覽器測試前，使用專案鎖定的 Playwright 安裝匹配的瀏覽器：
 
 ```bash
-uv run playwright install chromium
+uv run playwright install chromium firefox webkit
 ```
+
+只跑主要流程可僅安裝 `chromium`；跨引擎媒體測試另需 Firefox 與 WebKit。升級 Playwright 後須重新核對及安裝對應 browser revision，不以其他版本快取或 symlink 代替；共用快取且要保留其他版本時，可在安裝指令前加 `PLAYWRIGHT_SKIP_BROWSER_GC=1`。缺少主機函式庫時依 Playwright 診斷另外處理，不代表僅下載瀏覽器就可執行。
 
 若啟用本機 generated preview，還須提供 `ffmpeg` 執行檔；Docker 映像已包含對應版本。
 
@@ -224,7 +230,7 @@ uv run mypy src
 uv run python scripts/check_function_docstrings.py src tests scripts
 ```
 
-依變更範圍追加 [gallery-dl contract、容器、Nginx 與安全檢查](OPERATIONS.md#自動化檢查)。瀏覽器測試可能因 Chromium 不可用而跳過，須與通過結果分開記錄；真實平台驗證僅使用 [owner-controlled 內容](OPERATIONS.md#owner-controlled-manual-smoke-tests)。
+依變更範圍追加 [gallery-dl contract、容器、Nginx 與安全檢查](OPERATIONS.md#自動化檢查)。瀏覽器測試可能因對應引擎 runtime 不可用而跳過，須逐引擎與通過結果分開記錄；Playwright WebKit 不等於實體 Safari 驗收。真實平台驗證僅使用 [owner-controlled 內容](OPERATIONS.md#owner-controlled-manual-smoke-tests)。
 
 ## 專案結構
 

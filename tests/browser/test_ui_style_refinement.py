@@ -145,13 +145,14 @@ def test_batch_queue_keeps_textual_states_with_thin_rules(page: Page, base_url: 
         expect(item).to_have_css("border-left-width", "1px")
     assert len(held) == 1
     held[0].fulfill(json=workflow.SUCCESS_PAYLOAD)
-    expect(page.locator("#queue-progress")).to_contain_text("2 / 3 已完成")
+    expect(page.locator("#queue-progress")).to_contain_text("已處理 3 / 3")
+    expect(page.locator("#queue-progress")).to_contain_text("成功 2、失敗 1")
     expect(items.nth(0).locator(".queue-item-state")).to_have_text("成功")
     expect(items.nth(1).locator(".queue-item-state")).to_have_text("失敗")
     expect(items.nth(2).locator(".queue-item-state")).to_have_text("成功")
     assert submitted == urls
     expect(items.nth(1).locator(".queue-item-error")).to_be_visible()
-    expect(page.locator("#queue-progress")).to_have_attribute("aria-live", "polite")
+    expect(page.locator("#status")).to_have_attribute("aria-live", "polite")
     expect(page.get_by_role("button", name="開始批次分析", exact=True)).to_be_enabled()
     expect(page.get_by_role("button", name="停止批次分析", exact=True)).to_be_hidden()
     assert page.evaluate(

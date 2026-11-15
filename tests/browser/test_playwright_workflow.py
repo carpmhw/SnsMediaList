@@ -1518,7 +1518,7 @@ def test_analysis_mode_switch_shows_only_the_selected_input_panel(
 
 
 def test_batch_button_submits_each_parsed_url(page: Page, base_url: str) -> None:
-    """Verify batch analysis uses the existing extraction endpoint for each URL."""
+    """批次沿用既有端點提交每個 URL，並回報實際成功摘要。"""
     submitted: list[str] = []
 
     def extraction(route: Any, request: Any) -> None:
@@ -1532,7 +1532,7 @@ def test_batch_button_submits_each_parsed_url(page: Page, base_url: str) -> None
     page.fill("#batch-post-urls", "https://x.com/creator/status/1")
     page.get_by_role("button", name="開始批次分析").click()
 
-    expect(page.locator("#status")).to_contain_text("準備就緒")
+    expect(page.locator("#status")).to_contain_text("成功 1、失敗 0")
     assert submitted == ["https://x.com/creator/status/1"]
 
 
@@ -1570,7 +1570,7 @@ def test_batch_parser_rejects_invalid_complete_input(
 def test_batch_parser_trims_deduplicates_and_preserves_first_seen_order(
     page: Page, base_url: str
 ) -> None:
-    """Verify a valid mixed-platform batch submits at most five unique URLs in source order."""
+    """混合平台批次修剪去重、維持首次順序，並回報五筆均成功。"""
     submitted: list[str] = []
     urls = [
         "https://www.instagram.com/p/POST001/",
@@ -1594,12 +1594,12 @@ def test_batch_parser_trims_deduplicates_and_preserves_first_seen_order(
     )
     page.get_by_role("button", name="開始批次分析").click()
 
-    expect(page.locator("#status")).to_contain_text("準備就緒")
+    expect(page.locator("#status")).to_contain_text("成功 5、失敗 0")
     assert submitted == urls
 
 
 def test_batch_queue_continues_after_a_mapped_item_error(page: Page, base_url: str) -> None:
-    """Verify a failed batch item does not prevent the next parsed URL from being analyzed."""
+    """單項錯誤不阻擋後續分析，最後回報部分失敗而非全部就緒。"""
     submitted: list[str] = []
 
     def extraction(route: Any, request: Any) -> None:
@@ -1619,7 +1619,8 @@ def test_batch_queue_continues_after_a_mapped_item_error(page: Page, base_url: s
     )
     page.get_by_role("button", name="開始批次分析").click()
 
-    expect(page.locator("#status")).to_contain_text("準備就緒")
+    expect(page.locator("#status")).to_contain_text("成功 2、失敗 1")
+    expect(page.locator("#status")).to_have_attribute("data-state", "info")
     assert submitted == [
         "https://x.com/creator/status/1",
         "https://invalid.example/post",
@@ -1654,7 +1655,7 @@ def test_batch_story_auth_error_shows_only_mapped_message(page: Page, base_url: 
         "此 Instagram Story 需要登入驗證，服務目前未設定 Instagram 工作階段。請聯絡服務管理者。"
     )
     expect(page.locator(".queue-item[data-state='error']")).to_have_count(1)
-    expect(page.locator("#status")).to_contain_text("準備就緒")
+    expect(page.locator("#status")).to_contain_text("成功 1、失敗 1")
     assert raw_message not in page.locator("body").inner_text()
     assert submitted == [STORY_URL, "https://x.com/creator/status/1"]
 
@@ -1808,7 +1809,7 @@ def test_queue_progress_exposes_running_success_and_stopped_lifecycle(
         expect(page.locator(".queue-item").nth(1)).to_contain_text("等待中")
         page.get_by_role("button", name="停止批次分析").click()
         expect(page.locator(".queue-item").nth(1)).to_contain_text("已停止")
-        expect(page.locator("#queue-progress")).to_contain_text("1 項已停止")
+        expect(page.locator("#queue-progress")).to_contain_text("已停止 1")
 
         extraction_server.release_first.set()
         expect(page.locator(".queue-item").nth(0)).to_contain_text("成功")
