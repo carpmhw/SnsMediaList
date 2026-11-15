@@ -1404,9 +1404,11 @@ def test_copy_filename_reports_success_and_failure_without_disabling_download(
     page.goto(base_url)
     page.fill("#post-url", "https://x.com/creator/status/1")
     page.click("#analyze-button")
-    page.get_by_role("button", name="複製檔名").click()
+    page.get_by_role("button", name="複製檔名，項目 01，第 1 組", exact=True).click()
     expect(page.locator(".copy-feedback")).to_have_text("已複製檔名")
-    expect(page.get_by_role("button", name="複製檔名")).to_be_enabled()
+    expect(
+        page.get_by_role("button", name="複製檔名，項目 01，第 1 組", exact=True)
+    ).to_be_enabled()
     assert page.locator(".download-action").is_enabled()
 
     page.evaluate(
@@ -1414,7 +1416,7 @@ def test_copy_filename_reports_success_and_failure_without_disabling_download(
           navigator.clipboard.writeText = () => Promise.reject(new Error('clipboard denied'));
         }"""
     )
-    page.get_by_role("button", name="複製檔名").click()
+    page.get_by_role("button", name="複製檔名，項目 01，第 1 組", exact=True).click()
     expect(page.locator(".copy-feedback")).to_have_text("無法複製檔名")
     assert page.locator(".download-action").is_enabled()
 

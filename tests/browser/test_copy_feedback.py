@@ -50,6 +50,7 @@ def test_copy_outcome_has_separate_visible_status(
     expect(feedback).to_have_text(expected)
     expect(feedback).to_be_visible()
     expect(button).to_have_text("複製檔名")
+    expect(button).to_have_accessible_name("複製檔名，項目 01，第 1 組")
     expect(button).to_be_enabled()
     expect(button).to_be_focused()
     expect(card.locator(".download-action")).to_be_enabled()
@@ -59,6 +60,7 @@ def test_copy_outcome_has_separate_visible_status(
     )
     expect(card).not_to_contain_text("PRIVATE_SENTINEL")
     expect(feedback).to_have_text("", timeout=4000)
+    expect(button).to_have_accessible_name("複製檔名，項目 01，第 1 組")
 
 
 @pytest.mark.parametrize("engine_page", ["chromium", "firefox"], indirect=True)

@@ -662,6 +662,7 @@ function renderMediaCard(group, media, index, groupNumber) {
   copyButton.type = 'button';
   copyButton.className = 'copy-filename';
   copyButton.textContent = '複製檔名';
+  copyButton.setAttribute('aria-label', `複製檔名，項目 ${String(index + 1).padStart(2, '0')}，第 ${groupNumber} 組`);
   copyButton.addEventListener('click', () => copyFilename(media.filename, copyButton));
   const copyFeedback = document.createElement('p');
   copyFeedback.className = 'copy-feedback';
