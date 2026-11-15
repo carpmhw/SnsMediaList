@@ -877,6 +877,13 @@ button:where(:hover:not(:disabled)) {
   background: #27342f;
 }
 
+.copy-feedback {
+  min-block-size: 1.5em;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
 .site-footer {
   width: min(1120px, calc(100% - 40px));
   margin: 0 auto;

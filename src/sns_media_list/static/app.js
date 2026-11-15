@@ -41,6 +41,7 @@ let activeBatchRun = null;
 let activeExtraction = null;
 let activeResultGroupIndex = 0;
 const activeDownloadRuns = new Set();
+const copyFeedbackStates = new WeakMap();
 const viewer = createMediaViewer({
   /** 使用同一群組選取集合更新所有卡片與摘要。 */
   onSelection(group, index, checked) {
@@ -490,17 +491,24 @@ function createMediaMetadata(media, index, payload) {
   return list;
 }
 
-/** 嘗試複製正規化檔名，失敗時只顯示一般性錯誤。 */
+/** 複製正規化檔名，以獨立狀態回饋結果並重設同一卡片的清理期限。 */
 async function copyFilename(filename, button) {
+  const feedback = button.nextElementSibling;
+  let message = '已複製檔名';
   try {
     await navigator.clipboard.writeText(filename);
-    button.textContent = '已複製檔名';
   } catch (_error) {
-    button.textContent = '無法複製檔名';
+    message = '無法複製檔名';
   }
-  window.setTimeout(() => {
-    button.textContent = '複製檔名';
+  const previous = copyFeedbackStates.get(button);
+  window.clearTimeout(previous?.timer);
+  if (message === previous?.message) message += '\u00a0';
+  feedback.textContent = message;
+  /** 清除卡片回饋，保留固定名稱及鍵盤焦點。 */
+  const timer = window.setTimeout(() => {
+    feedback.textContent = '';
   }, 2000);
+  copyFeedbackStates.set(button, { message, timer });
 }
 
 /** Create a local visual fallback for media without a raster preview. */
@@ -655,6 +663,9 @@ function renderMediaCard(group, media, index) {
   copyButton.className = 'copy-filename';
   copyButton.textContent = '複製檔名';
   copyButton.addEventListener('click', () => copyFilename(media.filename, copyButton));
+  const copyFeedback = document.createElement('p');
+  copyFeedback.className = 'copy-feedback';
+  copyFeedback.setAttribute('role', 'status');
   const downloadButton = document.createElement('button');
   downloadButton.type = 'button';
   downloadButton.className = 'download-action';
@@ -666,7 +677,7 @@ function renderMediaCard(group, media, index) {
   viewButton.textContent = '檢視';
   viewButton.setAttribute('aria-label', `檢視項目 ${String(index + 1).padStart(2, '0')}`);
   viewButton.addEventListener('click', () => viewer.open(group, index, viewButton));
-  body.append(filename, viewButton, copyButton, downloadButton);
+  body.append(filename, viewButton, copyButton, copyFeedback, downloadButton);
   card.append(visual, body);
   return card;
 }

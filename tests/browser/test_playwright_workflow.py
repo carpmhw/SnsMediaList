@@ -1391,10 +1391,10 @@ def test_media_metadata_formats_hour_duration(page: Page, base_url: str) -> None
 def test_copy_filename_reports_success_and_failure_without_disabling_download(
     page: Page, base_url: str
 ) -> None:
-    """Verify Clipboard outcomes are bounded and never affect the download control."""
+    """複製結果顯示於獨立狀態區，不改變按鈕名稱或下載控制。"""
 
     def extraction(route: Any, _request: Any) -> None:
-        """Return a deterministic filename for the copy interaction."""
+        """為複製互動提供固定的合成檔名。"""
         fulfill_json(route, SUCCESS_PAYLOAD)
 
     page.route("**/api/extractions", extraction)
@@ -1407,7 +1407,8 @@ def test_copy_filename_reports_success_and_failure_without_disabling_download(
     page.fill("#post-url", "https://x.com/creator/status/1")
     page.click("#analyze-button")
     page.get_by_role("button", name="複製檔名").click()
-    expect(page.get_by_role("button", name="已複製檔名")).to_be_visible()
+    expect(page.locator(".copy-feedback")).to_have_text("已複製檔名")
+    expect(page.get_by_role("button", name="複製檔名")).to_be_enabled()
     assert page.locator(".download-action").is_enabled()
 
     page.evaluate(
@@ -1415,8 +1416,8 @@ def test_copy_filename_reports_success_and_failure_without_disabling_download(
           navigator.clipboard.writeText = () => Promise.reject(new Error('clipboard denied'));
         }"""
     )
-    page.get_by_role("button", name="已複製檔名").click()
-    expect(page.get_by_role("button", name="無法複製檔名")).to_be_visible()
+    page.get_by_role("button", name="複製檔名").click()
+    expect(page.locator(".copy-feedback")).to_have_text("無法複製檔名")
     assert page.locator(".download-action").is_enabled()
 
 
