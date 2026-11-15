@@ -1065,12 +1065,13 @@ function offerGroupRecovery(group) {
   group.recovery.append(message, button);
 }
 
-/** 透過既有單筆 API 原地重新分析指定群組，不影響其他結果。 */
+/** 原地重新分析群組，成功重建時只復原仍屬該群組的鍵盤定位。 */
 async function reAnalyzeGroup(group, recoveryButton) {
   if (activeExtraction || activeBatchRun) {
     return;
   }
   viewer.invalidate(group);
+  const focusOrigin = document.activeElement;
   const recoveryGeneration = ++group.recoveryGeneration;
   recoveryButton.disabled = true;
   setGroupStatus(group, '正在重新分析此項...', 'loading');
@@ -1079,7 +1080,14 @@ async function reAnalyzeGroup(group, recoveryButton) {
     if (!payload || group.recoveryGeneration !== recoveryGeneration) {
       return;
     }
+    const restoreFocus = group.root.contains(document.activeElement)
+      || (document.activeElement === document.body && group.root.contains(focusOrigin));
     replaceResultGroup(group, payload);
+    if (restoreFocus) {
+      const heading = group.root.querySelector('.results-heading h2');
+      heading.tabIndex = -1;
+      heading.focus();
+    }
     setStatus('準備就緒，請選擇個別下載。', 'success');
   } catch (error) {
     if (group.recoveryGeneration === recoveryGeneration) {
