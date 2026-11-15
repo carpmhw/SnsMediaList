@@ -27,9 +27,11 @@
             <h2 id="analyze-heading">貼上內容 URL</h2>
           </div>
           <form id="extraction-form">
-            <div class="analysis-mode-switch" aria-label="分析方式">
-              <button id="single-mode-button" type="button" aria-pressed="true">單筆分析</button>
-              <button id="batch-mode-button" type="button" aria-pressed="false">批次分析</button>
+            <div class="analysis-mode-switch" role="group" aria-label="分析方式">
+              <button id="single-mode-button" type="button" aria-pressed="true"
+                aria-controls="single-input-panel">單筆分析</button>
+              <button id="batch-mode-button" type="button" aria-pressed="false"
+                aria-controls="batch-input-panel">批次分析</button>
             </div>
             <div id="single-input-panel">
               <label for="post-url">內容 URL（必填）</label>
