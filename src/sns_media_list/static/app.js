@@ -1142,7 +1142,11 @@ function renderResults(payload, isSingleResult = false, existingGroup = null) {
   sourceLink.className = 'source-link';
   sourceLink.target = '_blank';
   sourceLink.rel = 'noreferrer noopener';
-  sourceLink.textContent = '開啟原始內容';
+  sourceLink.textContent = '開啟原始內容（新分頁）';
+  const groupNumber = existingGroup
+    ? Array.from(resultGroups.children).indexOf(root) + 1
+    : resultGroups.children.length + 1;
+  sourceLink.setAttribute('aria-label', `${sourceLink.textContent}，第 ${groupNumber} 組`);
   sourceLink.href = payload.post_url;
   const resultsSummary = document.createElement('p');
   resultsSummary.className = 'results-summary';
