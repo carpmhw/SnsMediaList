@@ -538,12 +538,12 @@ function isCurrentPreviewEntry(entry) {
   );
 }
 
-/** Replace an exhausted preview with the local non-network fallback tile. */
+/** 只替換失敗預覽，保留同卡片的選取控制、焦點與媒體資訊。 */
 function replacePreviewWithFallback(entry) {
   if (!isCurrentPreviewEntry(entry)) {
     return;
   }
-  entry.visual.replaceChildren(createFallbackTile({ media_type: entry.mediaType }));
+  entry.image.replaceWith(createFallbackTile({ media_type: entry.mediaType }));
 }
 
 /** Queue one retry after the minimum delay advertised by local rate limits. */
