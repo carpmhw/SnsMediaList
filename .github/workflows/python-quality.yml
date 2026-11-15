@@ -1,0 +1,48 @@
+name: Python quality checks
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pinned uv
+        run: python -m pip install 'uv==0.11.29'
+
+      - name: Verify dependency lock and install development requirements
+        run: uv sync --locked --extra dev --python 3.12
+
+      - name: Run unit, API, integration, and documentation tests
+        run: |
+          uv run --locked --extra dev pytest -q \
+            tests/unit tests/api tests/integration \
+            tests/test_readme.py tests/test_operations_docs.py \
+            tests/test_mcp_smoke.py tests/test_manual_smoke.py
+
+      - name: Check Ruff lint
+        run: uv run --locked --extra dev ruff check .
+
+      - name: Check Ruff formatting
+        run: uv run --locked --extra dev ruff format --check .
+
+      - name: Check mypy
+        run: uv run --locked --extra dev mypy src
+
+      - name: Verify function docstrings
+        run: uv run --locked --extra dev python scripts/check_function_docstrings.py src tests scripts
