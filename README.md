@@ -22,6 +22,8 @@ SNS Media List 是一個低併發 Web 工具，可分析支援的 Instagram 貼�
 - 支援 Instagram 單篇貼文、Reel、精確單則 Story、帳號當下 Story 清單，以及 X 單篇狀態貼文。
 - 保留 carousel 與多媒體貼文的來源順序，支援圖片、漸進式影片及 X 動畫 GIF。
 - 提供媒體多選、類型篩選、檔名複製與逐項啟動下載；支援時選一次資料夾並串流儲存，不支援時保留原生下載，瀏覽器可能要求多檔下載權限。
+- 媒體選取保留原生 checkbox 與逐項 Tab／Space 操作；可點擊整個選取標籤，其點擊區至少 44×44 CSS 像素。全選與依類型選取僅影響所屬結果群組，不會自動下載。
+- 「複製檔名」只複製檔名；成功或失敗會在卡片旁短暫顯示並公告，按鈕保持可重試，不影響下載。瀏覽器未提供剪貼簿或拒絕權限時會顯示一般失敗提示。
 - 一般貼文、Reel 與 X 媒體使用含作者識別的智慧檔名。
 - 批次分析最多 5 個 URL，透過循序前端 queue 呼叫既有單筆 API，不建立後端工作佇列。
 - 使用短效、用途綁定的 opaque token 隱藏 upstream media URL。
@@ -88,6 +90,12 @@ docker compose down
 2. 分析後依媒體類型篩選、預覽，並選取要下載的項目；批次結果可切換不同來源群組。卡片的「檢視」會開啟原始媒體，不只是放大縮圖。
 3. 點「下載選取項目」：安全環境（HTTPS 或 localhost）且能力支援時，每批選一次資料夾，逐檔串流寫入；不支援時逐項交給瀏覽器原生下載。個別「下載」按鈕維持原生方式。連結預設有效 10 分鐘，到期或服務重啟後請重新分析。
 
+輸入驗證失敗時，欄位旁會顯示提示並將焦點移回該欄位；修正後提示會清除，不會自動提交。單筆與批次切換會保留各自的輸入內容；批次欄位按 Enter 仍是換行。開啟頁面或書籤帶入來源不會自動聚焦輸入欄位。
+
+批次進度的「已處理」包含成功與失敗，未開始就停止的項目另計；結束時分別顯示成功、失敗、已停止數，全部失敗不會顯示下載就緒。停止批次會等待執行中項目完成，不啟動剩餘項目。進度與結果摘要由同一狀態區公告，逐項清單仍可閱讀，但不再整份重複公告。
+
+多組結果可用「上一組／下一組」切換，只有一組時不顯示群組導覽。群組切換遵守系統「減少動態效果」偏好，啟用時立即切換，一般偏好保留平滑捲動；不影響媒體選取或逐項下載。
+
 資料夾模式顯示已接收大小、完成／失敗檔數，總大小已知時顯示單檔百分比；收到全部 bytes 後還需成功關閉檔案才計為已儲存，不保證 OS 實體落盤。未知大小不假造百分比。同名項目另加數字後綴、不覆寫既有檔案。取消資料夾選擇不會改用一般下載；下載中可停止，已完成檔案不撤回，失敗可能留下空白檔案。
 
 Firefox 或手機 Edge 的實際支援取決於能力與系統版本，不依品牌保證。原生下載的預設位置、逐檔詢問及多檔權限由瀏覽器設定決定，網頁不能強制略過；網頁只回報已啟動數量，實際傳輸進度請看瀏覽器。資料夾 handle 不保存，請保持頁面開啟，手機切換背景或鎖屏可能中斷。細節及手機人工驗收見 [OPERATIONS.md](OPERATIONS.md#資料夾下載與手機驗收)。
@@ -102,7 +110,7 @@ Firefox 或手機 Edge 的實際支援取決於能力與系統版本，不依品
 
 原始檢視只支援 JPEG、PNG、GIF、WebP、MP4、WebM；容器正確不代表所有裝置都能解碼。來源不支援合法 Range、超時、限流或編碼不相容時會安全失敗，不轉碼、不自動重試；關閉後仍可使用原下載途徑。參照失效時需明確按「重新分析此群組」，新結果不沿用舊選取。檢視與下載共用資源上限；檢視另受完整回應期限約束，詳見[原始媒體檢視政策](OPERATIONS.md#原始媒體檢視政策)。
 
-可用鍵盤開啟、Tab 操作、左右鍵導覽與 Esc 關閉，手機直橫向亦可操作。關閉後使用原有個別「下載」或「下載選取項目」；檢視器內不另設下載按鈕。
+可用鍵盤開啟、Tab／Shift+Tab 操作、左右鍵導覽與 Esc 關閉，手機直橫向亦可操作。Tab 使用原生模態行為，背景控制不能取得焦點；瀏覽器仍可將焦點移至自己的工具列。關閉後焦點返回有效入口，下載使用原有個別「下載」或「下載選取項目」；檢視器內不另設下載按鈕。
 
 ### 桌面書籤工具
 
@@ -204,11 +212,13 @@ uv run uvicorn sns_media_list.app:create_app --factory --host 127.0.0.1 --port 8
 
 應用程式啟動時會在 `127.0.0.1:8765` 建立內部 extractor CONNECT proxy；請勿同時啟動另一個使用相同 port 的 instance。
 
-前端直接由 `src/sns_media_list/static/` 提供，沒有 Node.js 打包步驟。只有執行瀏覽器測試時才需安裝 Chromium：
+前端直接由 `src/sns_media_list/static/` 提供，沒有 Node.js 打包步驟。執行瀏覽器測試前，使用專案鎖定的 Playwright 安裝匹配的瀏覽器：
 
 ```bash
-uv run playwright install chromium
+uv run playwright install chromium firefox webkit
 ```
+
+只跑主要流程可僅安裝 `chromium`；跨引擎媒體測試另需 Firefox 與 WebKit。升級 Playwright 後須重新核對及安裝對應 browser revision，不以其他版本快取或 symlink 代替；共用快取且要保留其他版本時，可在安裝指令前加 `PLAYWRIGHT_SKIP_BROWSER_GC=1`。缺少主機函式庫時依 Playwright 診斷另外處理，不代表僅下載瀏覽器就可執行。
 
 若啟用本機 generated preview，還須提供 `ffmpeg` 執行檔；Docker 映像已包含對應版本。
 
@@ -222,7 +232,7 @@ uv run mypy src
 uv run python scripts/check_function_docstrings.py src tests scripts
 ```
 
-依變更範圍追加 [gallery-dl contract、容器、Nginx 與安全檢查](OPERATIONS.md#自動化檢查)。瀏覽器測試可能因 Chromium 不可用而跳過，須與通過結果分開記錄；真實平台驗證僅使用 [owner-controlled 內容](OPERATIONS.md#owner-controlled-manual-smoke-tests)。
+依變更範圍追加 [gallery-dl contract、容器、Nginx 與安全檢查](OPERATIONS.md#自動化檢查)。瀏覽器測試可能因對應引擎 runtime 不可用而跳過，須逐引擎與通過結果分開記錄；Playwright WebKit 不等於實體 Safari 驗收。真實平台驗證僅使用 [owner-controlled 內容](OPERATIONS.md#owner-controlled-manual-smoke-tests)。
 
 ## 專案結構
 

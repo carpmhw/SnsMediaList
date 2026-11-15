@@ -32,12 +32,14 @@
               <button id="batch-mode-button" type="button" aria-pressed="false">批次分析</button>
             </div>
             <div id="single-input-panel">
-              <label for="post-url">內容 URL</label>
+              <label for="post-url">內容 URL（必填）</label>
               <div class="input-row">
                 <input id="post-url" name="url" type="url" inputmode="url" required maxlength="2048"
-                  autocomplete="off" spellcheck="false" aria-describedby="url-help">
+                  autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"
+                  enterkeyhint="go" aria-invalid="false" aria-describedby="url-help">
                 <button id="analyze-button" type="submit">分析</button>
               </div>
+              <p id="post-url-error" class="field-error" hidden></p>
             </div>
             <p id="url-help" class="field-help">支援 HTTPS Instagram 貼文、Reel、單則 Story、帳號當下 Story 清單與 X 狀態貼文 URL。/stories/帳號/ 列出清單（最多 20 則），加數字 ID 只取單則。超量不截斷；帳號首頁、Stories tray 與 Highlights 不支援。可存取範圍取決於平台與部署驗證設定。</p>
             <p id="privacy-reminder" class="privacy-note">請只下載你有權保存的內容。可信部署若使用服務管理者的 Instagram 工作階段，任何服務使用者都可能間接存取該帳號可見的私人或受眾限定 Story。結果與下載參照僅暫時保留。</p>
@@ -45,15 +47,17 @@
               <h3 id="batch-heading">批次分析</h3>
               <label for="batch-post-urls">內容 URL（每行一個，最多 5 個）</label>
               <textarea id="batch-post-urls" name="batch-urls" rows="5" maxlength="10240"
-                autocomplete="off" spellcheck="false"></textarea>
+                autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"
+                aria-invalid="false" aria-describedby="url-help" disabled></textarea>
+              <p id="batch-post-urls-error" class="field-error" hidden></p>
               <div class="batch-actions">
                 <button id="analyze-batch-button" type="button">開始批次分析</button>
                 <button id="stop-batch-button" type="button" hidden>停止批次分析</button>
               </div>
               <section id="queue-status" class="queue-status" aria-labelledby="queue-heading" hidden>
                 <h3 id="queue-heading">批次進度</h3>
-                <p id="queue-progress" role="status" aria-live="polite"></p>
-                <ol id="queue-items" class="queue-items" aria-live="polite"></ol>
+                <p id="queue-progress"></p>
+                <ol id="queue-items" class="queue-items" role="list"></ol>
               </section>
             </div>
           </form>

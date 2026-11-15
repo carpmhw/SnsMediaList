@@ -26,6 +26,7 @@
   background: var(--surface);
   color: var(--text);
   overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .media-viewer[open] {
@@ -36,6 +37,8 @@
 
 .media-viewer::backdrop {
   background: rgb(0 0 0 / 80%);
+  overflow: hidden;
+  overscroll-behavior: contain;
 }
 
 .viewer-heading,
@@ -465,6 +468,8 @@ button:where(:hover:not(:disabled)) {
 
 .media-selection-label {
   display: flex;
+  min-inline-size: 44px;
+  min-block-size: 44px;
   position: absolute;
   z-index: 2;
   top: 10px;
@@ -487,6 +492,18 @@ button:where(:hover:not(:disabled)) {
 
 .field-help {
   margin: 10px 0 0;
+}
+
+.field-error {
+  margin: 0.5rem 0 0;
+  color: var(--danger);
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
+#post-url[aria-invalid="true"],
+#batch-post-urls[aria-invalid="true"] {
+  border-color: var(--danger);
 }
 
 .privacy-note {
@@ -650,6 +667,10 @@ button:where(:hover:not(:disabled)) {
   padding: 9px 12px;
 }
 
+.result-group-navigation[hidden] {
+  display: none;
+}
+
 #result-group-position {
   min-width: 5.5rem;
   margin: 0;
@@ -664,8 +685,13 @@ button:where(:hover:not(:disabled)) {
   min-width: 0;
   overflow-x: auto;
   overscroll-behavior-x: contain;
-  scroll-behavior: smooth;
   scroll-snap-type: x mandatory;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  #result-groups {
+    scroll-behavior: smooth;
+  }
 }
 
 .result-group {
@@ -851,6 +877,13 @@ button:where(:hover:not(:disabled)) {
 .download-action:where(:hover:not(:disabled)) {
   border-color: var(--accent);
   background: #27342f;
+}
+
+.copy-feedback {
+  min-block-size: 1.5em;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
 }
 
 .site-footer {

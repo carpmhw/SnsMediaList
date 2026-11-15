@@ -268,7 +268,12 @@ def test_viewer_fits_viewport_and_keyboard(
     assert abs(image["width"] / image["height"] - 1.6) < 0.02
     for _ in range(8):
         page.keyboard.press("Tab")
-        assert page.evaluate("Boolean(document.activeElement.closest('#media-viewer'))")
+        assert page.evaluate(
+            """/** 原生模態可讓焦點到瀏覽器工具列，但不能到網頁背景控制。 */ () => {
+              const target = document.activeElement;
+              return target === document.body || Boolean(target.closest('#media-viewer'));
+            }"""
+        )
     page.locator("#viewer-close").focus()
     page.keyboard.press("ArrowRight")
     expect(page.locator("#viewer-position")).to_have_text("2 / 2")

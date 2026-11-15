@@ -223,6 +223,7 @@ tempCodeRunnerFile.py
 .superpowers/
 openspec
 docs
+.agents
 
 # PyPI configuration file
 .pypirc

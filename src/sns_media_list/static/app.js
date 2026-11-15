@@ -11,6 +11,8 @@ const batchModeButton = document.querySelector('#batch-mode-button');
 const singleInputPanel = document.querySelector('#single-input-panel');
 const batchInputPanel = document.querySelector('#batch-input-panel');
 const batchInput = document.querySelector('#batch-post-urls');
+const singleInputError = document.querySelector('#post-url-error');
+const batchInputError = document.querySelector('#batch-post-urls-error');
 const batchButton = document.querySelector('#analyze-batch-button');
 const stopBatchButton = document.querySelector('#stop-batch-button');
 const queueStatus = document.querySelector('#queue-status');
@@ -39,6 +41,7 @@ let activeBatchRun = null;
 let activeExtraction = null;
 let activeResultGroupIndex = 0;
 const activeDownloadRuns = new Set();
+const copyFeedbackStates = new WeakMap();
 const viewer = createMediaViewer({
   /** 使用同一群組選取集合更新所有卡片與摘要。 */
   onSelection(group, index, checked) {
@@ -93,6 +96,19 @@ function parseBatchUrls(value) {
   return { urls, error: '' };
 }
 
+/** 同步欄位錯誤文字與可存取狀態，只在錯誤顯示時加入其描述。 */
+function setFieldError(field, errorElement, message) {
+  const descriptions = (field.getAttribute('aria-describedby') || '')
+    .split(/\s+/).filter(
+      /** 保留既有提示並移除這次待更新的錯誤關聯。 */
+      id => id && id !== errorElement.id);
+  if (message) descriptions.push(errorElement.id);
+  field.setAttribute('aria-invalid', String(Boolean(message)));
+  field.setAttribute('aria-describedby', descriptions.join(' '));
+  errorElement.textContent = message;
+  errorElement.hidden = !message;
+}
+
 /** 依目前 extraction 與 batch 狀態，統一鎖定或恢復可啟動分析的控制項。 */
 function updateExtractionControls() {
   const locked = activeExtraction !== null || activeBatchRun !== null;
@@ -106,6 +122,7 @@ function updateExtractionControls() {
 /** 切換分析工作台的骨架與可存取忙碌狀態。 */
 function setAnalysisLoading(loading) {
   analysisWorkbench.setAttribute('aria-busy', String(loading));
+  analysisLoading.setAttribute('aria-live', activeBatchRun ? 'off' : 'polite');
   analysisLoading.hidden = !loading;
 }
 
@@ -125,12 +142,42 @@ function queueStateLabel(state) {
   }[state] || '等待中';
 }
 
-/** 以目前批次狀態更新可存取的整體進度與每筆生命週期。 */
+/** 由項目狀態衍生進度及終態，僅由工作台外的狀態區公告批次生命週期。 */
 function renderBatchQueue(run) {
-  const completed = run.items.filter(item => item.state === 'success').length;
-  const stopped = run.items.filter(item => item.state === 'stopped').length;
+  const counts = { pending: 0, running: 0, success: 0, error: 0, stopped: 0 };
+  for (const item of run.items) counts[item.state] += 1;
+  const total = run.items.length;
+  const processed = counts.success + counts.error;
+  const summary = `已處理 ${processed} / ${total}，成功 ${counts.success}、失敗 ${counts.error}、已停止 ${counts.stopped}。`;
+  let state = 'loading';
+  let message = '正在準備批次分析。';
+  if (counts.running) {
+    const runningIndex = run.items.findIndex(
+      /** 只公告執行中項目的來源序號，不將來源 URL 加入狀態訊息。 */
+      item => item.state === 'running');
+    message = run.stopped
+      ? `正在停止批次分析，等待第 ${runningIndex + 1} 項完成。`
+      : `正在分析第 ${runningIndex + 1} 項。`;
+  } else if (!counts.pending) {
+    if (run.stopped) {
+      state = 'info';
+      message = '批次已停止。';
+    } else if (counts.error === total) {
+      state = 'error';
+      message = '批次全部失敗，請查看各項錯誤後重試。';
+    } else {
+      state = counts.error ? 'info' : 'success';
+      message = counts.error ? '批次已完成，部分項目失敗。' : '批次已完成。';
+    }
+    if (counts.success) message += '可下載成功項目的媒體。';
+  }
+  message += summary;
+  if (status.textContent !== message || status.dataset.state !== state) {
+    setStatus(message, state);
+  }
   queueStatus.hidden = false;
-  queueProgress.textContent = `${completed} / ${run.items.length} 已完成，${stopped} 項已停止。`;
+  queueProgress.textContent = summary;
+  /** 清單保留可閱讀的逐項結果，但不另作整份 live announcement。 */
   queueItems.replaceChildren(...run.items.map((item, index) => {
     const row = document.createElement('li');
     row.className = 'queue-item';
@@ -195,7 +242,9 @@ function setAnalysisMode(mode) {
   batchModeButton.setAttribute('aria-pressed', String(!single));
   singleInputPanel.hidden = !single;
   batchInputPanel.hidden = single;
-  (single ? input : document.querySelector('#batch-post-urls')).focus();
+  input.disabled = !single;
+  batchInput.disabled = single;
+  (single ? input : batchInput).focus();
 }
 
 /** 依序執行已解析的批次 URL，並保留每筆獨立生命週期與結果。 */
@@ -205,9 +254,12 @@ async function analyzeBatch() {
   }
   const parsed = parseBatchUrls(batchInput.value);
   if (parsed.error) {
+    setFieldError(batchInput, batchInputError, parsed.error);
     setStatus(parsed.error, 'error');
+    batchInput.focus();
     return;
   }
+  setFieldError(batchInput, batchInputError, '');
   const run = {
     generation: ++extractionGeneration,
     stopped: false,
@@ -218,7 +270,6 @@ async function analyzeBatch() {
   stopBatchButton.hidden = false;
   stopBatchButton.disabled = false;
   renderBatchQueue(run);
-  setStatus('正在循序分析內容...', 'loading');
   setAnalysisLoading(true);
   try {
     for (const item of run.items) {
@@ -256,9 +307,6 @@ async function analyzeBatch() {
         stopPendingBatchItems(run);
         break;
       }
-    }
-    if (isCurrentBatchRun(run)) {
-      setStatus('準備就緒，請選擇個別下載。', 'success');
     }
   } finally {
     setAnalysisLoading(false);
@@ -329,7 +377,7 @@ function updateResultGroupNavigation() {
   nextResultGroupButton.disabled = activeResultGroupIndex === total - 1;
 }
 
-/** 捲動至相鄰結果群組，讓鍵盤使用者能操作同一個水平軌道。 */
+/** 捲動至相鄰群組，由軌道 CSS 依使用者動態偏好決定是否平滑。 */
 function moveResultGroup(offset) {
   const groups = [...resultGroups.querySelectorAll('.result-group')];
   const nextIndex = activeResultGroupIndex + offset;
@@ -338,7 +386,7 @@ function moveResultGroup(offset) {
   }
   activeResultGroupIndex = nextIndex;
   viewer.close();
-  groups[activeResultGroupIndex].scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'start' });
+  groups[activeResultGroupIndex].scrollIntoView({ block: 'nearest', inline: 'start' });
   updateResultGroupNavigation();
 }
 
@@ -443,17 +491,24 @@ function createMediaMetadata(media, index, payload) {
   return list;
 }
 
-/** 嘗試複製正規化檔名，失敗時只顯示一般性錯誤。 */
+/** 複製正規化檔名，以獨立狀態回饋結果並重設同一卡片的清理期限。 */
 async function copyFilename(filename, button) {
+  const feedback = button.nextElementSibling;
+  let message = '已複製檔名';
   try {
     await navigator.clipboard.writeText(filename);
-    button.textContent = '已複製檔名';
   } catch (_error) {
-    button.textContent = '無法複製檔名';
+    message = '無法複製檔名';
   }
-  window.setTimeout(() => {
-    button.textContent = '複製檔名';
+  const previous = copyFeedbackStates.get(button);
+  window.clearTimeout(previous?.timer);
+  if (message === previous?.message) message += '\u00a0';
+  feedback.textContent = message;
+  /** 清除卡片回饋，保留固定名稱及鍵盤焦點。 */
+  const timer = window.setTimeout(() => {
+    feedback.textContent = '';
   }, 2000);
+  copyFeedbackStates.set(button, { message, timer });
 }
 
 /** Create a local visual fallback for media without a raster preview. */
@@ -586,7 +641,6 @@ function renderMediaCard(group, media, index) {
   selection.type = 'checkbox';
   selection.className = 'media-selection';
   selection.dataset.mediaIndex = String(index);
-  selection.setAttribute('aria-label', `選取項目 ${String(index + 1).padStart(2, '0')}`);
   selection.addEventListener('change', () => {
     if (selection.checked) {
       group.selectedIndices.add(index);
@@ -608,6 +662,9 @@ function renderMediaCard(group, media, index) {
   copyButton.className = 'copy-filename';
   copyButton.textContent = '複製檔名';
   copyButton.addEventListener('click', () => copyFilename(media.filename, copyButton));
+  const copyFeedback = document.createElement('p');
+  copyFeedback.className = 'copy-feedback';
+  copyFeedback.setAttribute('role', 'status');
   const downloadButton = document.createElement('button');
   downloadButton.type = 'button';
   downloadButton.className = 'download-action';
@@ -619,16 +676,16 @@ function renderMediaCard(group, media, index) {
   viewButton.textContent = '檢視';
   viewButton.setAttribute('aria-label', `檢視項目 ${String(index + 1).padStart(2, '0')}`);
   viewButton.addEventListener('click', () => viewer.open(group, index, viewButton));
-  body.append(filename, viewButton, copyButton, downloadButton);
+  body.append(filename, viewButton, copyButton, copyFeedback, downloadButton);
   card.append(visual, body);
   return card;
 }
 
-/** Render normalized extraction metadata and replace the previous card grid. */
-/** 建立僅作用於單一結果群組的媒體選取與批次下載工具列。 */
+/** 建立具命名群組語意的選取操作區，維持原生逐項 Tab 與群組本地動作。 */
 function createSelectionToolbar(group) {
   const toolbar = document.createElement('div');
   toolbar.className = 'selection-toolbar';
+  toolbar.setAttribute('role', 'group');
   toolbar.setAttribute('aria-label', '媒體選取操作');
   const actions = [
     ['全選', () => true],
@@ -1151,6 +1208,7 @@ async function analyze(event, preserveResults = false) {
   }
   const requestGeneration = ++extractionGeneration;
   submittedUrl = input.value.trim();
+  setFieldError(input, singleInputError, '');
   if (!preserveResults) {
     clearResults();
   }
@@ -1172,6 +1230,11 @@ async function analyze(event, preserveResults = false) {
     }
     const canReanalyze = error.code === 'token_expired' || error.code === 'token_not_found';
     setStatus(error.message || '目前無法分析此內容。', 'error', canReanalyze);
+    if ((error.code === 'invalid_url' || error.code === 'unsupported_url')
+      && !input.disabled && input.value.trim() === submittedUrl) {
+      setFieldError(input, singleInputError, ERROR_MESSAGES[error.code]);
+      input.focus();
+    }
   } finally {
     setAnalysisLoading(false);
   }
@@ -1208,6 +1271,22 @@ function reAnalyze() {
   form.requestSubmit();
 }
 
+/** 原生 constraints 拒絕提交時補上固定提示，聚焦仍交給瀏覽器。 */
+input.addEventListener('invalid', () => {
+  setFieldError(input, singleInputError, input.validity.valueMissing
+    ? '請輸入內容 URL。'
+    : '請輸入完整的內容 URL，例如 https://x.com/creator/status/1。');
+});
+/** 只清除已修正的錯誤，不在首次輸入或每次按鍵時新增錯誤公告。 */
+input.addEventListener('input', () => {
+  if (input.validity.valid) setFieldError(input, singleInputError, '');
+});
+/** 批次輸入有效後清除欄位錯誤，仍需使用者明確啟動分析。 */
+batchInput.addEventListener('input', () => {
+  if (!batchInputError.hidden && !parseBatchUrls(batchInput.value).error) {
+    setFieldError(batchInput, batchInputError, '');
+  }
+});
 form.addEventListener('submit', analyze);
 singleModeButton.addEventListener('click', () => setAnalysisMode('single'));
 batchModeButton.addEventListener('click', () => setAnalysisMode('batch'));
@@ -1233,4 +1312,3 @@ if (sourceEntry.kind === 'valid') {
 } else if (sourceEntry.kind === 'invalid') {
   setStatus('無法帶入來源網址，請手動貼上支援的 Instagram 或 X 內容 URL。', 'error');
 }
-input.focus();

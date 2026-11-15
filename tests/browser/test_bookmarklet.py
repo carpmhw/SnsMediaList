@@ -232,12 +232,12 @@ def test_bookmarklet_installation(page: Page, base_url: str, width: int) -> None
 def test_source_prefill_requires_submit(
     page: Page, base_url: str, api_requests: list[Request]
 ) -> None:
-    """來源只預填及聚焦，使用者提交後才建立一個分析請求。"""
+    """來源只預填、不強制聚焦，使用者提交後才建立一個分析請求。"""
     source = "https://x.com/creator/status/1?literal=a+b%25&text=中文"
     page.goto(base_url + "/#source=" + quote(source, safe=""))
-    field = page.get_by_label("內容 URL", exact=True)
+    field = page.get_by_label("內容 URL（必填）", exact=True)
     expect(field).to_have_value(source)
-    expect(field).to_be_focused()
+    expect(field).not_to_be_focused()
     expect(page.locator("#single-mode-button")).to_have_attribute("aria-pressed", "true")
     expect(page.locator("#status")).to_have_text("已帶入來源網址，請確認後按「分析」。")
     assert page.url == base_url + "/"
@@ -254,7 +254,7 @@ def test_invalid_prefill_stays_manual(
 ) -> None:
     """非法來源不預填或分析，但使用者仍可手動貼上並提交。"""
     page.goto(base_url + "/#source=%E0%A4%A")
-    field = page.get_by_label("內容 URL", exact=True)
+    field = page.get_by_label("內容 URL（必填）", exact=True)
     expect(page.locator("#status")).to_have_text(
         "無法帶入來源網址，請手動貼上支援的 Instagram 或 X 內容 URL。"
     )
@@ -271,14 +271,14 @@ def test_prefill_is_once_only(page: Page, base_url: str, api_requests: list[Requ
     """重新整理與載入後 hashchange 不重播來源，且不儲存來源歷史。"""
     source = "https://x.com/creator/status/1"
     page.goto(base_url + "/#source=" + quote(source, safe=""))
-    field = page.get_by_label("內容 URL", exact=True)
+    field = page.get_by_label("內容 URL（必填）", exact=True)
     expect(field).to_have_value(source)
     storage = page.evaluate(
         "/** 檢查未寫入來源儲存。 */ () => [localStorage.length, sessionStorage.length]"
     )
     assert storage == [0, 0]
     page.reload()
-    expect(field).to_be_focused()
+    expect(field).not_to_be_focused()
     expect(field).to_have_value("")
     page.evaluate(
         """/** 模擬載入後修改錨點。 */ source => {
@@ -362,7 +362,7 @@ def test_bookmarklet_opens_isolated_tab(page: Page, base_url: str) -> None:
     target = opened.value
     try:
         expect(target.locator("#post-url")).to_have_value(source)
-        expect(target.locator("#post-url")).to_be_focused()
+        expect(target.locator("#post-url")).not_to_be_focused()
         assert target.url == base_url + "/"
         assert target.evaluate("/** 檢查新頁無 opener。 */ () => window.opener === null")
         assert target.evaluate("/** 檢查新頁不含來源 Referer。 */ () => document.referrer") == ""
