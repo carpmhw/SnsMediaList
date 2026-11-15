@@ -42,6 +42,7 @@ let activeExtraction = null;
 let activeResultGroupIndex = 0;
 const activeDownloadRuns = new Set();
 const copyFeedbackStates = new WeakMap();
+let downloadDetailSequence = 0;
 const viewer = createMediaViewer({
   /** 使用同一群組選取集合更新所有卡片與摘要。 */
   onSelection(group, index, checked) {
@@ -537,12 +538,12 @@ function isCurrentPreviewEntry(entry) {
   );
 }
 
-/** Replace an exhausted preview with the local non-network fallback tile. */
+/** 只替換失敗預覽，保留同卡片的選取控制、焦點與媒體資訊。 */
 function replacePreviewWithFallback(entry) {
   if (!isCurrentPreviewEntry(entry)) {
     return;
   }
-  entry.visual.replaceChildren(createFallbackTile({ media_type: entry.mediaType }));
+  entry.image.replaceWith(createFallbackTile({ media_type: entry.mediaType }));
 }
 
 /** Queue one retry after the minimum delay advertised by local rate limits. */
@@ -681,7 +682,7 @@ function renderMediaCard(group, media, index) {
   return card;
 }
 
-/** 建立具命名群組語意的選取操作區，維持原生逐項 Tab 與群組本地動作。 */
+/** 建立群組本地操作區，將非互動進度條關聯至同組可見詳情。 */
 function createSelectionToolbar(group) {
   const toolbar = document.createElement('div');
   toolbar.className = 'selection-toolbar';
@@ -716,11 +717,13 @@ function createSelectionToolbar(group) {
   downloadSummary.setAttribute('aria-live', 'polite');
   const downloadDetail = document.createElement('p');
   downloadDetail.className = 'download-detail';
+  downloadDetail.id = `download-detail-${++downloadDetailSequence}`;
   const downloadProgress = document.createElement('progress');
   downloadProgress.className = 'download-progress';
   downloadProgress.max = 100;
   downloadProgress.hidden = true;
   downloadProgress.setAttribute('aria-label', '目前檔案傳輸進度');
+  downloadProgress.setAttribute('aria-describedby', downloadDetail.id);
   const stopDownload = document.createElement('button');
   stopDownload.type = 'button';
   stopDownload.textContent = '停止下載';
