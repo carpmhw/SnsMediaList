@@ -22,13 +22,13 @@ def test_selection_label_has_touch_target_and_native_name(
     page.set_viewport_size({"width": width, "height": 900})
     viewer_workflow.open_results(page, base_url)
     label = page.locator(".media-selection-label").first
-    checkbox = page.get_by_role("checkbox", name="選取項目 01", exact=True)
+    checkbox = page.get_by_role("checkbox", name="選取項目 01 第 1 組", exact=True)
     bounds = label.bounding_box()
     assert bounds and bounds["height"] >= 44 and bounds["width"] >= 44
     assert checkbox.get_attribute("aria-label") is None
     assert checkbox.evaluate(
-        "/** 名稱由原生包覆label提供，且文字與可見標籤一致。 */ el => "
-        "el.labels.length === 1 && el.labels[0].textContent.trim() === '選取項目 01'"
+        "/** 名稱仍由原生label提供，含可見項目文字及輔助群組上下文。 */ el => "
+        "el.labels.length === 1 && el.labels[0].textContent.trim() === '選取項目 01 第 1 組'"
     )
     label.click(position={"x": bounds["width"] - 3, "y": 3})
     expect(checkbox).to_be_checked()
@@ -48,7 +48,7 @@ def test_named_selection_group_preserves_native_keyboard_actions(
     """命名動作群組不冒充composite toolbar，Tab與一次性選取動作保持原生。"""
     page = engine_page
     viewer_workflow.open_results(page, base_url)
-    group = page.get_by_role("group", name="媒體選取操作", exact=True)
+    group = page.get_by_role("group", name="媒體選取操作，第 1 組", exact=True)
     expect(group).to_be_visible()
     select_all = group.get_by_role("button", name="全選", exact=True)
     select_all.focus()
@@ -82,17 +82,19 @@ def test_selection_groups_stay_independent(
     page = engine_page
     page.emulate_media(reduced_motion="reduce")
     calls = open_groups(page, base_url, 2)
-    groups = page.get_by_role("group", name="媒體選取操作", exact=True)
-    expect(groups).to_have_count(2)
-    groups.nth(0).get_by_role("button", name="全選", exact=True).press("Enter")
-    expect(groups.nth(0).locator(".selection-summary")).to_have_text("1 / 1 已選取")
-    expect(groups.nth(1).locator(".selection-summary")).to_have_text("0 / 1 已選取")
+    first = page.get_by_role("group", name="媒體選取操作，第 1 組", exact=True)
+    second = page.get_by_role("group", name="媒體選取操作，第 2 組", exact=True)
+    expect(first).to_have_count(1)
+    expect(second).to_have_count(1)
+    first.get_by_role("button", name="全選", exact=True).press("Enter")
+    expect(first.locator(".selection-summary")).to_have_text("1 / 1 已選取")
+    expect(second.locator(".selection-summary")).to_have_text("0 / 1 已選取")
     page.locator("#next-result-group").click()
-    groups.nth(1).get_by_role("button", name="全選", exact=True).press("Space")
-    expect(groups.nth(1).locator(".selection-summary")).to_have_text("1 / 1 已選取")
-    groups.nth(1).get_by_role("button", name="取消全選", exact=True).press("Enter")
-    expect(groups.nth(0).locator(".selection-summary")).to_have_text("1 / 1 已選取")
-    expect(groups.nth(1).locator(".selection-summary")).to_have_text("0 / 1 已選取")
+    second.get_by_role("button", name="全選", exact=True).press("Space")
+    expect(second.locator(".selection-summary")).to_have_text("1 / 1 已選取")
+    second.get_by_role("button", name="取消全選", exact=True).press("Enter")
+    expect(first.locator(".selection-summary")).to_have_text("1 / 1 已選取")
+    expect(second.locator(".selection-summary")).to_have_text("0 / 1 已選取")
     assert len(calls) == 2
     assert download_request_methods == []
     expect(page.locator("#media-viewer")).to_be_hidden()

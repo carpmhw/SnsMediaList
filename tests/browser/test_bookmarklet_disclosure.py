@@ -46,6 +46,19 @@ def test_bookmarklet_installation_controls_are_readable_and_large_enough(
         "/** 長安裝碼只能在元件內換行或捲動，不能撐寬整頁。 */ "
         "() => document.documentElement.scrollWidth <= innerWidth"
     )
+    parent_font = page.locator("#bookmarklet-tools").evaluate(
+        """/** 放大父容器而不改root，直接驗證em跟隨能力。 */ el => {
+          el.style.fontSize = '200%';
+          return parseFloat(getComputedStyle(el).fontSize);
+        }"""
+    )
+    enlarged = code.evaluate(
+        "/** 安裝碼必須隨放大後的父字級增長。 */ el => parseFloat(getComputedStyle(el).fontSize)"
+    )
+    assert enlarged >= parent_font > fonts[0]
+    assert page.evaluate(
+        "/** 放大後整頁仍不溢出。 */ () => document.documentElement.scrollWidth <= innerWidth"
+    )
 
 
 @pytest.mark.parametrize("engine_page", ["chromium", "firefox"], indirect=True)

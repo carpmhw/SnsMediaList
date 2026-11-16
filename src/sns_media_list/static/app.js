@@ -598,8 +598,8 @@ function pumpPreviewQueue() {
   entry.image.src = entry.url;
 }
 
-/** 建立來源順序卡片，分離檢視、選取、複製與下載入口。 */
-function renderMediaCard(group, media, index) {
+/** 建立來源順序卡片，讓選取與操作依項目及群組編號命名。 */
+function renderMediaCard(group, media, index, groupNumber) {
   const card = document.createElement('article');
   card.className = 'media-card';
 
@@ -650,7 +650,10 @@ function renderMediaCard(group, media, index) {
     }
     updateSelectionUi(group);
   });
-  selectionLabel.append(selection, document.createTextNode(`選取項目 ${String(index + 1).padStart(2, '0')}`));
+  const selectionGroup = document.createElement('span');
+  selectionGroup.className = 'visually-hidden';
+  selectionGroup.textContent = ` 第 ${groupNumber} 組`;
+  selectionLabel.append(selection, document.createTextNode(`選取項目 ${String(index + 1).padStart(2, '0')}`), selectionGroup);
   visual.append(selectionLabel);
 
   const body = document.createElement('div');
@@ -662,6 +665,7 @@ function renderMediaCard(group, media, index) {
   copyButton.type = 'button';
   copyButton.className = 'copy-filename';
   copyButton.textContent = '複製檔名';
+  copyButton.setAttribute('aria-label', `複製檔名，項目 ${String(index + 1).padStart(2, '0')}，第 ${groupNumber} 組`);
   copyButton.addEventListener('click', () => copyFilename(media.filename, copyButton));
   const copyFeedback = document.createElement('p');
   copyFeedback.className = 'copy-feedback';
@@ -670,24 +674,25 @@ function renderMediaCard(group, media, index) {
   downloadButton.type = 'button';
   downloadButton.className = 'download-action';
   downloadButton.textContent = '下載';
+  downloadButton.setAttribute('aria-label', `下載項目 ${String(index + 1).padStart(2, '0')}，第 ${groupNumber} 組`);
   downloadButton.addEventListener('click', () => downloadMedia(group, media, downloadButton));
   const viewButton = document.createElement('button');
   viewButton.type = 'button';
   viewButton.className = 'media-view';
   viewButton.textContent = '檢視';
-  viewButton.setAttribute('aria-label', `檢視項目 ${String(index + 1).padStart(2, '0')}`);
+  viewButton.setAttribute('aria-label', `檢視項目 ${String(index + 1).padStart(2, '0')}，第 ${groupNumber} 組`);
   viewButton.addEventListener('click', () => viewer.open(group, index, viewButton));
   body.append(filename, viewButton, copyButton, copyFeedback, downloadButton);
   card.append(visual, body);
   return card;
 }
 
-/** 建立群組本地操作區，將非互動進度條關聯至同組可見詳情。 */
-function createSelectionToolbar(group) {
+/** 依群組編號命名本地操作區，保留原生控制與進度詳情關聯。 */
+function createSelectionToolbar(group, groupNumber) {
   const toolbar = document.createElement('div');
   toolbar.className = 'selection-toolbar';
   toolbar.setAttribute('role', 'group');
-  toolbar.setAttribute('aria-label', '媒體選取操作');
+  toolbar.setAttribute('aria-label', `媒體選取操作，第 ${groupNumber} 組`);
   const actions = [
     ['全選', () => true],
     ['取消全選', () => false],
@@ -1052,7 +1057,7 @@ async function downloadSelectedMedia(group) {
   }
 }
 
-/** 顯示僅屬於指定群組的安全 token recovery 操作。 */
+/** 依結果群組編號命名安全 token 復原操作，不更動復原流程。 */
 function offerGroupRecovery(group) {
   group.recovery.replaceChildren();
   const message = document.createElement('p');
@@ -1061,16 +1066,19 @@ function offerGroupRecovery(group) {
   button.type = 'button';
   button.className = 're-analyze';
   button.textContent = '重新分析此項';
+  const groupNumber = Array.from(resultGroups.children).indexOf(group.root) + 1;
+  button.setAttribute('aria-label', `重新分析此項，第 ${groupNumber} 組`);
   button.addEventListener('click', () => reAnalyzeGroup(group, button));
   group.recovery.append(message, button);
 }
 
-/** 透過既有單筆 API 原地重新分析指定群組，不影響其他結果。 */
+/** 原地重新分析群組，成功重建時只復原仍屬該群組的鍵盤定位。 */
 async function reAnalyzeGroup(group, recoveryButton) {
   if (activeExtraction || activeBatchRun) {
     return;
   }
   viewer.invalidate(group);
+  const focusOrigin = document.activeElement;
   const recoveryGeneration = ++group.recoveryGeneration;
   recoveryButton.disabled = true;
   setGroupStatus(group, '正在重新分析此項...', 'loading');
@@ -1079,7 +1087,14 @@ async function reAnalyzeGroup(group, recoveryButton) {
     if (!payload || group.recoveryGeneration !== recoveryGeneration) {
       return;
     }
+    const restoreFocus = group.root.contains(document.activeElement)
+      || (document.activeElement === document.body && group.root.contains(focusOrigin));
     replaceResultGroup(group, payload);
+    if (restoreFocus) {
+      const heading = group.root.querySelector('.results-heading h2');
+      heading.tabIndex = -1;
+      heading.focus();
+    }
     setStatus('準備就緒，請選擇個別下載。', 'success');
   } catch (error) {
     if (group.recoveryGeneration === recoveryGeneration) {
@@ -1134,7 +1149,15 @@ function renderResults(payload, isSingleResult = false, existingGroup = null) {
   sourceLink.className = 'source-link';
   sourceLink.target = '_blank';
   sourceLink.rel = 'noreferrer noopener';
-  sourceLink.textContent = '開啟原始內容';
+  sourceLink.textContent = '開啟原始內容（新分頁）';
+  const groupNumber = existingGroup
+    ? Array.from(resultGroups.children).indexOf(root) + 1
+    : resultGroups.children.length + 1;
+  const headingGroup = document.createElement('span');
+  headingGroup.className = 'visually-hidden';
+  headingGroup.textContent = ` 第 ${groupNumber} 組`;
+  title.append(headingGroup);
+  sourceLink.setAttribute('aria-label', `${sourceLink.textContent}，第 ${groupNumber} 組`);
   sourceLink.href = payload.post_url;
   const resultsSummary = document.createElement('p');
   resultsSummary.className = 'results-summary';
@@ -1154,7 +1177,7 @@ function renderResults(payload, isSingleResult = false, existingGroup = null) {
   }
   details.append(kicker, platformLabel, title, postDescription);
   heading.append(details, sourceLink);
-  const toolbar = createSelectionToolbar(group);
+  const toolbar = createSelectionToolbar(group, groupNumber);
   const recovery = document.createElement('div');
   recovery.className = 'group-recovery';
   const groupStatus = document.createElement('p');
@@ -1169,7 +1192,7 @@ function renderResults(payload, isSingleResult = false, existingGroup = null) {
   group.recovery = recovery;
   group.status = groupStatus;
   group.error = groupError;
-  mediaGrid.replaceChildren(...payload.media.map((media, index) => renderMediaCard(group, media, index)));
+  mediaGrid.replaceChildren(...payload.media.map((media, index) => renderMediaCard(group, media, index, groupNumber)));
   root.append(heading, resultsSummary, toolbar, recovery, groupStatus, groupError, unavailableWarning, mediaGrid);
 
   if (payload.unavailable_media_count > 0) {

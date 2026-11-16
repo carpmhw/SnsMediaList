@@ -1330,18 +1330,16 @@ def test_media_metadata_is_an_accessible_visual_overlay(page: Page, base_url: st
     expect(metadata).to_contain_text("平台")
     expect(metadata).to_contain_text("作者")
     expect(card.locator(".media-body .media-metadata")).to_have_count(0)
-    assert metadata.evaluate("element => getComputedStyle(element).opacity") == "0"
+    expect(metadata).to_have_css("opacity", "0")
 
     visual.hover()
-    page.wait_for_timeout(200)
-    assert metadata.evaluate("element => getComputedStyle(element).opacity") == "1"
+    expect(metadata).to_have_css("opacity", "1")
 
     card.locator(".media-selection").focus()
-    page.wait_for_timeout(200)
-    assert metadata.evaluate("element => getComputedStyle(element).opacity") == "1"
+    expect(metadata).to_have_css("opacity", "1")
 
     page.set_viewport_size({"width": 640, "height": 900})
-    assert metadata.evaluate("element => getComputedStyle(element).opacity") == "1"
+    expect(metadata).to_have_css("opacity", "1")
 
 
 def test_media_metadata_omits_invalid_values_and_formats_zero_duration(
@@ -1406,9 +1404,11 @@ def test_copy_filename_reports_success_and_failure_without_disabling_download(
     page.goto(base_url)
     page.fill("#post-url", "https://x.com/creator/status/1")
     page.click("#analyze-button")
-    page.get_by_role("button", name="複製檔名").click()
+    page.get_by_role("button", name="複製檔名，項目 01，第 1 組", exact=True).click()
     expect(page.locator(".copy-feedback")).to_have_text("已複製檔名")
-    expect(page.get_by_role("button", name="複製檔名")).to_be_enabled()
+    expect(
+        page.get_by_role("button", name="複製檔名，項目 01，第 1 組", exact=True)
+    ).to_be_enabled()
     assert page.locator(".download-action").is_enabled()
 
     page.evaluate(
@@ -1416,7 +1416,7 @@ def test_copy_filename_reports_success_and_failure_without_disabling_download(
           navigator.clipboard.writeText = () => Promise.reject(new Error('clipboard denied'));
         }"""
     )
-    page.get_by_role("button", name="複製檔名").click()
+    page.get_by_role("button", name="複製檔名，項目 01，第 1 組", exact=True).click()
     expect(page.locator(".copy-feedback")).to_have_text("無法複製檔名")
     assert page.locator(".download-action").is_enabled()
 
@@ -1740,8 +1740,8 @@ def test_group_recovery_blocks_other_starts_until_a_mapped_error(page: Page, bas
         page.goto(base_url)
         page.fill("#post-url", "https://x.com/creator/status/1")
         page.click("#analyze-button")
-        page.get_by_role("button", name="下載", exact=True).click()
-        page.get_by_role("button", name="重新分析此項").click()
+        page.get_by_role("button", name="下載項目 01，第 1 組", exact=True).click()
+        page.get_by_role("button", name="重新分析此項，第 1 組", exact=True).click()
         wait_for_condition(page, lambda: len(recovery_server.requests) == 1)
 
         expect(page.locator("#analyze-button")).to_be_disabled()
@@ -2037,8 +2037,8 @@ def test_reanalyzing_one_batch_group_preserves_another_group(page: Page, base_ur
     groups = page.locator(".result-group")
     expect(groups).to_have_count(2)
     groups.nth(1).locator(".media-selection").check()
-    groups.nth(0).get_by_role("button", name="下載", exact=True).click()
-    groups.nth(0).get_by_role("button", name="重新分析此項").click()
+    groups.nth(0).get_by_role("button", name="下載項目 01，第 1 組", exact=True).click()
+    groups.nth(0).get_by_role("button", name="重新分析此項，第 1 組", exact=True).click()
 
     expect(groups.nth(0).locator(".post-description")).to_have_text("Refreshed A")
     expect(groups.nth(0).locator(".selection-summary")).to_contain_text("0 / 1")
@@ -2069,8 +2069,8 @@ def test_group_recovery_is_hidden_until_a_token_failure(
 
     group = page.locator(".result-group")
     expect(group.locator(".group-recovery .re-analyze")).to_have_count(0)
-    group.get_by_role("button", name="下載", exact=True).click()
-    expect(group.get_by_role("button", name="重新分析此項")).to_be_visible()
+    group.get_by_role("button", name="下載項目 01，第 1 組", exact=True).click()
+    expect(group.get_by_role("button", name="重新分析此項，第 1 組", exact=True)).to_be_visible()
 
 
 def test_group_recovery_replaces_only_target_clears_its_selection_and_does_not_rerun_batch(
@@ -2109,8 +2109,8 @@ def test_group_recovery_replaces_only_target_clears_its_selection_and_does_not_r
     expect(groups).to_have_count(2)
     groups.nth(0).locator(".media-selection").check()
     groups.nth(1).locator(".media-selection").check()
-    groups.nth(1).get_by_role("button", name="下載", exact=True).click()
-    groups.nth(1).get_by_role("button", name="重新分析此項").click()
+    groups.nth(1).get_by_role("button", name="下載項目 01，第 2 組", exact=True).click()
+    groups.nth(1).get_by_role("button", name="重新分析此項，第 2 組", exact=True).click()
 
     expect(groups.nth(1).locator(".post-description")).to_have_text("Refreshed B")
     expect(groups.nth(1).locator(".selection-summary")).to_contain_text("0 / 1")
@@ -2157,8 +2157,8 @@ def test_failed_group_recovery_keeps_other_batch_groups_available(
     groups = page.locator(".result-group")
     expect(groups).to_have_count(2)
     groups.nth(1).locator(".media-selection").check()
-    groups.nth(0).get_by_role("button", name="下載", exact=True).click()
-    groups.nth(0).get_by_role("button", name="重新分析此項").click()
+    groups.nth(0).get_by_role("button", name="下載項目 01，第 1 組", exact=True).click()
+    groups.nth(0).get_by_role("button", name="重新分析此項，第 1 組", exact=True).click()
 
     expect(page.locator("#status")).to_contain_text("平台回應時間過長")
     expect(groups).to_have_count(2)
@@ -2209,8 +2209,8 @@ def test_failed_group_recovery_shows_a_safe_error_in_only_the_target_group(
     )
     expect(groups.nth(0).locator(".results-summary")).to_contain_text("1 個媒體項目")
     expect(groups.nth(0).locator(".warning")).to_contain_text("1 個媒體項目無法")
-    groups.nth(0).get_by_role("button", name="下載", exact=True).click()
-    groups.nth(0).get_by_role("button", name="重新分析此項").click()
+    groups.nth(0).get_by_role("button", name="下載項目 01，第 1 組", exact=True).click()
+    groups.nth(0).get_by_role("button", name="重新分析此項，第 1 組", exact=True).click()
 
     expect(groups.nth(0).locator(".group-error")).to_contain_text("平台回應時間過長")
     expect(groups.nth(0).locator(".group-error")).not_to_contain_text("hidden raw detail")
@@ -2287,8 +2287,8 @@ def test_stale_preview_after_group_replacement_cannot_mutate_other_groups(
     groups = page.locator(".result-group")
     expect(groups).to_have_count(2)
     wait_for_condition(page, lambda: preview_server.attempts_for(old_preview) == 1)
-    groups.nth(0).get_by_role("button", name="下載", exact=True).click()
-    groups.nth(0).get_by_role("button", name="重新分析此項").click()
+    groups.nth(0).get_by_role("button", name="下載項目 01，第 1 組", exact=True).click()
+    groups.nth(0).get_by_role("button", name="重新分析此項，第 1 組", exact=True).click()
     expect(groups.nth(0).locator(".post-description")).to_have_text("Refreshed Group A")
     wait_for_condition(page, lambda: preview_server.attempts_for("group-b-preview") == 1)
     preview_server.release.set()
