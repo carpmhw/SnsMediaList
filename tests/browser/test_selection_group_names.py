@@ -100,6 +100,13 @@ def test_selection_group_name_survives_recovery_and_resets_for_single(
     """原地復原仍是第二組操作區，單筆取代後不留舊組號或選取。"""
     page = engine_page
     calls = open_groups(page, base_url, 2)
+    page.locator("#next-result-group").click()
+    expect(page.locator("#result-group-position")).to_have_text("第 2/2 組")
+    selected = page.get_by_role("checkbox", name="選取項目 01 第 2 組", exact=True)
+    selected.check()
+    expect(selected).to_be_checked()
+    second = page.get_by_role("group", name="媒體選取操作，第 2 組", exact=True)
+    expect(second.locator(".selection-summary")).to_have_text("1 / 1 已選取")
 
     def expired(route: Route) -> None:
         """僅提供合成過期回應，使用既有群組復原流程。"""
@@ -111,6 +118,7 @@ def test_selection_group_name_survives_recovery_and_resets_for_single(
     expect(page.get_by_role("button", name="重新分析此項，第 2 組", exact=True)).to_have_count(0)
     second = page.get_by_role("group", name="媒體選取操作，第 2 組", exact=True)
     expect(second.locator(".selection-summary")).to_have_text("0 / 1 已選取")
+    expect(selected).not_to_be_checked()
     expect(second.get_by_role("button", name="下載選取項目", exact=True)).to_be_disabled()
     page.locator("#single-mode-button").click()
     page.locator("#post-url").fill("https://x.com/creator/status/3")

@@ -46,17 +46,38 @@ def test_navigation_obeys_motion_preference(
     calls = open_groups(page, base_url, 2)
     track = page.locator("#result-groups")
     expect(track).to_have_css("scroll-behavior", "auto" if motion == "reduce" else "smooth")
-    residual: float = page.locator("#next-result-group").evaluate(
-        """/** 觸發原生 click 並立即量測目標，不 mock scrollIntoView 或等待動畫。 */
-        button => {
-          button.click();
+    movement = page.locator("#next-result-group").evaluate(
+        """/** 同回合啟動並取樣，避免兩次工具呼叫之間動畫已完成而漏掉中間幀。 */
+        async button => {
           const track = document.querySelector('#result-groups');
           const target = track.querySelectorAll('.result-group')[1];
-          return Math.abs(target.getBoundingClientRect().left - track.getBoundingClientRect().left);
+          const destination = target.offsetLeft - track.querySelector('.result-group').offsetLeft;
+          button.click();
+          const residual = Math.abs(
+            target.getBoundingClientRect().left - track.getBoundingClientRect().left);
+          const positions = [track.scrollLeft];
+          if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
+            const deadline = performance.now() + 3000;
+            while (performance.now() < deadline) {
+              await new Promise(
+                /** 每幀只觀察真實scrollLeft，不替換捲動API。 */ resolve =>
+                  requestAnimationFrame(resolve));
+              positions.push(track.scrollLeft);
+              if (Math.abs(target.getBoundingClientRect().left
+                - track.getBoundingClientRect().left) < 1) break;
+            }
+          }
+          return { residual, positions, destination };
         }"""
     )
     if motion == "reduce":
-        assert residual < 1
+        assert movement["residual"] < 1
+    else:
+        assert movement["residual"] > 1
+        positions = movement["positions"]
+        destination = movement["destination"]
+        assert any(1 < position < destination - 1 for position in positions), positions
+        assert abs(positions[-1] - destination) < 1, positions
     page.wait_for_function(
         """/** 一般偏好可等待動畫，但最終必須真正到達第二組。 */ () => {
           const track = document.querySelector('#result-groups');

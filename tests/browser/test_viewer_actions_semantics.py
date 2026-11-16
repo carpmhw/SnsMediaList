@@ -1,7 +1,7 @@
 """驗證原始媒體檢視器操作群組與既有原生鍵盤行為。"""
 
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Download, Page, Route, expect
 
 from tests.browser import test_media_viewer as viewer_workflow
 from tests.browser import test_playwright_workflow as workflow
@@ -20,6 +20,20 @@ def test_viewer_named_actions_preserve_native_keyboard(
     """命名群組保留逐項Tab、原生啟動與checkbox同步，不引入toolbar策略。"""
     page = engine_page
     page.set_viewport_size({"width": width, "height": 900})
+    attachments: list[str] = []
+    downloads: list[str] = []
+
+    def attachment(route: Route) -> None:
+        """獨立攔截download端點，不能從view請求紀錄推論零附件。"""
+        attachments.append(route.request.method)
+        route.fulfill(status=204)
+
+    def downloaded(download: Download) -> None:
+        """另觀察瀏覽器原生下載事件，避免只查fetch或媒體請求。"""
+        downloads.append(download.url)
+
+    page.route("**/api/media/*/download", attachment)
+    page.on("download", downloaded)
     calls = viewer_workflow.open_results(page, base_url)
     opener = page.locator(".media-view").first
     opener.focus()
@@ -62,3 +76,5 @@ def test_viewer_named_actions_preserve_native_keyboard(
     expect(page.locator(".media-selection").nth(1)).not_to_be_checked()
     expect(page.locator(".selection-summary")).to_have_text("1 / 2 已選取")
     assert all(url.endswith("/view") for _, url in calls)
+    assert attachments == []
+    assert downloads == []

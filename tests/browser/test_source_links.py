@@ -20,6 +20,7 @@ def test_source_links_distinguish_groups_and_open_native_new_page(
     """連結清單可分辨群組，Enter 開原來源且維持 opener／referrer 隔離。"""
     page = engine_page
     page.set_viewport_size({"width": width, "height": 900})
+    page.emulate_media(reduced_motion="reduce")
     calls = open_groups(page, base_url, 2)
     for index, source in enumerate(calls, 1):
         link = page.get_by_role("link", name=f"開啟原始內容（新分頁），第 {index} 組", exact=True)
@@ -50,6 +51,25 @@ def test_source_links_distinguish_groups_and_open_native_new_page(
         "/** 新提示文字不應造成頁面水平溢出。 */ "
         "() => document.documentElement.scrollWidth <= innerWidth"
     )
+    page.locator("#previous-result-group").click()
+    expect(page.locator("#result-group-position")).to_have_text("第 1/2 組")
+    for index in (1, 2):
+        if index == 2:
+            page.locator("#next-result-group").click()
+            expect(page.locator("#result-group-position")).to_have_text("第 2/2 組")
+        link = page.get_by_role("link", name=f"開啟原始內容（新分頁），第 {index} 組", exact=True)
+        assert link.evaluate(
+            """/** 逐組量測連結四邊，避免整頁未溢出卻被軌道裁切。 */ el => {
+              const track = document.querySelector('#result-groups');
+              const outer = track.getBoundingClientRect();
+              const box = el.getBoundingClientRect();
+              const left = outer.left + track.clientLeft;
+              const top = outer.top + track.clientTop;
+              return box.width > 0 && box.height > 0
+                && box.left >= left - 1 && box.right <= left + track.clientWidth + 1
+                && box.top >= top - 1 && box.bottom <= top + track.clientHeight + 1;
+            }"""
+        )
 
 
 @pytest.mark.parametrize("engine_page", ["chromium", "firefox"], indirect=True)
@@ -90,3 +110,40 @@ def test_source_link_group_number_survives_recovery_and_resets_for_single(
         "https://x.com/creator/status/2",
         "https://x.com/creator/status/3",
     ]
+
+
+@pytest.mark.parametrize("engine_page", ["chromium", "firefox"], indirect=True)
+def test_first_successful_source_after_failure_starts_at_group_one(
+    engine_page: Page, base_url: str
+) -> None:
+    """失敗queue項目不佔結果組號，後續成功來源的連結從第一組開始。"""
+    page = engine_page
+    calls: list[str] = []
+
+    def respond(route: Route) -> None:
+        """第一來源合成失敗，第二來源提供完整成功payload。"""
+        source = route.request.post_data_json["url"]
+        calls.append(source)
+        if source.endswith("/1"):
+            route.fulfill(status=502, json={"code": "extraction_failed"})
+        else:
+            route.fulfill(json={**workflow.SUCCESS_PAYLOAD, "post_url": source})
+
+    page.route("**/api/extractions", respond)
+    page.goto(base_url)
+    page.locator("#batch-mode-button").click()
+    page.locator("#batch-post-urls").fill(
+        "https://x.com/creator/status/1\nhttps://x.com/creator/status/2"
+    )
+    page.locator("#analyze-batch-button").click()
+    expect(page.locator(".result-group")).to_have_count(1)
+    expect(page.locator("#analyze-batch-button")).to_be_enabled()
+    expect(page.locator(".queue-item-state").nth(0)).to_have_text("失敗")
+    expect(page.locator(".queue-item-state").nth(1)).to_have_text("成功")
+    expect(
+        page.get_by_role("link", name="開啟原始內容（新分頁），第 1 組", exact=True)
+    ).to_have_attribute("href", "https://x.com/creator/status/2")
+    expect(
+        page.get_by_role("link", name="開啟原始內容（新分頁），第 2 組", exact=True)
+    ).to_have_count(0)
+    assert calls == ["https://x.com/creator/status/1", "https://x.com/creator/status/2"]

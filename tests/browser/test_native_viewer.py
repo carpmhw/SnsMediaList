@@ -1,7 +1,7 @@
 """驗證原生 dialog 的預設鍵盤路徑及既有背景隔離。"""
 
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Page, Route, expect
 
 from tests.browser import test_media_viewer as viewer_workflow
 from tests.browser import test_playwright_workflow as workflow
@@ -105,3 +105,122 @@ def test_modal_and_backdrop_are_scroll_containers(
     expect(page.locator("#viewer-next")).to_be_in_viewport()
     page.locator("#viewer-close").click()
     expect(dialog).to_be_hidden()
+
+
+@pytest.mark.parametrize("engine_page", ["chromium", "firefox"], indirect=True)
+@pytest.mark.parametrize("stage", ["HEAD", "GET"])
+def test_pending_original_keeps_native_tab_and_escape_cleanup(
+    engine_page: Page, base_url: str, stage: str
+) -> None:
+    """等待授權或原圖時不攔Tab；Esc取消signal且晚到回應不重建媒體。"""
+    page = engine_page
+    calls = viewer_workflow.open_results(page, base_url)
+    held: list[Route] = []
+
+    def hold(route: Route) -> None:
+        """只延後目標網路階段，不替換真正fetch或媒體載入生命週期。"""
+        if route.request.method == stage:
+            held.append(route)
+            page.evaluate(
+                "/** 標示受控網路邊界已到達。 */ () => { window.originalWaiting = true; }"
+            )
+        else:
+            route.fulfill(status=204)
+
+    page.route("**/api/media/first/view", hold)
+    page.evaluate(
+        """/** 保留真正fetch，只觀察傳入的取消signal與鍵盤事件。 */ () => {
+          const nativeFetch = window.fetch;
+          window.fetch = /** 透傳原始請求並保存signal供取消驗證。 */ (url, options) => {
+            if (String(url).endsWith('/view')) window.originalSignal = options.signal;
+            return nativeFetch(url, options);
+          };
+          document.querySelector('#media-viewer').addEventListener('keydown',
+            /** 在產品handler之後觀察是否攔截原生Tab。 */ event => {
+              if (event.key === 'Tab') window.pendingTabPrevented = event.defaultPrevented;
+            });
+        }"""
+    )
+    opener = page.locator(".media-view").first
+    opener.click()
+    page.wait_for_function(
+        "/** 等待網路真正進入指定階段。 */ () => window.originalWaiting === true"
+    )
+    assert len(held) == 1
+    expect(page.locator("#viewer-message")).to_contain_text("正在載入")
+    page.locator("#viewer-close").press("Tab")
+    expect(page.locator("#viewer-next")).to_be_focused()
+    assert page.evaluate("/** 原生Tab未被取消。 */ () => window.pendingTabPrevented") is False
+    page.locator("#post-url").evaluate("/** 背景仍由原生modal隔離。 */ el => el.focus()")
+    expect(page.locator("#viewer-next")).to_be_focused()
+    if stage == "GET":
+        page.locator("#viewer-content img").evaluate(
+            "/** 保留原節點及晚到callback，驗證清理不依賴成功載入。 */ node => {"
+            " window.waitingImage = node; window.waitingLoad = node.onload; }"
+        )
+    page.keyboard.press("Escape")
+    expect(page.locator("#media-viewer")).to_be_hidden()
+    expect(opener).to_be_focused()
+    assert page.evaluate(
+        "/** Esc必須取消真正fetch的signal。 */ () => window.originalSignal.aborted"
+    )
+    held[0].fulfill(status=204 if stage == "HEAD" else 200, body=b"")
+    if stage == "GET":
+        page.evaluate("/** 主動送出保存的晚到成功callback。 */ () => window.waitingLoad()")
+        assert page.evaluate(
+            "/** 已釋放圖片不能仍帶來源或留在文件中。 */ "
+            "() => !window.waitingImage.isConnected && !window.waitingImage.hasAttribute('src')"
+        )
+    expect(page.locator("#viewer-content img, #viewer-content video")).to_have_count(0)
+    expect(page.locator("#viewer-size")).to_be_disabled()
+    assert page.evaluate("/** 清理後還原背景捲動。 */ () => document.body.style.overflow") == ""
+    assert calls == []
+
+
+@pytest.mark.parametrize("engine_page", ["chromium", "firefox"], indirect=True)
+def test_escape_stops_playing_original_video(engine_page: Page, base_url: str) -> None:
+    """真正播放後以Esc關閉，舊播放器必須暫停、解除來源且不載入下一則。"""
+    page = engine_page
+    calls = viewer_workflow.open_results(page, base_url, video=True)
+    opener = page.locator(".media-view").first
+    opener.click()
+    page.locator("#viewer-play").click()
+    page.wait_for_function(
+        "/** 先證明真正解碼且播放時間已前進。 */ "
+        "() => document.querySelector('#viewer-content video')?.currentTime > 0.1"
+    )
+    assert page.locator("#viewer-content video").evaluate(
+        "/** 保存真正播放中的節點而不是替身。 */ node => {"
+        " window.escapedVideo = node; return !node.paused && node.videoWidth === 320; }"
+    )
+    page.keyboard.press("Escape")
+    expect(page.locator("#media-viewer")).to_be_hidden()
+    expect(opener).to_be_focused()
+    assert page.evaluate(
+        "/** 關閉後播放器不可繼續播放或保留來源。 */ () => "
+        "window.escapedVideo.paused && !window.escapedVideo.hasAttribute('src')"
+        " && !window.escapedVideo.isConnected"
+    )
+    expect(page.locator("#viewer-content video")).to_have_count(0)
+    assert all("/first/view" in url for _, url in calls)
+    assert any(method == "GET" for method, _ in calls)
+
+
+@pytest.mark.parametrize("engine_page", ["chromium", "firefox"], indirect=True)
+def test_viewer_checkbox_arrows_do_not_navigate(engine_page: Page, base_url: str) -> None:
+    """checkbox接收左右鍵不切媒體也不失焦，Space仍同步卡片選取。"""
+    page = engine_page
+    viewer_workflow.open_results(page, base_url)
+    page.locator(".media-view").first.click()
+    selected = page.locator("#viewer-selected")
+    selected.focus()
+    selected.press("ArrowRight")
+    expect(page.locator("#viewer-position")).to_have_text("1 / 2")
+    selected.press("ArrowLeft")
+    expect(page.locator("#viewer-position")).to_have_text("1 / 2")
+    expect(selected).to_be_focused()
+    expect(selected).not_to_be_checked()
+    selected.press("Space")
+    expect(selected).to_be_checked()
+    expect(page.locator(".media-selection").first).to_be_checked()
+    expect(page.locator(".media-selection").nth(1)).not_to_be_checked()
