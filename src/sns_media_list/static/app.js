@@ -687,12 +687,12 @@ function renderMediaCard(group, media, index, groupNumber) {
   return card;
 }
 
-/** 建立群組本地操作區，將非互動進度條關聯至同組可見詳情。 */
-function createSelectionToolbar(group) {
+/** 依群組編號命名本地操作區，保留原生控制與進度詳情關聯。 */
+function createSelectionToolbar(group, groupNumber) {
   const toolbar = document.createElement('div');
   toolbar.className = 'selection-toolbar';
   toolbar.setAttribute('role', 'group');
-  toolbar.setAttribute('aria-label', '媒體選取操作');
+  toolbar.setAttribute('aria-label', `媒體選取操作，第 ${groupNumber} 組`);
   const actions = [
     ['全選', () => true],
     ['取消全選', () => false],
@@ -1177,7 +1177,7 @@ function renderResults(payload, isSingleResult = false, existingGroup = null) {
   }
   details.append(kicker, platformLabel, title, postDescription);
   heading.append(details, sourceLink);
-  const toolbar = createSelectionToolbar(group);
+  const toolbar = createSelectionToolbar(group, groupNumber);
   const recovery = document.createElement('div');
   recovery.className = 'group-recovery';
   const groupStatus = document.createElement('p');

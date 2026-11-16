@@ -48,7 +48,7 @@ def test_named_selection_group_preserves_native_keyboard_actions(
     """命名動作群組不冒充composite toolbar，Tab與一次性選取動作保持原生。"""
     page = engine_page
     viewer_workflow.open_results(page, base_url)
-    group = page.get_by_role("group", name="媒體選取操作", exact=True)
+    group = page.get_by_role("group", name="媒體選取操作，第 1 組", exact=True)
     expect(group).to_be_visible()
     select_all = group.get_by_role("button", name="全選", exact=True)
     select_all.focus()
@@ -82,17 +82,19 @@ def test_selection_groups_stay_independent(
     page = engine_page
     page.emulate_media(reduced_motion="reduce")
     calls = open_groups(page, base_url, 2)
-    groups = page.get_by_role("group", name="媒體選取操作", exact=True)
-    expect(groups).to_have_count(2)
-    groups.nth(0).get_by_role("button", name="全選", exact=True).press("Enter")
-    expect(groups.nth(0).locator(".selection-summary")).to_have_text("1 / 1 已選取")
-    expect(groups.nth(1).locator(".selection-summary")).to_have_text("0 / 1 已選取")
+    first = page.get_by_role("group", name="媒體選取操作，第 1 組", exact=True)
+    second = page.get_by_role("group", name="媒體選取操作，第 2 組", exact=True)
+    expect(first).to_have_count(1)
+    expect(second).to_have_count(1)
+    first.get_by_role("button", name="全選", exact=True).press("Enter")
+    expect(first.locator(".selection-summary")).to_have_text("1 / 1 已選取")
+    expect(second.locator(".selection-summary")).to_have_text("0 / 1 已選取")
     page.locator("#next-result-group").click()
-    groups.nth(1).get_by_role("button", name="全選", exact=True).press("Space")
-    expect(groups.nth(1).locator(".selection-summary")).to_have_text("1 / 1 已選取")
-    groups.nth(1).get_by_role("button", name="取消全選", exact=True).press("Enter")
-    expect(groups.nth(0).locator(".selection-summary")).to_have_text("1 / 1 已選取")
-    expect(groups.nth(1).locator(".selection-summary")).to_have_text("0 / 1 已選取")
+    second.get_by_role("button", name="全選", exact=True).press("Space")
+    expect(second.locator(".selection-summary")).to_have_text("1 / 1 已選取")
+    second.get_by_role("button", name="取消全選", exact=True).press("Enter")
+    expect(first.locator(".selection-summary")).to_have_text("1 / 1 已選取")
+    expect(second.locator(".selection-summary")).to_have_text("0 / 1 已選取")
     assert len(calls) == 2
     assert download_request_methods == []
     expect(page.locator("#media-viewer")).to_be_hidden()
