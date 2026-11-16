@@ -48,7 +48,7 @@ def test_non_hover_metadata_is_visible_before_any_card_interaction(
     expect(metadata).to_have_css("opacity", "1")
     expect(metadata).to_contain_text("1200 × 800")
     expect(metadata).to_contain_text("image-1.png")
-    checkbox = card.get_by_role("checkbox", name="選取項目 01", exact=True)
+    checkbox = card.get_by_role("checkbox", name="選取項目 01 第 1 組", exact=True)
     checkbox.tap()
     expect(checkbox).to_be_checked()
     expect(page.locator(".selection-summary")).to_have_text("1 / 2 已選取")

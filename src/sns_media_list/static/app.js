@@ -598,7 +598,7 @@ function pumpPreviewQueue() {
   entry.image.src = entry.url;
 }
 
-/** 建立來源順序卡片，讓個別下載依項目及群組編號命名。 */
+/** 建立來源順序卡片，讓選取與操作依項目及群組編號命名。 */
 function renderMediaCard(group, media, index, groupNumber) {
   const card = document.createElement('article');
   card.className = 'media-card';
@@ -650,7 +650,10 @@ function renderMediaCard(group, media, index, groupNumber) {
     }
     updateSelectionUi(group);
   });
-  selectionLabel.append(selection, document.createTextNode(`選取項目 ${String(index + 1).padStart(2, '0')}`));
+  const selectionGroup = document.createElement('span');
+  selectionGroup.className = 'visually-hidden';
+  selectionGroup.textContent = ` 第 ${groupNumber} 組`;
+  selectionLabel.append(selection, document.createTextNode(`選取項目 ${String(index + 1).padStart(2, '0')}`), selectionGroup);
   visual.append(selectionLabel);
 
   const body = document.createElement('div');
@@ -1148,6 +1151,10 @@ function renderResults(payload, isSingleResult = false, existingGroup = null) {
   const groupNumber = existingGroup
     ? Array.from(resultGroups.children).indexOf(root) + 1
     : resultGroups.children.length + 1;
+  const headingGroup = document.createElement('span');
+  headingGroup.className = 'visually-hidden';
+  headingGroup.textContent = ` 第 ${groupNumber} 組`;
+  title.append(headingGroup);
   sourceLink.setAttribute('aria-label', `${sourceLink.textContent}，第 ${groupNumber} 組`);
   sourceLink.href = payload.post_url;
   const resultsSummary = document.createElement('p');

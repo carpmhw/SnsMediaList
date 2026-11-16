@@ -54,7 +54,7 @@ def test_failed_preview_preserves_selected_focused_control_and_advances_queue(
     with page.expect_request("**/api/media/preview-0/preview"):
         page.locator("#analyze-button").click()
     first = page.locator(".media-card").first
-    checkbox = first.get_by_role("checkbox", name="選取項目 01", exact=True)
+    checkbox = first.get_by_role("checkbox", name="選取項目 01 第 1 組", exact=True)
     checkbox.check()
     checkbox.focus()
     checkbox.evaluate(

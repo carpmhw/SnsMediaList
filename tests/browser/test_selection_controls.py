@@ -22,13 +22,13 @@ def test_selection_label_has_touch_target_and_native_name(
     page.set_viewport_size({"width": width, "height": 900})
     viewer_workflow.open_results(page, base_url)
     label = page.locator(".media-selection-label").first
-    checkbox = page.get_by_role("checkbox", name="選取項目 01", exact=True)
+    checkbox = page.get_by_role("checkbox", name="選取項目 01 第 1 組", exact=True)
     bounds = label.bounding_box()
     assert bounds and bounds["height"] >= 44 and bounds["width"] >= 44
     assert checkbox.get_attribute("aria-label") is None
     assert checkbox.evaluate(
-        "/** 名稱由原生包覆label提供，且文字與可見標籤一致。 */ el => "
-        "el.labels.length === 1 && el.labels[0].textContent.trim() === '選取項目 01'"
+        "/** 名稱仍由原生label提供，含可見項目文字及輔助群組上下文。 */ el => "
+        "el.labels.length === 1 && el.labels[0].textContent.trim() === '選取項目 01 第 1 組'"
     )
     label.click(position={"x": bounds["width"] - 3, "y": 3})
     expect(checkbox).to_be_checked()

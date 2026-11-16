@@ -711,6 +711,10 @@ button:where(:hover:not(:disabled)) {
   margin-bottom: 8px;
 }
 
+.results-heading h2 {
+  position: relative;
+}
+
 .results-heading .eyebrow {
   margin-bottom: 9px;
 }
