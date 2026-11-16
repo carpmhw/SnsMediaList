@@ -1741,7 +1741,7 @@ def test_group_recovery_blocks_other_starts_until_a_mapped_error(page: Page, bas
         page.fill("#post-url", "https://x.com/creator/status/1")
         page.click("#analyze-button")
         page.get_by_role("button", name="下載項目 01，第 1 組", exact=True).click()
-        page.get_by_role("button", name="重新分析此項").click()
+        page.get_by_role("button", name="重新分析此項，第 1 組", exact=True).click()
         wait_for_condition(page, lambda: len(recovery_server.requests) == 1)
 
         expect(page.locator("#analyze-button")).to_be_disabled()
@@ -2038,7 +2038,7 @@ def test_reanalyzing_one_batch_group_preserves_another_group(page: Page, base_ur
     expect(groups).to_have_count(2)
     groups.nth(1).locator(".media-selection").check()
     groups.nth(0).get_by_role("button", name="下載項目 01，第 1 組", exact=True).click()
-    groups.nth(0).get_by_role("button", name="重新分析此項").click()
+    groups.nth(0).get_by_role("button", name="重新分析此項，第 1 組", exact=True).click()
 
     expect(groups.nth(0).locator(".post-description")).to_have_text("Refreshed A")
     expect(groups.nth(0).locator(".selection-summary")).to_contain_text("0 / 1")
@@ -2070,7 +2070,7 @@ def test_group_recovery_is_hidden_until_a_token_failure(
     group = page.locator(".result-group")
     expect(group.locator(".group-recovery .re-analyze")).to_have_count(0)
     group.get_by_role("button", name="下載項目 01，第 1 組", exact=True).click()
-    expect(group.get_by_role("button", name="重新分析此項")).to_be_visible()
+    expect(group.get_by_role("button", name="重新分析此項，第 1 組", exact=True)).to_be_visible()
 
 
 def test_group_recovery_replaces_only_target_clears_its_selection_and_does_not_rerun_batch(
@@ -2110,7 +2110,7 @@ def test_group_recovery_replaces_only_target_clears_its_selection_and_does_not_r
     groups.nth(0).locator(".media-selection").check()
     groups.nth(1).locator(".media-selection").check()
     groups.nth(1).get_by_role("button", name="下載項目 01，第 2 組", exact=True).click()
-    groups.nth(1).get_by_role("button", name="重新分析此項").click()
+    groups.nth(1).get_by_role("button", name="重新分析此項，第 2 組", exact=True).click()
 
     expect(groups.nth(1).locator(".post-description")).to_have_text("Refreshed B")
     expect(groups.nth(1).locator(".selection-summary")).to_contain_text("0 / 1")
@@ -2158,7 +2158,7 @@ def test_failed_group_recovery_keeps_other_batch_groups_available(
     expect(groups).to_have_count(2)
     groups.nth(1).locator(".media-selection").check()
     groups.nth(0).get_by_role("button", name="下載項目 01，第 1 組", exact=True).click()
-    groups.nth(0).get_by_role("button", name="重新分析此項").click()
+    groups.nth(0).get_by_role("button", name="重新分析此項，第 1 組", exact=True).click()
 
     expect(page.locator("#status")).to_contain_text("平台回應時間過長")
     expect(groups).to_have_count(2)
@@ -2210,7 +2210,7 @@ def test_failed_group_recovery_shows_a_safe_error_in_only_the_target_group(
     expect(groups.nth(0).locator(".results-summary")).to_contain_text("1 個媒體項目")
     expect(groups.nth(0).locator(".warning")).to_contain_text("1 個媒體項目無法")
     groups.nth(0).get_by_role("button", name="下載項目 01，第 1 組", exact=True).click()
-    groups.nth(0).get_by_role("button", name="重新分析此項").click()
+    groups.nth(0).get_by_role("button", name="重新分析此項，第 1 組", exact=True).click()
 
     expect(groups.nth(0).locator(".group-error")).to_contain_text("平台回應時間過長")
     expect(groups.nth(0).locator(".group-error")).not_to_contain_text("hidden raw detail")
@@ -2288,7 +2288,7 @@ def test_stale_preview_after_group_replacement_cannot_mutate_other_groups(
     expect(groups).to_have_count(2)
     wait_for_condition(page, lambda: preview_server.attempts_for(old_preview) == 1)
     groups.nth(0).get_by_role("button", name="下載項目 01，第 1 組", exact=True).click()
-    groups.nth(0).get_by_role("button", name="重新分析此項").click()
+    groups.nth(0).get_by_role("button", name="重新分析此項，第 1 組", exact=True).click()
     expect(groups.nth(0).locator(".post-description")).to_have_text("Refreshed Group A")
     wait_for_condition(page, lambda: preview_server.attempts_for("group-b-preview") == 1)
     preview_server.release.set()

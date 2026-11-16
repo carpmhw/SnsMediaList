@@ -506,7 +506,9 @@ def test_item_failures_continue_but_cleanup_failure_stops(
         assert methods[-2:] == ["HEAD:second", "GET:second"]
         assert page.evaluate("window.files['media-1.jpg'].bytes") == [111, 107]
         if failure == "expired":
-            expect(page.get_by_role("button", name="重新分析此項")).to_be_visible()
+            expect(
+                page.get_by_role("button", name="重新分析此項，第 1 組", exact=True)
+            ).to_be_visible()
             assert methods == ["HEAD:first", "HEAD:second", "GET:second"]
         elif failure == "http":
             assert page.evaluate("'media-0.jpg' in window.files") is False
@@ -558,7 +560,7 @@ def test_in_place_reanalysis_cancels_old_writer(page: Page, base_url: str) -> No
 
     page.route("**/api/media/**/download", expire)
     page.get_by_role("button", name="下載選取項目").click()
-    recovery = page.get_by_role("button", name="重新分析此項")
+    recovery = page.get_by_role("button", name="重新分析此項，第 1 組", exact=True)
     expect(recovery).to_be_visible()
     page.unroute("**/api/media/**/download", expire)
     page.evaluate(SINK_SETUP, {"hold": "write"})
@@ -626,7 +628,7 @@ def test_stop_preserves_earlier_expired_token_recovery(page: Page, base_url: str
     expect(page.get_by_role("button", name="下載選取項目")).to_be_enabled()
     expect(page.locator(".download-summary")).to_contain_text("已停止")
     expect(page.locator(".download-summary")).to_contain_text("失敗 1，未處理 1")
-    expect(page.get_by_role("button", name="重新分析此項")).to_be_visible()
+    expect(page.get_by_role("button", name="重新分析此項，第 1 組", exact=True)).to_be_visible()
 
 
 @pytest.mark.parametrize("folder", [False, True], ids=["native", "folder"])

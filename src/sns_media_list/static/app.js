@@ -1057,7 +1057,7 @@ async function downloadSelectedMedia(group) {
   }
 }
 
-/** 顯示僅屬於指定群組的安全 token recovery 操作。 */
+/** 依結果群組編號命名安全 token 復原操作，不更動復原流程。 */
 function offerGroupRecovery(group) {
   group.recovery.replaceChildren();
   const message = document.createElement('p');
@@ -1066,6 +1066,8 @@ function offerGroupRecovery(group) {
   button.type = 'button';
   button.className = 're-analyze';
   button.textContent = '重新分析此項';
+  const groupNumber = Array.from(resultGroups.children).indexOf(group.root) + 1;
+  button.setAttribute('aria-label', `重新分析此項，第 ${groupNumber} 組`);
   button.addEventListener('click', () => reAnalyzeGroup(group, button));
   group.recovery.append(message, button);
 }
