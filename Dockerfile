@@ -32,7 +32,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     XDG_CACHE_HOME=/tmp/app-home/cache
 
 RUN apk add --no-cache "ffmpeg=${FFMPEG_VERSION}" "pcre2=10.49-r0" \
-        "brotli-libs=1.2.1-r0" "libexpat=2.10.0-r0" "libx11=1.8.14-r0" \
+        "brotli-libs=1.2.1-r0" "krb5-libs=1.22.3-r0" \
+        "libexpat=2.10.0-r0" "libx11=1.8.14-r0" \
         "musl=1.2.6-r3" "musl-utils=1.2.6-r3" "zlib=1.4-r0" \
     && addgroup -S -g 10001 app \
     && adduser -S -D -H -u 10001 -G app -s /sbin/nologin app \

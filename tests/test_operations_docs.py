@@ -94,6 +94,7 @@ def test_alpine_runtime_remediation_documents_exact_build_and_revalidation() -> 
     dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
     for pin in (
         "brotli-libs=1.2.1-r0",
+        "krb5-libs=1.22.3-r0",
         "libexpat=2.10.0-r0",
         "libx11=1.8.14-r0",
         "musl=1.2.6-r3",
@@ -107,7 +108,7 @@ def test_alpine_runtime_remediation_documents_exact_build_and_revalidation() -> 
 
 
 def test_story_user_resolution_guidance_matches_production_command() -> None:
-    """確認 1.32.19 Story 解析說明與正式 command 一致且保留單次擷取限制。"""
+    """確認指定版本的 Story 解析說明與正式命令一致，且保留單次擷取限制。"""
     from sns_media_list.extractor.gallery_dl import build_gallery_command
 
     guide = (PROJECT_ROOT / "OPERATIONS.md").read_text(encoding="utf-8")
@@ -118,7 +119,7 @@ def test_story_user_resolution_guidance_matches_production_command() -> None:
         proxy_url="http://127.0.0.1:8765",
     )
     assert not any("user-strategy" in arg for arg in command)
-    assert "1.32.19" in section
+    assert "1.32.20" in section
     assert "extractor.instagram.user-strategy" not in section
     assert "已於 1.32.17 移除" in section
     assert "profile_id" in section
@@ -391,7 +392,7 @@ def test_operations_guide_documents_limited_story_video_compatibility() -> None:
     compatibility = guide.partition("## Instagram Extractor Compatibility")[2].partition("\n## ")[0]
 
     for required_text in (
-        "pinned `gallery-dl` 1.32.19",
+        "pinned `gallery-dl` 1.32.20",
         "不強制 `extractor.instagram.videos=merged`",
         "Instagram Post／Reel 繼續使用 merged",
         "同一 URL media record 的 top-level 非空 `video_url`",

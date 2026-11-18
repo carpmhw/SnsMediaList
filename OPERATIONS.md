@@ -428,7 +428,7 @@ docker compose -f docker-compose.yaml \
 
 ### Alpine runtime 修補與版本核對
 
-目前 runtime 沿用 Dockerfile 的 Python base immutable digest 與 Alpine 3.24 repository，僅以精確 APK pins 安裝修補：`brotli-libs=1.2.1-r0`、`libexpat=2.10.0-r0`、`libx11=1.8.14-r0`、`musl=1.2.6-r3`、`musl-utils=1.2.6-r3`、`zlib=1.4-r0`；FFmpeg `8.1.3-r0` 與既有 PCRE2 pin 亦由 Dockerfile 控制。Python lock、UV digest 及 hardening 不因此改變；不使用一般 `apk upgrade`、edge repository、漏洞忽略或新增例外取代修復。精確版本不可取得或相依衝突時停止建置，不自動切換 release 或放寬版本。
+目前 runtime 沿用 Dockerfile 的 Python base immutable digest 與 Alpine 3.24 repository，僅以精確 APK pins 安裝修補：`brotli-libs=1.2.1-r0`、`krb5-libs=1.22.3-r0`、`libexpat=2.10.0-r0`、`libx11=1.8.14-r0`、`musl=1.2.6-r3`、`musl-utils=1.2.6-r3`、`zlib=1.4-r0`；FFmpeg `8.1.3-r0` 與既有 PCRE2 pin 亦由 Dockerfile 控制。Python lock、UV digest 及 hardening 不因此改變；不使用一般 `apk upgrade`、edge repository、漏洞忽略或新增例外取代修復。精確版本不可取得或相依衝突時停止建置，不自動切換 release 或放寬版本。
 
 每個修補後 candidate 均須核對實際 APK inventory、`ffmpeg -version`、gallery-dl runtime、health 與容器限制，並對其 image ID／digest 重跑 security gate、container smoke、受限縮圖與媒體交付回歸；不得沿用修補前的掃描結果或其他 smoke image 作為該 candidate 通過的證據。FFmpeg notice 與 smoke 的版本檢查須同步維護，generated preview 仍預設關閉。
 
@@ -551,7 +551,7 @@ Stage 不改變公開錯誤；未提供時省略，無效值正規化為 `unknow
    ```
 
 2. **驗證 contract。** 執行 `uv run python scripts/verify_gallery_contract.py`，核對已安裝套件、`--resolve-json`、離線 DataJob 格式及 adapter；不使用真實 Cookie 作 fixture。
-3. **核對 Instagram Story 相容性。** 在 pinned `gallery-dl` 1.32.19 中，精確 Story 使用套件預設 video mode，不強制 `extractor.instagram.videos=merged`；Instagram Post／Reel 繼續使用 merged。`user-strategy` 已在 1.32.17 移除，精確 Story 的帳號解析改為個人頁 `profile_id` 加 `PolarisProfilePageContentQuery` GraphQL。若 Story URL event 是 `ytdl:` pseudo URL，adapter 僅在 validated Instagram Story context 中，將同一 URL media record 的 top-level 非空 `video_url` 作為 source 候選，再交由既有驗證流程處理。
+3. **核對 Instagram Story 相容性。** 在 pinned `gallery-dl` 1.32.20 中，精確 Story 使用套件預設 video mode，不強制 `extractor.instagram.videos=merged`；Instagram Post／Reel 繼續使用 merged。`user-strategy` 已在 1.32.17 移除，精確 Story 的帳號解析改為個人頁 `profile_id` 加 `PolarisProfilePageContentQuery` GraphQL。若 Story URL event 是 `ytdl:` pseudo URL，adapter 僅在 validated Instagram Story context 中，將同一 URL media record 的 top-level 非空 `video_url` 作為 source 候選，再交由既有驗證流程處理。
 4. **維持來源安全邊界。** `video_url` 搬移只是候選轉換，不是安全授權：既有 HTTPS URL 形狀檢查與 downstream host／port／DNS A／AAAA／IP／redirect／MIME／byte-limit 政策都必須通過。missing／unsafe source fail closed；不 unwrap `ytdl:`、不向其他 record／directory／queue／nested metadata 借 URL，也不新增 generic downloader 或 retry。
 5. **查官方 release notes。** 比對觀察到的行為與候選版本修正，再決定是否升級，不以版本更新本身宣稱修復。
 6. **驗證 candidate image。** 依[升級與 rollback](#升級與-rollback)及[自動化檢查](#自動化檢查)完成隔離驗證與 gate。
@@ -561,7 +561,7 @@ Stage 不改變公開錯誤；未提供時省略，無效值正規化為 `unknow
 
 ### Story GraphQL 靜態資源與 CONNECT proxy
 
-精確 Story 的帳號解析由 pinned gallery-dl 1.32.19 執行：先請求目標帳號的個人頁，從 `profile_id` 取得帳號 ID，再以 `PolarisProfilePageContentQuery` GraphQL 取得帳號資料。這是同一次受限 subprocess 內的解析，不是第二次擷取，也不加入匿名 preflight；若個人頁缺少 `profile_id` 或 GraphQL 失敗，套件回報固定 `NotFoundError("user")`，服務依 user-not-found 規則回 502。仍受既有總期限、HTTP timeout、retries=0、唯讀 Cookie 與 CONNECT proxy 政策限制。Post／Reel／X 不套用 Story 專用流程；`user-strategy` 已於 1.32.17 移除，不得再加回 command。個人頁或 GraphQL 也可能受平台、session 或限流影響，不能以流程存在本身證明恢復。
+精確 Story 的帳號解析由 pinned gallery-dl 執行：先請求目標帳號的個人頁，從 `profile_id` 取得帳號 ID，再以 `PolarisProfilePageContentQuery` GraphQL 取得帳號資料。這是同一次受限 subprocess 內的解析，不是第二次擷取，也不加入匿名 preflight；若個人頁缺少 `profile_id` 或 GraphQL 失敗，套件回報固定 `NotFoundError("user")`，服務依 user-not-found 規則回 502。仍受既有總期限、HTTP timeout、retries=0、唯讀 Cookie 與 CONNECT proxy 政策限制。Post／Reel／X 不套用 Story 專用流程；`user-strategy` 已於 1.32.17 移除，不得再加回 command。個人頁或 GraphQL 也可能受平台、session 或限流影響，不能以流程存在本身證明恢復。
 
 Pinned gallery-dl 的 Story 流程會先取得使用者資訊與頁面，再從 `static.cdninstagram.com` 讀取靜態 JavaScript，以尋找 GraphQL `doc_id`。Extractor 的精確 host 白名單包含此單一網域；不授權整個 `*.cdninstagram.com`，仍須通過 HTTPS CONNECT、443 port、完整 DNS A／AAAA 公開 IP 檢查與目的地 pinning。此授權用於擷取期間的靜態資源，不改變 preview／download 的媒體政策或 Cookie 邊界。
 
