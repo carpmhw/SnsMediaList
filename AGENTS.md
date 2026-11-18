@@ -2,7 +2,7 @@
 
 本文件提供在此儲存庫工作的 AI coding agent 專案背景、修改原則與驗證方式。所有指令均在儲存庫根目錄執行。
 
-本指南檔名為 `AGENTS.md`，適用於整個儲存庫。套件版本、設定預設值與映像 digest 分別以 `pyproject.toml`／`uv.lock`、`config.py`、`Dockerfile`／Compose 為準；操作細節以 `OPERATIONS.md` 為入口，避免在本指南重複維護易過期的版本與部署紀錄。
+本指南適用於整個儲存庫。套件版本、設定預設值與映像 digest 分別以 `pyproject.toml`／`uv.lock`、`config.py`、`Dockerfile`／Compose 為準；操作細節以 `OPERATIONS.md` 為入口，避免在本指南重複維護易過期的版本與部署紀錄。
 
 ## 1. 溝通與程式規範
 
@@ -20,7 +20,8 @@ SNS Media List 是低併發、自架式媒體整理、預覽與下載工具，�
 - 支援 Instagram 單篇貼文、Reel、`/stories/<username>/<numeric-media-id>/` 精確單則 Story、`/stories/<username>/` 帳號當下 Story 清單，以及 X/Twitter 單篇狀態貼文。
 - 媒體包含圖片、漸進式影片及 X 動畫 GIF，保留來源順序。單則 Story 只輸出一個主要媒體。
 - 批次分析最多 5 個 URL，由前端循序呼叫單筆 API；不要將其改成後端批次工作佇列。
-- 選取下載為逐項交給瀏覽器；UI 的「已開始下載」不等於檔案已完成保存。
+- 「下載選取項目」依能力而非品牌選擇模式：安全環境支援資料夾 picker／寫入／串流時，每批選一次資料夾並逐檔串流寫入，body 完整且 close 成功才計為已儲存；否則逐項交給瀏覽器原生下載，「已開始下載」不等於已保存。個別「下載」按鈕始終為原生方式；不保存目錄 handle、不新增前端 Range resume 或自動重試，細節見 `OPERATIONS.md` 的「資料夾下載與手機驗收」。
+- 桌面書籤工具只把來源頁網址以 fragment 帶到固定服務入口並預填單筆欄位；不自動分析、選取、檢視或下載，也不讀取來源頁內容或 Cookie。
 - Story 清單預設及最高 20 則，較低 operator 上限仍生效；超量整次拒絕、提醒改貼單則，不截斷或核發部分 token。逐則保留自己的 media ID／檔名，不使用帳號 reel ID。
 - 不建立使用者帳號、歷史記錄或永久完整媒體儲存；目前不提供帳號 feed、跨帳號 Stories tray、歷史／過期 Stories、Highlights、ZIP、轉碼或 HLS/DASH 合併。
 - 匿名存取受平台限制；operator 可透過唯讀 Cookie 檔提供對應平台的帳號可見權限。服務沒有個別使用者權限隔離。
@@ -37,12 +38,12 @@ SNS Media List 是低併發、自架式媒體整理、預覽與下載工具，�
 | `openspec/specs/` | 各能力的正式需求與情境 |
 | `openspec/changes/` | 變更提案及任務；`archive/` 保存歷史變更 |
 | `src/sns_media_list/config.py` | `Settings`、預設值及環境變數驗證 |
-| `Dockerfile`、`docker-compose.yaml`、`docker-compose.*-auth.yaml` | 映像、執行限制與各平台 Cookie overlay |
+| `Dockerfile`、`docker-compose.yaml`、`docker-compose.*-auth.yaml`、`docker-compose.mcp.yaml` | 映像、執行限制、各平台 Cookie overlay 與選用 MCP overlay |
 | `deploy/nginx/sns-media-list.conf` | Reverse proxy、驗證與串流設定範例 |
 
 處理有對應 OpenSpec change 的任務時，先閱讀其 proposal、design、specs 與 tasks（若存在），依任務更新完成狀態。不要把歷史 archive 當成目前待辦，也不要因一般小修擅自建立或封存 change。若規格與實作不一致，明確指出差異，不以猜測擴大修改。
 
-目前 `.gitignore` 忽略 `openspec/`、`docs/`、`.opencode/` 與 `.superpowers/`；它們可能只存在於本機，新 checkout 不保證有這些資料。先確認檔案存在與 Git 追蹤狀態；修改被忽略的文件時需在交付中註明，不能把它當成已納入版本控制，也不要自行 force-add 或修改 ignore 規則。
+目前 `.gitignore` 忽略 `openspec/`、`docs/`、`.opencode/`、`.superpowers/` 與 `.agents/`；它們可能只存在於本機，新 checkout 不保證有這些資料。`.gitignore` 雖也列出 `AGENTS.md`，但本檔已被 Git 追蹤，修改仍會出現在 diff 中。先確認檔案存在與 Git 追蹤狀態；修改被忽略的文件時需在交付中註明，不能把它當成已納入版本控制，也不要自行 force-add 或修改 ignore 規則。
 
 ## 4. 架構與責任分工
 
@@ -55,17 +56,21 @@ SNS Media List 是低併發、自架式媒體整理、預覽與下載工具，�
 | `api/limits.py`、`api/middleware.py` | 併發與請求次數限制、入口安全邊界 |
 | `url_validation.py` | 支援的平台 URL 與精確目標驗證 |
 | `services/extraction_service.py` | 驗證、擷取、正規化與 token 核發的協調 |
-| `services/extraction_coordinator.py`、`mcp/` | REST／MCP 共享擷取 budget，以及可選 MCP transport／公開結果映射 |
+| `services/extraction_coordinator.py` | REST／MCP 共享擷取 budget |
+| `mcp/` | 可選 MCP：`server.py` SDK server factory、`tools.py` 唯一 `extract_media` tool 與公開錯誤、`models.py` 公開結果模型、`middleware.py` ASGI 前置限流與回應隱私邊界 |
 | `extractor/gallery_dl.py` | 受限 `gallery-dl` subprocess、DataJob 解析、錯誤分類與平台 Cookie 設定 |
 | `extractor/normalizer.py` | 擷取結果正規化、媒體順序、檔名與 metadata |
 | `network/dns.py`、`network/connect_proxy.py` | DNS/IP 政策與 extractor CONNECT proxy |
 | `network/media_client.py` | 受限 upstream 媒體連線與讀取 |
+| `network/media_viewing.py`、`services/media_viewing.py` | 原始檢視的 typed Range、被動 inline headers，以及有界檔頭探測協調 |
 | `security/tokens.py` | 有容量、TTL 與用途限制的記憶體 token store |
 | `services/thumbnail.py`、`services/thumbnail_cache.py` | 受限縮圖生成、快取與併發協調 |
 | `models.py`、`errors.py`、`logging_config.py` | 公開／私有資料模型、錯誤契約與安全日誌 |
-| `static/index.html`、`static/app.js`、`static/styles.css` | 使用者介面、前端 queue、預覽與下載互動 |
+| `static/index.html`、`static/app.js`、`static/styles.css` | 使用者介面、前端 queue、預覽與下載（含資料夾串流）互動 |
+| `static/viewer.js` | 原生 `dialog` 原始媒體檢視器、共享選取與可取消預檢 |
+| `static/bookmarklet.js` | 桌面書籤碼產生與 `#source=` fragment 解析 |
 
-主要流程：`POST /api/extractions` → URL 驗證 → extractor → 正規化 → token 核發 → 前端透過 `/api/media/{token}/preview` 或 `/api/media/{token}/download` 取得媒體。下載另有 `HEAD` 預檢；`GET /healthz` 不應存取外部平台。
+主要流程：`POST /api/extractions` → URL 驗證 → extractor → 正規化 → token 核發 → 前端透過 `/api/media/{token}/preview` 或 `/api/media/{token}/download` 取得媒體，檢視器以同一 download token 呼叫 `/api/media/{token}/view`。下載與檢視另有 `HEAD` 預檢；`GET /healthz` 不應存取外部平台。
 
 修改時沿用依賴注入與既有分層。網路政策放在 `network/`，擷取格式相容性放在 `extractor/`，不要將各層邏輯堆入 route 或前端。
 
@@ -83,7 +88,7 @@ SNS Media List 是低併發、自架式媒體整理、預覽與下載工具，�
 - **下載與預覽期限分開：** Attachment download 使用 connect／read idle timeout 與 byte limit，不套用整檔期限；`media_response_timeout_seconds` 用於 CDN preview 與 generated thumbnail。X 與 Instagram 漸進式影片在 initial `200`、合法非 chunked `Content-Length`、部分 bytes 已交付且明確提前 EOF 時，最多嘗試一次經驗證的 Range resume；不對圖片、preview、未知／chunked 長度、timeout、驗證失敗或取消增加續傳或一般重試。
 - **中斷與完成語意：** Headers 已送出而 body 未完成時，保留固定 `StreamAborted` 中止流程，不補送成功結尾或第二份錯誤 response。下載僅在最後 body 與 cleanup 均成功後記錄 completed；保留唯一 terminal event，且 `bytes_streamed` 不代表瀏覽器落盤 bytes。
 - **預覽有界限：** 優先使用可信 CDN poster，缺少時預設使用 `/placeholder.svg`。Generated preview 預設關閉；啟用時保留輸入／輸出大小、時間、併發及快取上限。
-- **原始檢視獨立：** `/api/media/{token}/view` 沿用有效 download token，不新增 purpose／token 或改 extraction schema；HEAD 204 僅驗當下授權且不連外，不證明可顯示或播放。僅 view 影片接受 typed single Range，不能放寬 download／preview caller Range。只允許 signature 相符的 JPEG、PNG、GIF、WebP、MP4、WebM；非零／短片段的最多 512-byte prefix probe 與片段共用一個 lease、完整 `media_response_timeout_seconds` 與累計 byte budget，不重試、續傳、轉碼或快取完整來源。保留 passive inline headers、view token 日誌遮蔽與既有網路政策，檢視不算 attachment completed。
+- **原始檢視獨立：** `/api/media/{token}/view` 沿用有效 download token，不新增 purpose／token、不刷新 TTL 或改 extraction schema；HEAD 204 不連外，不證明可顯示或播放。僅 view 影片接受 typed single Range，不能放寬 download／preview 的 caller Range。檢視受 MIME／signature 白名單、單一 lease、完整 response deadline 與 byte budget 約束，不重試、續傳、轉碼或快取完整來源；保留 passive inline headers 與 token 日誌遮蔽，檢視不算 attachment completed。格式清單、probe 大小與錯誤碼見 `OPERATIONS.md` 的「原始媒體檢視政策」。
 - **部署限制：** 維持 UID/GID 10001、唯讀 root filesystem、bounded tmpfs、loopback port 與無永久媒體 volume 的設計。
 
 `secrets/` 與真實 Cookie 檔不是一般探索資料；不要將其內容加入程式、測試 fixture、文件或建置 context。平台實測依 `OPERATIONS.md` 使用 owner-controlled 內容。
@@ -92,7 +97,7 @@ SNS Media List 是低併發、自架式媒體整理、預覽與下載工具，�
 
 - 區分公開錯誤 `code`（日誌中的 `reason_code`）、server-side `failure_stage` 與 `extractor_diagnostics`；後兩者不加入公開 API body、headers 或前端。Route 只傳遞縮減後的 metadata，builder／formatter 各自執行白名單正規化。
 - gallery-dl 可能退出碼為 `0`，但合法 DataJob 內含 error record；零退出不等於擷取成功。保留第一筆 error 的證據來源，不能混合後續 error 或 stderr 推測原因。
-- `extractor_http_statuses` 僅從移除 URL 後的明確 HTTP／status 前綴或固定配對原因片語取得，去重升冪且最多八個。已支援無前綴的 `500 Internal Server Error`、`502 Bad Gateway`、`503 Service Unavailable`、`504 Gateway Timeout`；裸數字、Story ID 與 URL／query 不形成證據，完整規則見 `OPERATIONS.md`。
+- `extractor_http_statuses` 僅從移除 URL 後的明確 HTTP／status 前綴或固定配對的原因片語取得，去重、升冪、有數量上限；裸數字、Story ID 與 URL／query 不形成證據。支援的片語與上限見 `OPERATIONS.md` 的「Extractor diagnostic 欄位」。
 - 上游 HTTP 500 與本服務 `extraction_failed` 的 HTTP 502 是不同層次；不要為顯示上游狀態而修改公開錯誤契約。缺少狀態碼不代表沒有 HTTP failure，Cookie 已配置、瀏覽器可見或一般貼文成功也不能證明 Story API 的 session 有效。
 - 修正 classifier 或診斷辨識時使用合成 fixture，涵蓋來源、公開分類、日誌去識別與錯配／URL-only 等反例。真實事件的安全觀察值可用於定位，原始 Story URL、Cookie 與 extractor output 不得寫入測試或文件。
 
@@ -107,9 +112,16 @@ uv run uvicorn sns_media_list.app:create_app --factory --host 127.0.0.1 --port 8
 
 預設介面位於 `http://127.0.0.1:8000`，內部 extractor proxy 為 `127.0.0.1:8765`；避免同時啟動使用相同 port 的 instance。
 
-前端沒有 Node.js 打包流程，直接修改 `src/sns_media_list/static/`。保留繁體中文文案、鍵盤操作、可存取狀態，以及非同步請求取消與過期結果防護。
+前端沒有 Node.js 打包流程，直接修改 `src/sns_media_list/static/`。保留繁體中文文案、鍵盤操作、可存取狀態，以及非同步請求取消與過期結果防護。前端互動維持以下既有慣例：
 
-需要瀏覽器測試時先安裝 Chromium：
+- **可區分的可存取名稱：** 批次結果中重複出現的控制項（檢視、下載、複製檔名、重新分析、來源連結、選取操作區等）在 `aria-label` 帶入項目序號與群組編號，例如 `下載項目 01，第 2 組`；新增同類控制項時沿用相同格式。
+- **焦點管理：** 驗證失敗時把焦點移回錯誤欄位，並以 `aria-describedby` 關聯提示；重新分析、預覽失敗與替換結果後保留或恢復合理的鍵盤定位。開頁或書籤帶入來源時不自動聚焦。
+- **檢視器：** 使用原生 `dialog` 的 `showModal()` 處理焦點隔離與捲動鎖定，不自行實作 focus trap；關閉時回到觸發元素或指定的 fallback。
+- **狀態公告：** 進度與結果以既有 `role="status"`／`aria-live="polite"` 區域公告，不把逐段 bytes 或已開始下載公告成完成；未知長度不顯示虛構百分比。
+- **視覺與輸入：** 文字對比至少 4.5:1；觸控目標至少 44px；`hover: none` 裝置直接顯示原本需 hover 的資訊；動畫遵守 `prefers-reduced-motion`。
+- **測試：** 互動語意以 `tests/browser/` 的 Playwright 測試驗證，優先用 `get_by_role` 與可存取名稱定位；命名沿用 `test_*_action_names.py`、`test_*_semantics.py` 等既有分類。
+
+需要瀏覽器測試時，以專案鎖定的 Playwright CLI 安裝對應 Chromium，不另裝其他版本或全域 Playwright：
 
 ```bash
 uv run playwright install chromium
@@ -124,11 +136,12 @@ uv run playwright install chromium
 | 變更範圍 | 對應測試 |
 | --- | --- |
 | URL、模型、設定、token、extractor、網路與縮圖 | `tests/unit/` |
-| API、錯誤、限流與串流生命週期 | `tests/api/` |
-| 本機真實 HTTP 串流、下載、連線中斷與獨立 Uvicorn 日誌 | `tests/integration/` |
-| 前端互動、選取下載與批次 queue | `tests/browser/` |
+| API、錯誤、限流、串流生命週期與原始檢視 | `tests/api/` |
+| 本機真實 HTTP 串流、下載、檢視、連線中斷與獨立 Uvicorn 日誌 | `tests/integration/` |
+| MCP transport、限流、公開結果與日誌 | `tests/api/test_mcp.py`、`tests/integration/test_mcp.py`、`tests/integration/test_mcp_diagnostics.py` |
+| 前端互動、選取／資料夾下載、檢視器、書籤工具與批次 queue | `tests/browser/` |
 | Docker／Compose／Nginx 契約 | `tests/container/` |
-| README、操作指南與人工 smoke 工具 | `tests/test_readme.py`、`tests/test_operations_docs.py`、`tests/test_manual_smoke.py` |
+| README、操作指南與人工／MCP smoke 工具 | `tests/test_readme.py`、`tests/test_operations_docs.py`、`tests/test_manual_smoke.py`、`tests/test_mcp_smoke.py` |
 
 常用檢查（依影響範圍選用；純文件修改通常核對路徑、指令與相關文件測試即可）：
 
@@ -154,11 +167,24 @@ uv run python scripts/container_smoke.py
 
 # Nginx 設定變更；使用本機 Nginx 或 Docker 驗證
 uv run python scripts/check_nginx_config.py
+
+# MCP 變更；需先以 SNS_MEDIA_MCP_ENABLED=true 啟動服務，預設不存取社群平台
+uv run python scripts/mcp_smoke.py http://127.0.0.1:8000/mcp
 ```
 
 Extractor 診斷變更另驗證 `tests/unit/test_errors.py`、`tests/unit/test_logging.py`、`tests/api/test_extractions.py` 與 `tests/integration/test_extraction_diagnostics.py`，確認既有 API 契約及實際 JSON 日誌。`verify_gallery_contract.py` 會執行 contract、normalizer、quality、process 與 egress 測試，不包含上述全部日誌與 API 測試。
 
 `container_smoke.py` 使用獨立 Compose project、動態 host port 與每次執行專用 image tag，並呼叫 `scripts/container_story_diagnostics_smoke.py` 以 fake extractor／假 Cookie 驗證日誌。維持此隔離，不重標記共享映像或替換運作中的 service；smoke image 通過不能代替另一個 candidate image 的驗證結果。
+
+升級 gallery-dl 時，以下位置需在同一次變更中同步，再執行 `verify_gallery_contract.py`（其中 `tests/unit/test_gallery_dl_contract.py` 會比對已安裝版本與 pin）：
+
+- `pyproject.toml` 的精確 pin 與 `uv lock` 更新後的 `uv.lock`。
+- `LICENSES/gallery-dl.txt` 的版本與 source release 連結。
+- `OPERATIONS.md`「Instagram Extractor Compatibility」中的 pinned 版本，以及其他仍寫死版本的段落；可改為不帶版本的敘述時優先改寫。
+- `tests/test_operations_docs.py` 中斷言版本字串的測試。
+- 依官方 release notes 核對 Story／Post／Reel 相容性說明是否仍成立，不以版本更新本身宣稱修復。
+
+Dockerfile 的 APK 修補 pin 另需同步 `OPERATIONS.md`「Alpine runtime 修補與版本核對」、`tests/container/test_container.py` 與 `tests/test_operations_docs.py` 的 pin 清單。
 
 相依套件或映像升級時，依 `OPERATIONS.md` 的升級及安全 gate 流程檢查 candidate image；`uv run python scripts/security_gate.py --image <candidate-image>` 需要對應映像與掃描工具。保留 pinned dependencies、映像 digest 及 `LICENSES/` notices，更新相依版本時同步維護 `uv.lock`。
 

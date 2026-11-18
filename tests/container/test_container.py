@@ -48,6 +48,7 @@ def test_runtime_apk_pins_apply_only_the_approved_security_remediation() -> None
     runtime = dockerfile.split("FROM ${PYTHON_IMAGE}")[-1]
     for package in (
         "brotli-libs=1.2.1-r0",
+        "krb5-libs=1.22.3-r0",
         "libexpat=2.10.0-r0",
         "libx11=1.8.14-r0",
         "musl=1.2.6-r3",
@@ -266,12 +267,13 @@ def test_nginx_syntax_check_has_local_and_pinned_container_paths() -> None:
     assert "nginx@sha256:" in checker
 
 
-def test_stack_cookie_setting_matches_the_mounted_filename() -> None:
-    """Verify the deployment stack uses the dot-separated Instagram cookie filename."""
-    stack = (PROJECT_ROOT / "stack").read_text()
+def test_instagram_cookie_setting_matches_the_mounted_filename() -> None:
+    """驗證 Instagram Cookie overlay 的設定路徑與掛載檔名一致，使用點號分隔檔名。"""
+    override = (PROJECT_ROOT / "docker-compose.instagram-auth.yaml").read_text()
 
-    assert "SNS_MEDIA_INSTAGRAM_COOKIE_FILE: /run/secrets/instagram.cookies.txt" in stack
-    assert "SNS_MEDIA_INSTAGRAM_COOKIE_FILE: /run/secrets/instagram-cookies.txt" not in stack
+    assert "target: /run/secrets/instagram.cookies.txt" in override
+    assert "SNS_MEDIA_INSTAGRAM_COOKIE_FILE: /run/secrets/instagram.cookies.txt" in override
+    assert "instagram-cookies.txt" not in override
 
 
 def test_story_diagnostics_smoke_uses_external_readonly_fixtures() -> None:
